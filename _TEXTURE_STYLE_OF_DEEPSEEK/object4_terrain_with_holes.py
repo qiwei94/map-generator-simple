@@ -38,7 +38,8 @@ def build_terrain_with_water_holes_manifold(elevation_grid: np.ndarray,
                                              scale: float,
                                              water_gdf: gpd.GeoDataFrame,
                                              roads_gdf: gpd.GeoDataFrame = None,
-                                             enable_roads_fusion: bool = False) -> Dict[str, Any]:
+                                             enable_roads_fusion: bool = False,
+                                             bridges_only: bool = True) -> Dict[str, Any]:
     """实现对象4：地形+道路融合+水体镂空（Manifold布尔运算）。
 
     Args:
@@ -50,6 +51,7 @@ def build_terrain_with_water_holes_manifold(elevation_grid: np.ndarray,
         water_gdf: 水体GeoDataFrame（已投影到local坐标）
         roads_gdf: 道路GeoDataFrame（可选）
         enable_roads_fusion: 是否启用道路融合
+        bridges_only: 是否只处理桥梁（道路跨越水体的部分）
 
     Returns:
         {
@@ -99,7 +101,13 @@ def build_terrain_with_water_holes_manifold(elevation_grid: np.ndarray,
     # ========================================
     if enable_roads_fusion and roads_gdf is not None and len(roads_gdf) > 0:
         print("\n[Step 2] 道路布尔并集融合...")
-        roads_mesh = build_deepseek_roads(roads_gdf, terrain_mesh, area_km2, scale)
+        print(f"  桥梁过滤模式: {bridges_only}")
+
+        roads_mesh = build_deepseek_roads(
+            roads_gdf, terrain_mesh, area_km2, scale,
+            water_gdf=water_gdf,  # 传入水体数据用于桥梁过滤
+            filter_bridges_only=bridges_only  # 只处理桥梁
+        )
 
         if roads_mesh is not None and len(roads_mesh.faces) > 0:
             stats["roads_faces"] = len(roads_mesh.faces)
@@ -107,10 +115,10 @@ def build_terrain_with_water_holes_manifold(elevation_grid: np.ndarray,
 
             roads_m = trimesh_to_manifold(roads_mesh)
             terrain_m = terrain_m.union(roads_m)
-            stats["boolean_ops"].append("terrain ∪ roads")
+            stats["boolean_ops"].append("terrain ∪ roads (bridges only)")
             print("  道路融合完成")
         else:
-            print("  道路数据为空，跳过融合")
+            print("  过滤后道路数据为空，跳过融合")
     else:
         print("\n[Step 2] 道路融合: 跳过")
 

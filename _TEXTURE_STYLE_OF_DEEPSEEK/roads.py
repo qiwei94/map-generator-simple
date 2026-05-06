@@ -2,6 +2,10 @@
 
 Roads are raised 0.51mm above terrain surface, matching reference model placement.
 Uses 2.5x width multiplier for visual prominence.
+
+Bridge filtering support:
+- filter_bridges_only=True: only keep road segments crossing water (bridges)
+- Requires water_gdf parameter for bridge detection
 """
 
 import numpy as np
@@ -10,6 +14,7 @@ from shapely.geometry import LineString, MultiLineString
 import geopandas as gpd
 
 from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.processors.terrain import sample_terrain_z
+from _TEXTURE_STYLE_OF_DEEPSEEK.bridge_filter import filter_bridges_only as filter_bridge_roads
 
 from _TEXTURE_STYLE_OF_DEEPSEEK.config import (
     ROAD_THICKNESS_MM,
@@ -168,19 +173,31 @@ def _build_ribbon(line: LineString, width_m: float,
 def build_deepseek_roads(gdf: gpd.GeoDataFrame,
                          terrain_mesh: trimesh.Trimesh,
                          area_km2: float = 0,
-                         scale: float = 1.0) -> trimesh.Trimesh:
+                         scale: float = 1.0,
+                         water_gdf: gpd.GeoDataFrame = None,
+                         filter_bridges_only: bool = False) -> trimesh.Trimesh:
     """Build deepseek-style road ribbons.
 
     Args:
         gdf: GeoDataFrame of road LineStrings in local UTM meters
         terrain_mesh: scaled terrain mesh (model mm)
         area_km2: area for LOD filtering
+        water_gdf: water GeoDataFrame for bridge filtering (optional)
+        filter_bridges_only: if True, only build bridges crossing water
 
     Returns:
         Merged trimesh of all road ribbons, or None if no roads.
     """
     if gdf is None or len(gdf) == 0:
         return None
+
+    # Bridge filtering (only keep road segments crossing water)
+    if filter_bridges_only and water_gdf is not None and len(water_gdf) > 0:
+        print("\n[道路处理] 启用桥梁过滤模式...")
+        gdf = filter_bridge_roads(gdf, water_gdf, extract_water_crossing_only=True)
+        if len(gdf) == 0:
+            print("  过滤后无桥梁道路，返回空")
+            return None
 
     area_class = get_area_class(area_km2)
     highway_filter = ROAD_FILTER.get(area_class, None)

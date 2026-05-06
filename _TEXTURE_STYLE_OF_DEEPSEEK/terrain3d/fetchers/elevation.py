@@ -281,8 +281,8 @@ def _fetch_elevation_grid_from_srtm(south: float, west: float, north: float,
 def _grid_cache_path(south: float, west: float, north: float, east: float,
                      resolution: int) -> str:
     """Generate cache file path for an elevation grid."""
-    cache_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
-        os.path.abspath(__file__)))), "cache", "grids")
+    cache_base = select_cache_path(10)  # 预估网格缓存约10MB
+    cache_dir = os.path.join(cache_base, "grids")
     os.makedirs(cache_dir, exist_ok=True)
     key = f"{south:.6f}_{west:.6f}_{north:.6f}_{east:.6f}_{resolution}"
     return os.path.join(cache_dir, f"elev_{key}.npy")
