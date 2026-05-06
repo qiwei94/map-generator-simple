@@ -10,7 +10,6 @@ ENV/
 
 # Output and intermediate files
 output/
-*_TEXTURE_STYLE_OF_DEEPSEEK/
 
 # OS
 .DS_Store
