@@ -29,14 +29,47 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
-CACHE_INDEX_PATH = "F:/map_gen_cache/_cache_index.json"
+def _get_cache_index_path():
+    """获取缓存索引文件路径，支持跨平台和环境变量"""
+    env_cache_dir = os.environ.get("MAP_GEN_CACHE_DIR")
+    if env_cache_dir:
+        return os.path.join(env_cache_dir, "_cache_index.json")
+    
+    # 平台相关默认路径
+    if os.name == 'nt':  # Windows
+        return "F:/map_gen_cache/_cache_index.json"
+    else:  # macOS / Linux
+        return os.path.expanduser("~/map_gen_cache/_cache_index.json")
 
-# Cache file roots - each city entry's "cache_files" paths are relative to these
-CACHE_FILE_ROOTS = {
-    "city": "F:/map_gen_cache/city/cache/osm",
-    "attaraction": "F:/map_gen_cache/attaraction/cache/osm",
-    "project": "F:/map_gen_cache/project_cache/osm",
-}
+CACHE_INDEX_PATH = _get_cache_index_path()
+
+
+def _get_cache_file_roots():
+    """获取缓存文件根目录，支持跨平台和环境变量"""
+    env_cache_dir = os.environ.get("MAP_GEN_CACHE_DIR")
+    if env_cache_dir:
+        return {
+            "city": os.path.join(env_cache_dir, "city/cache/osm"),
+            "attaraction": os.path.join(env_cache_dir, "attaraction/cache/osm"),
+            "project": os.path.join(env_cache_dir, "project_cache/osm"),
+        }
+    
+    # 平台相关默认路径
+    if os.name == 'nt':  # Windows
+        return {
+            "city": "F:/map_gen_cache/city/cache/osm",
+            "attaraction": "F:/map_gen_cache/attaraction/cache/osm",
+            "project": "F:/map_gen_cache/project_cache/osm",
+        }
+    else:  # macOS / Linux
+        home_cache = os.path.expanduser("~/map_gen_cache")
+        return {
+            "city": os.path.join(home_cache, "city/cache/osm"),
+            "attaraction": os.path.join(home_cache, "attaraction/cache/osm"),
+            "project": os.path.join(home_cache, "project_cache/osm"),
+        }
+
+CACHE_FILE_ROOTS = _get_cache_file_roots()
 
 # ---------------------------------------------------------------------------
 # Tag type -> Overpass tag filter mapping

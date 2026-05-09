@@ -17,11 +17,31 @@ import argparse
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+
+def _get_cache_dirs():
+    """获取OSM缓存目录列表，支持跨平台和环境变量"""
+    env_cache_dir = os.environ.get("MAP_GEN_CACHE_DIR")
+    if env_cache_dir:
+        return [
+            os.path.join(env_cache_dir, "attaraction/cache/osm"),
+            os.path.join(env_cache_dir, "project_cache/osm"),
+        ]
+    
+    # 平台相关默认路径
+    if os.name == 'nt':  # Windows
+        return [
+            "F:/map_gen_cache/attaraction/cache/osm",
+            "F:/map_gen_cache/project_cache/osm",
+        ]
+    else:  # macOS / Linux
+        home_cache = os.path.expanduser("~/map_gen_cache")
+        return [
+            os.path.join(home_cache, "attaraction/cache/osm"),
+            os.path.join(home_cache, "project_cache/osm"),
+        ]
+
 # 缓存目录列表
-CACHE_DIRS = [
-    "F:/map_gen_cache/attaraction/cache/osm",
-    "F:/map_gen_cache/project_cache/osm",
-]
+CACHE_DIRS = _get_cache_dirs()
 
 INDEX_FILE = "osm_cache_index.json"
 

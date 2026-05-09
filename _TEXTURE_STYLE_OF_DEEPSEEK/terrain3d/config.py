@@ -24,14 +24,35 @@ CACHE_TTL_SECONDS = -1  # -1 = never expire; positive = TTL in seconds
 
 # --- Multi-path Cache Support ---
 # 多路径缓存配置，按优先级排序（第一个优先使用）
-# 支持绝对路径和相对路径
-CACHE_PATHS = [
-    "F:/map_gen_cache/project_cache",  # F盘主缓存（优先使用，节省C盘空间）
-    CACHE_BASE_DIR,  # C盘默认路径（向后兼容，F盘不可用时降级）
-    # 其他可选路径：
-    # "F:/map_gen_cache/attaraction/cache",  # 高速SSD缓存
-    # "F:/map_gen_cache/city/cache",         # 大容量存储
-]
+# 支持绝对路径、相对路径和环境变量
+# 优先使用环境变量 MAP_GEN_CACHE_DIR 指定的目录，否则使用默认路径
+def _build_cache_paths():
+    """构建缓存路径列表，支持跨平台和环境变量配置"""
+    paths = []
+    
+    # 1. 优先使用环境变量指定的缓存目录
+    env_cache_dir = os.environ.get("MAP_GEN_CACHE_DIR")
+    if env_cache_dir:
+        paths.append(env_cache_dir)
+    
+    # 2. 添加平台相关的默认路径
+    if os.name == 'nt':  # Windows
+        paths.extend([
+            "F:/map_gen_cache/project_cache",  # Windows F盘（如果存在）
+            "D:/map_gen_cache/project_cache",  # Windows D盘备选
+        ])
+    else:  # macOS / Linux
+        paths.extend([
+            os.path.expanduser("~/map_gen_cache/project_cache"),  # 用户目录
+            "/mnt/extra/map_gen_cache/project_cache",  # Linux 额外挂载点
+        ])
+    
+    # 3. 兜底：项目本地 cache 目录
+    paths.append(CACHE_BASE_DIR)
+    
+    return paths
+
+CACHE_PATHS = _build_cache_paths()
 
 # 缓存分配策略：
 # "round_robin" - 轮询分配到各个路径

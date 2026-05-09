@@ -19,18 +19,50 @@ if _project_root not in sys.path:
 from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.osm import fetch_water
 
 # West Lake bounding box (tight bbox around West Lake)
-# West Lake center: 30.2424, 120.1483
+# West Lake center: 30.2424, 120.1551
 # Using a ~5km x 5km area
 WEST_LAKE_SOUTH = 30.21
 WEST_LAKE_WEST = 120.11
 WEST_LAKE_NORTH = 30.27
 WEST_LAKE_EAST = 120.19
 
-BACKUP_DIR = "F:/map_gen_cache/west_lake_water_backup"
-CACHE_DIRS = [
-    "F:/map_gen_cache/attaraction/cache/osm",
-    "F:/map_gen_cache/project_cache/osm",
-]
+
+def _get_backup_dir():
+    """获取备份目录，支持跨平台和环境变量"""
+    env_cache_dir = os.environ.get("MAP_GEN_CACHE_DIR")
+    if env_cache_dir:
+        return os.path.join(env_cache_dir, "west_lake_water_backup")
+    
+    if os.name == 'nt':  # Windows
+        return "F:/map_gen_cache/west_lake_water_backup"
+    else:  # macOS / Linux
+        return os.path.join(os.path.expanduser("~/map_gen_cache"), "west_lake_water_backup")
+
+
+def _get_cache_dirs():
+    """获取缓存目录列表，支持跨平台和环境变量"""
+    env_cache_dir = os.environ.get("MAP_GEN_CACHE_DIR")
+    if env_cache_dir:
+        return [
+            os.path.join(env_cache_dir, "attaraction/cache/osm"),
+            os.path.join(env_cache_dir, "project_cache/osm"),
+        ]
+    
+    if os.name == 'nt':  # Windows
+        return [
+            "F:/map_gen_cache/attaraction/cache/osm",
+            "F:/map_gen_cache/project_cache/osm",
+        ]
+    else:  # macOS / Linux
+        home_cache = os.path.expanduser("~/map_gen_cache")
+        return [
+            os.path.join(home_cache, "attaraction/cache/osm"),
+            os.path.join(home_cache, "project_cache/osm"),
+        ]
+
+
+BACKUP_DIR = _get_backup_dir()
+CACHE_DIRS = _get_cache_dirs()
 
 print("=" * 60)
 print("  West Lake Water Data - Backup & Re-download")

@@ -42,11 +42,34 @@ _disable_system_proxy()
 # 多路径OSM缓存配置
 # =====================================================================
 
+def _build_osm_cache_paths():
+    """构建OSM缓存路径列表，支持跨平台和环境变量配置"""
+    from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.config import select_cache_path
+    
+    paths = []
+    
+    # 1. 优先使用环境变量指定的缓存目录
+    env_cache_dir = os.environ.get("MAP_GEN_CACHE_DIR")
+    if env_cache_dir:
+        paths.append(os.path.join(env_cache_dir, "osm"))
+    
+    # 2. 添加平台相关的默认路径
+    if os.name == 'nt':  # Windows
+        paths.extend([
+            "F:/map_gen_cache/attaraction/cache/osm",
+            "F:/map_gen_cache/project_cache/osm",
+            "D:/map_gen_cache/project_cache/osm",
+        ])
+    else:  # macOS / Linux
+        paths.extend([
+            os.path.expanduser("~/map_gen_cache/attaraction/cache/osm"),
+            os.path.expanduser("~/map_gen_cache/project_cache/osm"),
+        ])
+    
+    return paths
+
 # OSM缓存路径列表（按优先级排列，第一个优先使用）
-OSM_CACHE_PATHS = [
-    "F:/map_gen_cache/attaraction/cache/osm",  # 主缓存目录（历史数据）
-    "F:/map_gen_cache/project_cache/osm",      # 项目缓存目录
-]
+OSM_CACHE_PATHS = _build_osm_cache_paths()
 
 def _get_all_osm_cache_dirs():
     """获取所有有效的OSM缓存目录"""
