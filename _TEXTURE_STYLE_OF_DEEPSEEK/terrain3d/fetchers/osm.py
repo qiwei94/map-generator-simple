@@ -230,6 +230,7 @@ def _tile_cached_fetch(tag_type: str, fetch_fn, south: float, west: float,
     Returns:
         Combined GeoDataFrame for the full bbox
     """
+    import pdb;pdb.set_trace()
     tiles = _TILE_CACHE._decompose_bbox(south, west, north, east)
 
     if not tiles:
@@ -504,6 +505,7 @@ def fetch_roads(south: float, west: float, north: float, east: float,
     Returns:
         GeoDataFrame with road LineString geometries
     """
+    import pdb;pdb.set_trace()
     if ttl_seconds is None:
         ttl_seconds = CACHE_TTL_SECONDS
     _setup_cache(use_cache, ttl_seconds)

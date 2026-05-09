@@ -3,6 +3,7 @@
 import os
 import sys
 import time
+import logging
 import numpy as np
 import trimesh
 import json
@@ -16,6 +17,29 @@ if hasattr(sys.stdout, 'reconfigure'):
 if hasattr(sys.stderr, 'reconfigure'):
     sys.stderr.reconfigure(encoding='utf-8')
 
+# =====================================================================
+# Logging Configuration
+# =====================================================================
+OUTPUT_DIR = "output/chicago"
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+LOG_FILE = os.path.join(OUTPUT_DIR, "obj4_detailed_log.json")
+OSM_LOG_FILE = os.path.join(OUTPUT_DIR, "osm_fetch.log")
+
+# Configure logging for all modules (including osm.py, elevation.py, etc.)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(OSM_LOG_FILE, encoding='utf-8'),
+        logging.StreamHandler()  # Also output to console
+    ]
+)
+
+# Set specific log levels for noisy modules
+logging.getLogger("osmnx").setLevel(logging.WARNING)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+
 from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.processors.coords import bbox_to_utm, project_geodataframe
 from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.osm import fetch_water, fetch_roads
 from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.elevation import fetch_elevation_grid
@@ -26,14 +50,11 @@ from _TEXTURE_STYLE_OF_DEEPSEEK.config import compute_scale, WATERWAY_WIDTHS
 LAT1, LON1 = 41.80, -87.75
 LAT2, LON2 = 42.00, -87.55
 CITY_NAME = "chicago"
-OUTPUT_DIR = "output/chicago"
-LOG_FILE = os.path.join(OUTPUT_DIR, "obj4_detailed_log.json")
 
 print("=" * 70)
 print("  Chicago Object 4: Terrain + Water Holes (DETAILED LOG)")
 print("=" * 70)
 
-os.makedirs(OUTPUT_DIR, exist_ok=True)
 log_data = {"steps": [], "errors": []}
 
 def log_step(step_name, details):
@@ -111,7 +132,7 @@ print(f"  Water features: {len(water_gdf)}")
 # =====================================================================
 print(f"\n[Stage 3] Fetching road data (for bridge fusion)...")
 t3 = time.time()
-import pdb;pdb.set_trace()
+
 roads_gdf = fetch_roads(south, west, north, east)
 roads_gdf = project_geodataframe(roads_gdf, bbox["utm_crs"], bbox["origin"], clip_bbox=bbox["utm_bbox"])
 
