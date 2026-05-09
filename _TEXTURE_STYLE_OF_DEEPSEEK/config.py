@@ -129,8 +129,9 @@ WATER_LINE_TAGS = {"waterway": True}
 WATER_MAX_EDGE_M = 100.0
 
 WATERWAY_WIDTHS = {
-    "river": 60,
-    "canal": 30,
+    "river": 60,      # Default width for rivers without OSM width tag
+    "riverbank": 800, # Very wide river sections
+    "canal": 30,      # Canals and smaller waterways
     "stream": 12,
     "drain": 6,
     "ditch": 4,

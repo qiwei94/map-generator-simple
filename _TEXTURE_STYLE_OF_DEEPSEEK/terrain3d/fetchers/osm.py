@@ -10,6 +10,7 @@ import osmnx as ox
 
 from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.config import CACHE_TTL_SECONDS, CACHE_BASE_DIR, get_water_high_detail, select_cache_path
 from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.utils import cache as cache_mgr
+from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.cache import TileCache
 
 logger = logging.getLogger(__name__)
 
@@ -25,33 +26,116 @@ OVERPASS_ENDPOINTS = [
     "https://overpass-api.de/api",             # 4. Overpass 官方主站
 ]
 
-# 代理配置: 通过环境变量 HTTP_PROXY / HTTPS_PROXY 设置
-# 示例: export HTTPS_PROXY=http://127.0.0.1:7890
+# 代理配置: 默认禁用系统代理，直接访问Overpass API
+# 中国大陆直接访问OSM通常可行，系统代理可能导致连接问题
+def _disable_system_proxy():
+    """禁用系统代理，让osmnx直接访问Overpass API"""
+    # 清除所有代理环境变量
+    for var in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy"]:
+        if var in os.environ:
+            del os.environ[var]
+    logger.info("System proxy disabled for direct Overpass access")
 
-def _apply_proxy_if_configured():
-    """如果配置了代理,则应用到 OSMnx"""
-    proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
-    if proxy:
-        os.environ["http_proxy"] = proxy
-        os.environ["https_proxy"] = proxy
-        logger.info(f"Proxy configured: {proxy}")
+_disable_system_proxy()
 
-_apply_proxy_if_configured()
+# =====================================================================
+# 多路径OSM缓存配置
+# =====================================================================
 
-# OSM cache: support multi-path cache
+# OSM缓存路径列表（按优先级排列，第一个优先使用）
+OSM_CACHE_PATHS = [
+    "F:/map_gen_cache/attaraction/cache/osm",  # 主缓存目录（历史数据）
+    "F:/map_gen_cache/project_cache/osm",      # 项目缓存目录
+]
+
+def _get_all_osm_cache_dirs():
+    """获取所有有效的OSM缓存目录"""
+    valid_dirs = []
+    for d in OSM_CACHE_PATHS:
+        if os.path.isdir(d):
+            valid_dirs.append(d)
+    return valid_dirs
+
+def _find_cached_file_in_all_dirs(cache_key: str) -> str:
+    """在所有缓存目录中查找缓存文件
+    
+    Args:
+        cache_key: osmnx生成的缓存文件名（hash key）
+    
+    Returns:
+        找到的缓存文件路径，如果都没找到返回None
+    """
+    for cache_dir in _get_all_osm_cache_dirs():
+        cache_file = os.path.join(cache_dir, cache_key)
+        if os.path.isfile(cache_file):
+            logger.info(f"Found cached file in {cache_dir}: {cache_key}")
+            return cache_file
+    return None
+
+def _ensure_cache_in_primary_dir(cache_key: str):
+    """确保缓存文件在主目录中存在
+    
+    如果缓存文件在其他目录找到，复制到主目录
+    """
+    primary_dir = _get_osm_cache_dir()
+    primary_file = os.path.join(primary_dir, cache_key)
+    
+    if os.path.isfile(primary_file):
+        return  # 主目录已有
+    
+    # 在其他目录查找
+    found_file = _find_cached_file_in_all_dirs(cache_key)
+    if found_file and found_file != primary_file:
+        # 复制到主目录
+        import shutil
+        os.makedirs(primary_dir, exist_ok=True)
+        shutil.copy2(found_file, primary_file)
+        logger.info(f"Copied cache from {found_file} to {primary_file}")
+
+# OSM cache: support multi-path cache - select best cache dir
 def _get_osm_cache_dir():
-    """获取OSM缓存目录（支持多路径）"""
-    cache_base = select_cache_path(100)  # 预估OSM缓存约100MB
-    return os.path.join(cache_base, "osm")
+    """获取OSM缓存目录（优先使用缓存最多的目录）"""
+    # 统计每个目录的缓存文件数量
+    best_dir = None
+    best_count = 0
+    
+    for d in OSM_CACHE_PATHS:
+        if os.path.isdir(d):
+            count = len([f for f in os.listdir(d) if f.endswith('.json')])
+            if count > best_count:
+                best_count = count
+                best_dir = d
+    
+    # 如果没有找到有效目录，使用默认路径
+    if best_dir is None:
+        cache_base = select_cache_path(100)
+        best_dir = os.path.join(cache_base, "osm")
+        os.makedirs(best_dir, exist_ok=True)
+    
+    logger.info(f"Using OSM cache dir: {best_dir} ({best_count} cached files)")
+    return best_dir
 
 _OSM_CACHE_DIR = _get_osm_cache_dir()
 
 # Use Overpass API settings for reliability
 ox.settings.use_cache = True
 ox.settings.cache_folder = _OSM_CACHE_DIR
-ox.settings.timeout = 180
+ox.settings.timeout = 30  # shorter timeout: city cache is primary fallback
 # 设置默认镜像 (第一个)
 ox.settings.overpass_url = OVERPASS_ENDPOINTS[0]
+
+# =====================================================================
+# 瓦片缓存 (Tile Cache) — 新数据使用坐标瓦片模式
+# =====================================================================
+# 存量数据仍由 OSMnx SHA-1 hash 缓存管理（不受影响）
+# 瓦片缓存路径: {cache_base}/tiles/{tag_type}/{坐标}.geojson
+
+_TILE_CACHE = TileCache(select_cache_path(0))
+
+
+def get_tile_cache() -> TileCache:
+    """获取全局 TileCache 实例，供外部使用（如索引重建）。"""
+    return _TILE_CACHE
 
 
 def _retry_with_fallback(func, max_retries_per_endpoint=2):
@@ -119,6 +203,122 @@ def _setup_cache(use_cache: bool, ttl_seconds: int):
 def _restore_cache():
     """Re-enable osmnx cache after a fetch."""
     ox.settings.use_cache = True
+
+
+def _tile_cached_fetch(tag_type: str, fetch_fn, south: float, west: float,
+                       north: float, east: float,
+                       rate_limit: float = 0.5,
+                       **kwargs) -> gpd.GeoDataFrame:
+    """Grid-aligned tile fetching with tile cache.
+
+    New data is fetched as grid-aligned tiles and saved to the tile cache.
+    Legacy OSMnx SHA-1 hash cache remains active as a second-level cache.
+
+    Resolution order:
+        1. Tile cache (coordinate key, self-indexing)  ← fastest
+        2. City cache loader (raw Overpass JSON files)  ← fast, no network
+        3. OSMnx hash cache (SHA-1, exact URL match)   ← transparent
+        4. Overpass API fetch                          ← slow, may be unavailable
+
+    Args:
+        tag_type: Cache subdirectory name (e.g. 'building', 'road', 'water')
+        fetch_fn: Chunk fetch function (e.g. _fetch_buildings_chunk)
+        south, west, north, east: WGS84 bounding box
+        rate_limit: Seconds to wait between API calls
+        **kwargs: Forwarded to fetch_fn
+
+    Returns:
+        Combined GeoDataFrame for the full bbox
+    """
+    tiles = _TILE_CACHE._decompose_bbox(south, west, north, east)
+
+    if not tiles:
+        logger.warning("No tiles produced for bbox (%.4f, %.4f, %.4f, %.4f)",
+                       south, west, north, east)
+        return gpd.GeoDataFrame()
+
+    logger.info("Tile cache: %d tiles for bbox (%.4f, %.4f, %.4f, %.4f)",
+                len(tiles), south, west, north, east)
+
+    results = []
+    n_hit = 0
+    n_miss = 0
+
+    # --- Bulk load from city cache for the full bbox — much faster than per-tile ---
+    # If many tiles will miss, load everything once and distribute.
+    misses = []
+    for s, w, n, e in tiles:
+        gdf = _TILE_CACHE.get(tag_type, s, w, n, e)
+        if gdf is not None:
+            n_hit += 1
+            results.append(gdf)
+        else:
+            misses.append((s, w, n, e))
+
+    # If there are misses, try bulk city cache load
+    if misses:
+        n_miss = len(misses)
+        try:
+            from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.city_cache_loader import (
+                load_features,
+            )
+            from shapely import box
+
+            bulk_gdf = load_features(tag_type, south, west, north, east)
+
+            if not bulk_gdf.empty:
+                # Distribute bulk data to each missing tile
+                logger.info(
+                    "Distributing %d features across %d tiles...",
+                    len(bulk_gdf), len(misses),
+                )
+                for s, w, n, e in misses:
+                    tile_poly = box(w, s, e, n)
+                    tile_mask = bulk_gdf.intersects(tile_poly)
+                    if tile_mask.any():
+                        tile_gdf = bulk_gdf[tile_mask].copy()
+                        # Clip geometries to tile bbox
+                        tile_gdf["geometry"] = tile_gdf.geometry.intersection(
+                            tile_poly
+                        )
+                        tile_gdf = tile_gdf[~tile_gdf.geometry.is_empty].copy()
+                        _TILE_CACHE.put(tag_type, s, w, n, e, tile_gdf)
+                        results.append(tile_gdf)
+                        n_miss -= 1  # was resolved from bulk load
+                logger.info(
+                    "Bulk city cache: resolved %d/%d tiles",
+                    len(misses) - n_miss, len(misses),
+                )
+
+        except Exception as cache_err:
+            logger.debug("City cache bulk error: %s", cache_err)
+
+        # For remaining misses, try per-tile from Overpass API
+        for s, w, n, e in misses:
+            # Check if this tile was already resolved
+            gdf = _TILE_CACHE.get(tag_type, s, w, n, e)
+            if gdf is not None:
+                continue
+
+            try:
+                gdf = fetch_fn(south=s, west=w, north=n, east=e, **kwargs)
+            except Exception:
+                gdf = None
+
+            if gdf is not None and not gdf.empty:
+                _TILE_CACHE.put(tag_type, s, w, n, e, gdf)
+                results.append(gdf)
+
+            time.sleep(rate_limit)
+
+    if n_miss > 0:
+        logger.info("Tile cache: %d hit, %d miss, %d total",
+                    n_hit, n_miss, len(tiles))
+
+    if not results:
+        return gpd.GeoDataFrame()
+
+    return pd.concat(results, ignore_index=True)
 
 
 def _make_bbox(south, west, north, east):
@@ -243,7 +443,7 @@ def fetch_buildings(south: float, west: float, north: float, east: float,
             logger.info("Fetching buildings from OSM (cache: %s, TTL: %s)", _OSM_CACHE_DIR, ttl_label)
         else:
             logger.info("Fetching buildings from OSM (cache disabled)")
-        gdf = _chunked_bbox_fetch(_fetch_buildings_chunk, south, west, north, east)
+        gdf = _tile_cached_fetch("building", _fetch_buildings_chunk, south, west, north, east)
     finally:
         _restore_cache()
 
@@ -312,7 +512,7 @@ def fetch_roads(south: float, west: float, north: float, east: float,
             logger.info("Fetching roads from OSM (cache: %s)", _OSM_CACHE_DIR)
         else:
             logger.info("Fetching roads from OSM (cache disabled)")
-        gdf = _chunked_bbox_fetch(_fetch_roads_chunk, south, west, north, east)
+        gdf = _tile_cached_fetch("road", _fetch_roads_chunk, south, west, north, east)
     finally:
         _restore_cache()
 
@@ -381,7 +581,7 @@ def fetch_water(south: float, west: float, north: float, east: float,
             logger.info("Fetching water from OSM (cache: %s)", _OSM_CACHE_DIR)
         else:
             logger.info("Fetching water from OSM (cache disabled)")
-        gdf = _chunked_bbox_fetch(_fetch_water_chunk, south, west, north, east)
+        gdf = _tile_cached_fetch("water", _fetch_water_chunk, south, west, north, east)
     finally:
         _restore_cache()
 
@@ -454,7 +654,7 @@ def fetch_vegetation(south: float, west: float, north: float, east: float,
             logger.info("Fetching vegetation from OSM (cache: %s)", _OSM_CACHE_DIR)
         else:
             logger.info("Fetching vegetation from OSM (cache disabled)")
-        gdf = _chunked_bbox_fetch(_fetch_vegetation_chunk, south, west, north, east)
+        gdf = _tile_cached_fetch("vegetation", _fetch_vegetation_chunk, south, west, north, east)
     finally:
         _restore_cache()
 
@@ -501,7 +701,7 @@ def fetch_parks(south: float, west: float, north: float, east: float,
         ttl_seconds = CACHE_TTL_SECONDS
     _setup_cache(use_cache, ttl_seconds)
     try:
-        gdf = _chunked_bbox_fetch(_fetch_parks_chunk, south, west, north, east)
+        gdf = _tile_cached_fetch("park", _fetch_parks_chunk, south, west, north, east)
     finally:
         _restore_cache()
     if gdf.empty:
@@ -539,7 +739,7 @@ def fetch_wetlands(south: float, west: float, north: float, east: float,
         ttl_seconds = CACHE_TTL_SECONDS
     _setup_cache(use_cache, ttl_seconds)
     try:
-        gdf = _chunked_bbox_fetch(_fetch_wetlands_chunk, south, west, north, east)
+        gdf = _tile_cached_fetch("wetland", _fetch_wetlands_chunk, south, west, north, east)
     finally:
         _restore_cache()
     if gdf.empty:

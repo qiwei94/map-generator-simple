@@ -19,6 +19,12 @@ _project_root = os.path.dirname(os.path.abspath(__file__))
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
+# Force UTF-8 for stdout/stderr (Windows GBK compat)
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8')
+
 from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.processors.coords import bbox_to_utm, project_geodataframe
 from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.osm import fetch_water, fetch_roads
 from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.elevation import fetch_elevation_grid
@@ -49,9 +55,9 @@ height_m = bbox["height_m"]
 area_km2 = bbox["area_km2"]
 scale = compute_scale(width_m, height_m)
 
-print(f"  Bounding box: ({LAT1}, {LON1}) → ({LAT2}, {LON2})")
+print(f"  Bounding box: ({LAT1}, {LON1}) -> ({LAT2}, {LON2})")
 print(f"  Width: {width_m:.0f}m, Height: {height_m:.0f}m")
-print(f"  Area: {area_km2:.1f} km²")
+print(f"  Area: {area_km2:.1f} km2")
 print(f"  Scale: {scale:.6f} mm/m")
 print(f"  Time: {time.time() - t0:.1f}s")
 
@@ -72,7 +78,7 @@ if elevation_grid is None:
     sys.exit(1)
 
 print(f"  Elevation grid: {elevation_grid.shape}")
-print(f"  Elevation range: {elevation_grid.min():.1f}m → {elevation_grid.max():.1f}m")
+print(f"  Elevation range: {elevation_grid.min():.1f}m -> {elevation_grid.max():.1f}m")
 print(f"  Time: {time.time() - t1:.1f}s")
 
 # =====================================================================
@@ -93,13 +99,26 @@ utm_bbox = bbox["utm_bbox"]
 
 water_gdf = project_geodataframe(water_gdf, utm_crs, origin, clip_bbox=utm_bbox)
 
-# 处理所有主要水体特征（增加到100个，确保钱塘江等主要水体都被处理）
-MAX_WATER_FEATURES = 100  # 处理前100个最大水体特征
+# 处理所有主要水体特征（包括河流线状要素，估算面积后筛选）
+from _TEXTURE_STYLE_OF_DEEPSEEK.config import WATERWAY_WIDTHS
+
+# 计算估算面积（Polygon用实际面积，LineString用长度*宽度）
+def estimate_water_area(geom, row):
+    if geom.geom_type in ['Polygon', 'MultiPolygon']:
+        return geom.area
+    elif geom.geom_type in ['LineString', 'MultiLineString']:
+        waterway_type = row.get('waterway', 'river')
+        width = WATERWAY_WIDTHS.get(waterway_type, 30)
+        return geom.length * width
+    return 0
+
+water_gdf['est_area'] = water_gdf.apply(lambda r: estimate_water_area(r.geometry, r), axis=1)
+
+MAX_WATER_FEATURES = 500  # 增加到500个，确保包含主要河流
 if len(water_gdf) > MAX_WATER_FEATURES:
-    # 选择面积最大的水体特征
-    water_gdf['area'] = water_gdf.geometry.area
-    water_gdf = water_gdf.nlargest(MAX_WATER_FEATURES, 'area')
-    print(f"  [限制] 仅处理前 {MAX_WATER_FEATURES} 个最大水体特征")
+    # 选择估算面积最大的水体特征（包括缓冲后的河流）
+    water_gdf = water_gdf.nlargest(MAX_WATER_FEATURES, 'est_area')
+    print(f"  [限制] 仅处理前 {MAX_WATER_FEATURES} 个最大水体特征（含河流缓冲）")
 else:
     print(f"  [处理] 处理全部 {len(water_gdf)} 个水体特征")
 
@@ -231,17 +250,17 @@ with open(validation_report_path, 'w') as f:
     f.write("### 2.2 网格质量检查\n\n")
     f.write("| 检查项 | 结果 | 是否通过 |\n")
     f.write("|--------|------|---------|\n")
-    f.write(f"| Watertight | {validation['watertight']} | {'✅' if validation['watertight'] else '❌'} |\n")
-    f.write(f"| Volume | {validation['volume']:.2f} mm³ | {'✅' if validation['volume'] > 0 else '❌'} |\n")
-    f.write(f"| Z范围 | {validation['bounds'][0][2]:.2f} → {validation['bounds'][1][2]:.2f} mm | ✅ |\n")
-    f.write(f"| 顶点数 | {validation['n_vertices']} | ✅ |\n")
-    f.write(f"| 面数 | {validation['n_faces']} | ✅ |\n\n")
+    f.write(f"| Watertight | {validation['watertight']} | {'[PASS]' if validation['watertight'] else '[FAIL]'} |\n")
+    f.write(f"| Volume | {validation['volume']:.2f} mm3 | {'[PASS]' if validation['volume'] > 0 else '[FAIL]'} |\n")
+    f.write(f"| Z range | {validation['bounds'][0][2]:.2f} -> {validation['bounds'][1][2]:.2f} mm | [PASS] |\n")
+    f.write(f"| Vertices | {validation['n_vertices']} | [PASS] |\n")
+    f.write(f"| Faces | {validation['n_faces']} | [PASS] |\n\n")
 
     f.write("### 2.3 布尔运算统计\n\n")
     f.write("| 操作 | 描述 | 状态 |\n")
     f.write("|------|------|------|\n")
     for op in stats["boolean_ops"]:
-        f.write(f"| {op} | Manifold布尔运算 | ✅ |\n")
+        f.write(f"| {op} | Manifold布尔运算 | [PASS] |\n")
     f.write("\n")
 
     f.write("---\n\n")
@@ -254,7 +273,7 @@ with open(validation_report_path, 'w') as f:
     f.write("3. 检查空洞边缘是否封闭\n\n")
 
     f.write("### 3.2 地形起伏验证\n\n")
-    f.write(f"**高程数据范围**: {elevation_grid.min():.1f}m → {elevation_grid.max():.1f}m\n\n")
+    f.write(f"**高程数据范围**: {elevation_grid.min():.1f}m -> {elevation_grid.max():.1f}m\n\n")
     f.write("**验证方法**:\n")
     f.write("1. 检查地形是否有起伏（杭州有山体）\n")
     f.write("2. 检查西湖、钱塘江区域是否正确镂空\n")

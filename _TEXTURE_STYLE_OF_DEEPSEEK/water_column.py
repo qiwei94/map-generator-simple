@@ -9,7 +9,7 @@ import time
 import numpy as np
 import trimesh
 import manifold3d
-from shapely.geometry import Polygon, MultiPolygon, LineString
+from shapely.geometry import Polygon, MultiPolygon, LineString, MultiLineString
 from shapely.ops import unary_union
 
 try:
@@ -19,6 +19,7 @@ except ImportError:
 
 from _TEXTURE_STYLE_OF_DEEPSEEK.config import (
     WATER_MIN_AREA_M2,
+    WATERWAY_WIDTHS,
 )
 
 
@@ -134,41 +135,109 @@ def create_water_columns_union_manifold(
     n_total = 0
 
     print(f"  Processing {len(water_gdf)} water features...")
+    n_skipped_overlap = 0
+
+    # Step 1: Process LineStrings first, collect their buffered coverage
+    linestring_coverage = None  # Union of all buffered LineStrings
+    linestring_columns = []
+
     for idx, (_, row) in enumerate(water_gdf.iterrows()):
         geom = row.geometry
         if geom is None or geom.is_empty:
             continue
 
-        polygons = []
-        if isinstance(geom, (Polygon, MultiPolygon)):
-            if isinstance(geom, MultiPolygon):
-                polygons = list(geom.geoms)
+        if isinstance(geom, (LineString, MultiLineString)):
+            waterway_type = row.get('waterway', 'river')
+
+            # Priority: OSM width tag > WATERWAY_WIDTHS config
+            osm_width = row.get('width', None)
+            buffer_width = WATERWAY_WIDTHS.get(waterway_type, 60)  # default 60m
+            if osm_width is not None:
+                try:
+                    import math
+                    if isinstance(osm_width, float) and math.isnan(osm_width):
+                        pass
+                    else:
+                        parsed = float(osm_width)
+                        if parsed > 0 and parsed < 10000:
+                            buffer_width = parsed
+                except (ValueError, TypeError):
+                    pass
+
+            half_width = buffer_width / 2.0
+
+            buffered_polys = []
+            if isinstance(geom, MultiLineString):
+                for line in geom.geoms:
+                    buf = line.buffer(half_width)
+                    if not buf.is_empty and isinstance(buf, (Polygon, MultiPolygon)):
+                        if isinstance(buf, MultiPolygon):
+                            buffered_polys.extend(list(buf.geoms))
+                        else:
+                            buffered_polys.append(buf)
             else:
-                polygons = [geom]
-        elif isinstance(geom, (LineString, type(None))):
-            continue  # Lines not supported for cutting (need buffering)
-        else:
+                buf = geom.buffer(half_width)
+                if not buf.is_empty and isinstance(buf, (Polygon, MultiPolygon)):
+                    if isinstance(buf, MultiPolygon):
+                        buffered_polys.extend(list(buf.geoms))
+                    else:
+                        buffered_polys.append(buf)
+
+            for poly in buffered_polys:
+                n_total += 1
+                if poly.area < min_area_m2:
+                    n_skipped += 1
+                    continue
+
+                col = extrude_water_column_manifold(poly, z_bottom, z_top, scale)
+                if not col.is_empty():
+                    linestring_columns.append(col)
+                    n_kept += 1
+                    # Track coverage for overlap detection
+                    if linestring_coverage is None:
+                        linestring_coverage = poly
+                    else:
+                        linestring_coverage = linestring_coverage.union(poly)
+                else:
+                    n_skipped += 1
+
+    # Step 2: Process Polygons, skip those overlapping with LineString coverage
+    for idx, (_, row) in enumerate(water_gdf.iterrows()):
+        geom = row.geometry
+        if geom is None or geom.is_empty:
             continue
 
-        for poly in polygons:
-            n_total += 1
-            area = poly.area
-            if area < min_area_m2:
-                n_skipped += 1
-                continue
-
-            t_start = time.time()
-            col = extrude_water_column_manifold(poly, z_bottom, z_top, scale)
-            elapsed = time.time() - t_start
-            if not col.is_empty():
-                columns.append(col)
-                n_kept += 1
-                if elapsed > 0.3:
-                    print(f"    [{n_kept}] area={area:.0f}m² ⏱ {elapsed:.2f}s")
+        if isinstance(geom, (Polygon, MultiPolygon)):
+            polys_to_process = []
+            if isinstance(geom, MultiPolygon):
+                polys_to_process = list(geom.geoms)
             else:
-                n_skipped += 1
+                polys_to_process = [geom]
 
-    print(f"  Water columns: {n_kept} created, {n_skipped} skipped (of {n_total} total polygons)")
+            for poly in polys_to_process:
+                n_total += 1
+                if poly.area < min_area_m2:
+                    n_skipped += 1
+                    continue
+
+                # Skip if overlapping with LineString coverage (优先使用LineString)
+                if linestring_coverage is not None and poly.intersects(linestring_coverage):
+                    overlap_ratio = poly.intersection(linestring_coverage).area / poly.area
+                    if overlap_ratio > 0.3:  # >30% overlap, skip Polygon
+                        n_skipped_overlap += 1
+                        continue
+
+                col = extrude_water_column_manifold(poly, z_bottom, z_top, scale)
+                if not col.is_empty():
+                    columns.append(col)
+                    n_kept += 1
+                else:
+                    n_skipped += 1
+
+    # Combine LineString columns with Polygon columns
+    columns = linestring_columns + columns
+
+    print(f"  Water columns: {n_kept} created, {n_skipped} skipped (small), {n_skipped_overlap} skipped (overlap)")
     t_union = time.time()
 
     if not columns:

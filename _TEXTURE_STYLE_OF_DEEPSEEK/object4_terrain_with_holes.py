@@ -114,7 +114,7 @@ def build_terrain_with_water_holes_manifold(elevation_grid: np.ndarray,
             print(f"  道路网格: {len(roads_mesh.vertices)} vertices, {stats['roads_faces']} faces")
 
             roads_m = trimesh_to_manifold(roads_mesh)
-            terrain_m = terrain_m.union(roads_m)
+            terrain_m = terrain_m + roads_m
             stats["boolean_ops"].append("terrain ∪ roads (bridges only)")
             print("  道路融合完成")
         else:
