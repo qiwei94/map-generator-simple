@@ -129,8 +129,8 @@ WATER_LINE_TAGS = {"waterway": True}
 WATER_MAX_EDGE_M = 100.0
 
 WATERWAY_WIDTHS = {
-    "river": 60,      # Default width for rivers without OSM width tag
-    "riverbank": 800, # Very wide river sections
+    "river": 500,     # Default width for rivers (major rivers can be 500-2000m)
+    "riverbank": 1000, # Very wide river sections / estuaries
     "canal": 30,      # Canals and smaller waterways
     "stream": 12,
     "drain": 6,
@@ -142,8 +142,9 @@ WATERWAY_WIDTHS = {
 # ---------------------------------------------------------------------------
 VEGETATION_COLOR = "#6B8E23"    # olive green (vegetation in Bambu Studio)
 VEGETATION_Z_OFFSET_MM = 0.1    # slight elevation above terrain (mm)
-VEGETATION_MIN_AREA_M2 = 10.0   # minimum vegetation area (m^2)
+VEGETATION_MIN_AREA_M2 = 5000.0 # minimum vegetation area (m^2) - increased to filter small fragments
 VEGETATION_MAX_EDGE_M = 20.0    # max edge length for boundary densification (m)
+VEGETATION_SIMPLIFY_TOL_M = 5.0 # simplification tolerance for Douglas-Peucker (m)
 
 VEGETATION_TAGS = {
     "landuse": ["forest", "grass", "meadow", "village_green"],

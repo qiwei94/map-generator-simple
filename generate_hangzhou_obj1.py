@@ -15,7 +15,6 @@ if hasattr(sys.stderr, 'reconfigure'):
 
 from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.processors.coords import bbox_to_utm, project_geodataframe
 from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.osm import fetch_water
-from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.pbf_reader import fetch_from_pbf
 from _TEXTURE_STYLE_OF_DEEPSEEK.water import build_deepseek_water
 from _TEXTURE_STYLE_OF_DEEPSEEK.exporter import export_deepseek_3mf
 from _TEXTURE_STYLE_OF_DEEPSEEK.config import compute_scale, WATERWAY_WIDTHS
@@ -33,6 +32,9 @@ LAT1, LON1 = 30.13, 120.01   # south-west
 LAT2, LON2 = 30.36, 120.29   # north-east
 CITY_NAME = "hangzhou_west_lake"
 OUTPUT_DIR = "output/hangzhou_west_lake"
+
+# Debug output: GeoPackage for QGIS verification
+DEBUG_GPKG = os.path.join(OUTPUT_DIR, "debug_obj1_water.gpkg")
 
 print("=" * 70)
 print("  Hangzhou West Lake Object 1: Water Plate (25km × 25km)")
@@ -70,10 +72,16 @@ print(f"  Time: {time.time() - t0:.1f}s")
 # =====================================================================
 # Stage 1: Water features (from PBF)
 # =====================================================================
-print(f"\n[Stage 1] Fetching water data (from PBF with relation support)...")
+print(f"\n[Stage 1] Fetching water data (from PBF with 4-step pipeline)...")
 t1 = time.time()
 
-water_gdf = fetch_from_pbf(PBF_FILE, 'water', south, west, north, east)
+# Set PBF path for osm.py fetch functions
+from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.osm import set_pbf_file_path
+set_pbf_file_path(PBF_FILE)
+
+# Use new osm.py pipeline with GeoPackage debug output
+water_gdf = fetch_water(south, west, north, east, export_gpkg=DEBUG_GPKG)
+print(f"  Debug GeoPackage: {DEBUG_GPKG}")
 
 if water_gdf is None or len(water_gdf) == 0:
     print("  ERROR: No water features found!")
