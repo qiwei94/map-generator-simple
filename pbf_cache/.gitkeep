@@ -1,0 +1,24 @@
+# PBF Cache Directory
+
+This directory stores OSM PBF files downloaded from Geofabrik.
+
+## Usage
+
+Place your `.osm.pbf` files here:
+- `zhejiang-latest.osm.pbf` - Zhejiang province
+- `jiangsu-latest.osm.pbf` - Jiangsu province
+- etc.
+
+## Download
+
+Download PBF files from: https://download.geofabrik.de/
+
+Example:
+```bash
+wget https://download.geofabrik.de/asia/china/zhejiang-latest.osm.pbf \
+  -O pbf_cache/zhejiang-latest.osm.pbf
+```
+
+## Note
+
+PBF files are large and should NOT be committed to git.
