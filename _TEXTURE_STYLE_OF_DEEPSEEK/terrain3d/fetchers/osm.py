@@ -1,13 +1,18 @@
-"""Unified OSM data fetching from local PBF files using Python osmium.
+"""Unified OSM data fetching from local PBF files using osmium CLI.
 
 This module is the single entry point for all OSM data retrieval. It uses
-the Python osmium library (via pbf_reader.py) as the sole data source.
+the osmium CLI tool for fast PBF processing (10-20x faster than pyosmium).
 
 Processing pipeline for each feature type:
-    Step 1: Raw PBF extraction (osmium tag matching, no bbox clipping)
+    Step 1: Raw PBF extraction via osmium CLI (extract/tags-filter/export)
     Step 2: Detailed tag filtering (highway types, min area, etc.)
     Step 3: Bbox clipping (shapely intersection with query bbox)
     Step 4: Cleanup (remove empty/invalid, deduplicate, sort)
+
+For water features (relations), a special pipeline is used:
+    Step 1: osmium tags-filter on full PBF (r/ prefix for relations)
+    Step 2: osmium export to GeoJSON
+    Step 3: ogr2ogr -clipsrc for precise bbox clipping
 
 Each step can optionally export to GeoPackage for QGIS verification.
 
@@ -35,24 +40,9 @@ import pandas as pd
 from shapely.geometry import box
 from shapely.ops import unary_union
 
-# 动态检测 CLI 可用性
-CLI_AVAILABLE = False
-try:
-    from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.osmium_cli_fetcher import (
-        get_cli_fetcher,
-    )
-    # 检查 CLI 工具是否真的可用
-    _test_fetcher = get_cli_fetcher()
-    CLI_AVAILABLE = _test_fetcher.osmium_available
-except ImportError:
-    pass
-
-# CLI 不可用时，导入 pbf_reader
-if not CLI_AVAILABLE:
-    from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.pbf_reader import (
-        PBFFeatureExtractor,
-        get_extractor,
-    )
+from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.osmium_cli_fetcher import (
+    get_cli_fetcher,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -122,7 +112,7 @@ def _resolve_pbf_path() -> str:
 # Feature type configurations
 # ===========================================================================
 
-# Tag filters use OR logic across keys (matching pbf_reader.py behavior).
+# Tag filters use OR logic across keys.
 # A feature matches if ANY key-value pair in the filter matches.
 
 FEATURE_CONFIGS: Dict[str, dict] = {
@@ -218,10 +208,15 @@ class OSMPipeline:
     """4-step OSM data processing pipeline.
 
     Pipeline flow:
-        1. Raw PBF extraction via osmium (tag matching, bbox for relation members)
+        1. Raw PBF extraction via osmium CLI (extract/tags-filter/export)
         2. Detailed tag/attribute filtering (highway types, min area, etc.)
         3. Bbox clipping (shapely intersection with exact query bbox)
         4. Cleanup (remove empty/invalid, deduplicate by osm_id, sort)
+
+    For water features, a relation-first pipeline is used:
+        1. osmium tags-filter on full PBF (r/ prefix for relations)
+        2. osmium export to GeoJSON
+        3. ogr2ogr -clipsrc for precise bbox clipping
 
     Each step can optionally export its output to GeoPackage.
     """
@@ -245,14 +240,7 @@ class OSMPipeline:
         self.feature_type = feature_type
         self.bbox = bbox  # (south, west, north, east)
         self.config = config
-        
-        # 根据 CLI 可用性选择不同的提取器
-        if CLI_AVAILABLE:
-            self._cli_fetcher = get_cli_fetcher()
-            self._extractor = None
-        else:
-            self._extractor = get_extractor()
-            self._cli_fetcher = None
+        self._cli_fetcher = get_cli_fetcher()
 
     def run(self, export_gpkg: Optional[str] = None) -> gpd.GeoDataFrame:
         """Execute the full pipeline.
@@ -307,33 +295,27 @@ class OSMPipeline:
         elapsed = time.time() - t0
         logger.info("Pipeline [%s]: %d features in %.1fs",
                      self.feature_type, len(gdf), elapsed)
+        # import pdb;pdb.set_trace()
         return gdf
 
     def step1_raw_extract(self) -> gpd.GeoDataFrame:
-        """Step 1: Extract raw features from PBF.
-        
-        优先使用 CLI 方式（osmium + ogr2ogr），回退到 Python pyosmium。
+        """Step 1: Extract raw features from PBF using osmium CLI.
+
+        For standard types (buildings, roads, vegetation):
+            osmium extract → tags-filter → export
+
+        For water (relations):
+            osmium tags-filter (r/ prefix) → export → ogr2ogr -clipsrc
         """
         south, west, north, east = self.bbox
-        logger.info("Step 1 [%s]: Raw PBF extraction...", self.feature_type)
+        logger.info("Step 1 [%s]: Raw PBF extraction via CLI...", self.feature_type)
 
         try:
-            if CLI_AVAILABLE and self._cli_fetcher:
-                # 使用 CLI 方式（快速）
-                logger.info("Step 1 [%s]: Using CLI pipeline...", self.feature_type)
-                gdf = self._cli_fetcher.fetch_features(
-                    tag_type=self.feature_type,
-                    south=south, west=west, north=north, east=east,
-                    pbf_file=self.pbf_path,
-                )
-            else:
-                # 使用 Python pyosmium 方式（回退）
-                logger.info("Step 1 [%s]: Using Python pyosmium...", self.feature_type)
-                gdf = self._extractor.extract_features(
-                    self.pbf_path,
-                    self.feature_type,
-                    (south, west, north, east),
-                )
+            gdf = self._cli_fetcher.fetch_features(
+                tag_type=self.feature_type,
+                south=south, west=west, north=north, east=east,
+                pbf_file=self.pbf_path,
+            )
         except Exception as e:
             logger.error("Step 1 [%s]: extraction failed: %s",
                           self.feature_type, e)
@@ -342,9 +324,8 @@ class OSMPipeline:
         if gdf.empty:
             logger.info("Step 1 [%s]: no features found", self.feature_type)
         else:
-            method = "CLI" if CLI_AVAILABLE else "Python"
-            logger.info("Step 1 [%s]: %d raw features (%s)",
-                         self.feature_type, len(gdf), method)
+            logger.info("Step 1 [%s]: %d raw features (CLI)",
+                         self.feature_type, len(gdf))
         return gdf
 
     def step2_filter_tags(self, gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
@@ -692,9 +673,9 @@ def fetch_water(
     pbf_path = _resolve_pbf_path()
 
     # Check tile cache
-    cached = _check_tile_cache("water", south, west, north, east)
-    if cached is not None:
-        return cached
+    # cached = _check_tile_cache("water", south, west, north, east)
+    # if cached is not None:
+    #     return cached
 
     config = FEATURE_CONFIGS["water"]
     pipeline = OSMPipeline(pbf_path, "water", (south, west, north, east), config)
@@ -716,8 +697,8 @@ def fetch_water(
             result = pd.concat([result.loc[keep_poly], result[~is_polygon]]).copy()
 
     # Save to tile cache
-    if not result.empty:
-        _save_tile_cache("water", south, west, north, east, result)
+    # if not result.empty:
+    #     _save_tile_cache("water", south, west, north, east, result)
 
     return result
 

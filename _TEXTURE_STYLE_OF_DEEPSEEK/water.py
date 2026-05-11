@@ -230,6 +230,7 @@ def build_deepseek_water(gdf: gpd.GeoDataFrame,
     # Step 1: Process LineStrings first, collect their buffered coverage
     linestring_coverage = None  # Union of all buffered LineStrings
     linestring_parts = []
+    linestring_polygons = []  # Track buffered polygons for overlap detection
 
     for _, row in gdf.iterrows():
         geom = row.geometry
@@ -264,17 +265,17 @@ def build_deepseek_water(gdf: gpd.GeoDataFrame,
                 poly = _build_water_line(line, width)
                 if poly is not None and not poly.is_empty and poly.area >= WATER_MIN_AREA_M2:
                     poly = _densify_polygon(poly, WATER_MAX_EDGE_M)
-                    man = _extrude_water_manifold(poly, water_height_m)
-                    if not man.is_empty():
-                        linestring_parts.append(man)
-                        n_features += 1
-                        # Track coverage for overlap detection
-                        if linestring_coverage is None:
-                            linestring_coverage = poly
-                        else:
-                            linestring_coverage = linestring_coverage.union(poly)
+                    linestring_polygons.append(poly)
+                    # Track coverage for overlap detection
+                    if linestring_coverage is None:
+                        linestring_coverage = poly
+                    else:
+                        linestring_coverage = linestring_coverage.union(poly)
 
-    # Step 2: Process Polygons, skip those overlapping with LineString coverage
+    # Step 2: Process Polygons, check overlap with LineString coverage
+    polygon_parts = []
+    polygons_with_overlap = []  # Polygons that overlap LineString coverage
+
     for _, row in gdf.iterrows():
         geom = row.geometry
         if geom is None or geom.is_empty:
@@ -292,28 +293,49 @@ def build_deepseek_water(gdf: gpd.GeoDataFrame,
                     n_skipped_small += 1
                     continue
 
-                # Skip if overlapping with LineString coverage (优先使用LineString)
+                poly = _densify_polygon(poly, WATER_MAX_EDGE_M)
+                
+                # Check overlap with LineString coverage
+                is_overlap = False
                 if linestring_coverage is not None and poly.intersects(linestring_coverage):
                     overlap_ratio = poly.intersection(linestring_coverage).area / poly.area
-                    if overlap_ratio > 0.3:  # >30% overlap, skip Polygon
+                    if overlap_ratio > 0.3:  # >30% overlap, Polygon takes precedence
+                        is_overlap = True
                         n_skipped_overlap += 1
-                        continue
+                        polygons_with_overlap.append(poly)
 
-                poly = _densify_polygon(poly, WATER_MAX_EDGE_M)
                 man = _extrude_water_manifold(poly, water_height_m)
                 if man.is_empty():
                     n_fail += 1
                     continue
 
-                manifold_parts.append(man)
+                polygon_parts.append(man)
                 n_features += 1
 
-    # Combine LineString parts with Polygon parts
-    manifold_parts = linestring_parts + manifold_parts
+    # Step 3: Add LineString parts that DON'T overlap with high-priority Polygons
+    for poly in linestring_polygons:
+        # Check if this LineString overlaps with any high-priority Polygon
+        should_skip = False
+        for overlap_poly in polygons_with_overlap:
+            if poly.intersects(overlap_poly):
+                overlap_ratio = poly.intersection(overlap_poly).area / poly.area
+                if overlap_ratio > 0.3:  # LineString overlaps with Polygon, skip it
+                    should_skip = True
+                    break
+        
+        if not should_skip:
+            man = _extrude_water_manifold(poly, water_height_m)
+            if not man.is_empty():
+                linestring_parts.append(man)
+                n_features += 1
+
+    # Combine: base plate (already in manifold_parts) + Polygon parts + LineString parts
+    manifold_parts.extend(polygon_parts)
+    manifold_parts.extend(linestring_parts)
 
     print(f"  Water features: {n_features} extruded, "
           f"{n_skipped_small} skipped (too small), "
-          f"{n_skipped_overlap} skipped (overlap with LineString)"
+          f"{n_skipped_overlap} LineString skipped (Polygon takes precedence)"
           + (f", {n_fail} Manifold failures" if n_fail else ""))
 
     if len(manifold_parts) == 0:
