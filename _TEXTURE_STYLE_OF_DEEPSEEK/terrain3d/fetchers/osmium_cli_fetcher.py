@@ -35,10 +35,43 @@ class OsmiumCLIFetcher:
     # 适用于建筑、道路、植被等普通要素
     TAG_FILTERS = {
         'building': 'nwr/building',
+        # 地标建筑专用过滤器 — 只提取有 landmark 标签的建筑（MERGE 模式下跳过全量建筑）
+        # 覆盖 _landmark.py 的 Tier 1 + Tier 2 信号，大幅减少数据量（1.9M → ~几百）
+        'building_landmarks': (
+            'nwr/building=stadium,university,college,hospital,train_station,'
+            'mall,public,government,museum,cathedral,church,temple,mosque,'
+            'synagogue,civic,library,pagoda,shrine,chapel,monastery,convent,abbey '
+            'nwr/historic '
+            'nwr/tourism=museum,gallery,attraction,theme_park,aquarium '
+            'nwr/amenity=university,hospital,mall,theatre,cinema,place_of_worship,'
+            'library,townhall,courthouse,college '
+            'nwr/man_made=tower,lighthouse,water_tower,obelisk '
+            'nwr/wikidata '
+            'nwr/heritage'
+        ),
         'road': 'nwr/highway',
-        'vegetation': 'nwr/landuse=forest,grass,meadow nwr/natural=wood,grassland,scrub',
+        'vegetation': (
+            'nwr/landuse=forest,grass,meadow,cemetery,recreation_ground,'
+            'village_green,allotments,orchard,vineyard,plant_nursery '
+            'nwr/natural=wood,grassland,scrub,heath '
+            'nwr/leisure=park,garden,golf_course,common,nature_reserve'
+        ),
         'park': 'nwr/leisure=park,garden nwr/landuse=recreation_ground',
         'wetland': 'nwr/natural=wetland,marsh,swamp',
+        # 自然/植被地标：保护区 + 国家公园 + 命名湿地 / 景区
+        # （西溪 OSM: boundary=national_park + leisure=nature_reserve + wikidata=Q1089272）
+        'protected_area': ('nwr/boundary=national_park,protected_area '
+                            'nwr/leisure=nature_reserve '
+                            'nwr/natural=wetland '
+                            'nwr/tourism=theme_park,zoo,aquarium'),
+        # 铁路：city L / 地铁 / 通勤 / 轻轨
+        'railway': 'nwr/railway=rail,light_rail,subway,tram,monorail,narrow_gauge',
+        # 码头 / 防波堤 / 浮桥 — 伸入水里的人造陆地
+        'pier': 'nwr/man_made=pier,breakwater,wharf,groyne',
+        # 体育场馆 / 游艇港 — civic landmark
+        'stadium': 'nwr/leisure=stadium,sports_centre,marina',
+        # 全量 landuse（用于 block 语义分类）
+        'landuse': 'nwr/landuse',
     }
 
     # 水体专用过滤器（使用 r/ 前缀提取 relation，保留完整 multipolygon 结构）
@@ -271,11 +304,30 @@ class OsmiumCLIFetcher:
                 logger.info(f"CLI 管线完成: {len(gdf)} 条记录")
                 print(f"  [CLI Pipeline] Complete: {len(gdf)} features extracted\n")
                 print(f"  Output: {output_path}")
+
+                # Buildings: ensure est_height column matches osm.py fetch_buildings output
+                if tag_type == 'building' and len(gdf) > 0:
+                    from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.osm import (
+                        _estimate_building_heights,
+                        get_ndsm_grid,
+                    )
+                    ndsm_heights = None
+                    ndsm_cache = get_ndsm_grid()
+                    if ndsm_cache is not None:
+                        from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.ndsm import (
+                            sample_building_heights_from_ndsm,
+                        )
+                        grid, s, w, n, e = ndsm_cache
+                        ndsm_heights = sample_building_heights_from_ndsm(
+                            gdf, grid, s, w, n, e
+                        )
+                    gdf["est_height"] = _estimate_building_heights(gdf, ndsm_heights)
+
                 return gdf
         except Exception as e:
             logger.error(f"CLI 执行失败: {e}")
             return gpd.GeoDataFrame()
-        
+
         return gpd.GeoDataFrame()
     
     def _run_osmium_pipeline(
@@ -357,13 +409,21 @@ class OsmiumCLIFetcher:
         print(f"  [Step 1/3] osmium extract (clipping area)...")
         print(f"           Command: osmium extract -b {bbox_str} {pbf_file} -o {area_pbf} --overwrite")
         t1 = time.time()
-        result1 = subprocess.run(cmd1, capture_output=True, timeout=60, creationflags=flags)
+        result1 = None
+        for attempt in range(3):
+            result1 = subprocess.run(cmd1, capture_output=True, timeout=600, creationflags=flags)
+            if result1.returncode == 0:
+                break
+            if attempt < 2:
+                import time as _time
+                _time.sleep(2)
+                print(f"           Retry {attempt+2}/3...")
         elapsed1 = time.time() - t1
 
         if result1.returncode != 0:
             stderr_msg = result1.stderr.decode('utf-8', errors='replace')
-            logger.error(f"osmium extract 失败: {stderr_msg}")
-            print(f"           FAILED: {stderr_msg}")
+            logger.error(f"osmium extract 失败 (3 attempts): {stderr_msg}")
+            print(f"           FAILED after 3 attempts: {stderr_msg}")
             return False
 
         pbf_size = os.path.getsize(area_pbf) / 1024 if os.path.exists(area_pbf) else 0
@@ -389,7 +449,7 @@ class OsmiumCLIFetcher:
         print(f"  [Step 2/3] osmium tags-filter (filtering {tag_type} features)...")
         print(f"           Command: osmium tags-filter {area_pbf} {filter_expr} -o {filtered_pbf} --overwrite")
         t2 = time.time()
-        result2 = subprocess.run(cmd2, capture_output=True, timeout=60, creationflags=flags)
+        result2 = subprocess.run(cmd2, capture_output=True, timeout=300, creationflags=flags)
         elapsed2 = time.time() - t2
 
         if result2.returncode != 0:
@@ -460,44 +520,71 @@ class OsmiumCLIFetcher:
         import time
 
         bbox_str = f"{west},{south},{east},{north}"
-
-        # Step 1: 从完整 PBF 过滤 relation（使用 r/ 前缀）
-        filtered_pbf = os.path.join(temp_dir, f"{base_name}_{tag_type}_full.pbf")
         filter_expr = self.WATER_RELATION_FILTERS.get(tag_type, '')
 
         if not filter_expr:
             logger.error(f"未知的 relation tag_type: {tag_type}")
             return False
 
+        # Step 1a: extract 裁剪区域（避免对完整国家 PBF 做 tags-filter 触发 zlib buffer error）
+        area_pbf = os.path.join(temp_dir, f"{base_name}_{tag_type}_area.pbf")
+        cmd_extract = [
+            osmium_path, 'extract',
+            '-b', bbox_str,
+            '-s', 'smart',
+            pbf_file,
+            '-o', area_pbf,
+            '--overwrite'
+        ]
+
+        logger.info(f"Step 1a: {osmium_path} extract -b {bbox_str}")
+        print(f"  [Step 1/3] osmium extract → tags-filter (extract area then filter {tag_type})...")
+        print(f"           Extract: osmium extract -b {bbox_str} -s smart {pbf_file}")
+        t1 = time.time()
+        result_ext = None
+        for attempt in range(3):
+            result_ext = subprocess.run(cmd_extract, capture_output=True, timeout=600, creationflags=flags)
+            if result_ext.returncode == 0:
+                break
+            if attempt < 2:
+                import time as _time
+                _time.sleep(2)
+                print(f"           Retry {attempt+2}/3...")
+
+        if result_ext.returncode != 0:
+            stderr_msg = result_ext.stderr.decode('utf-8', errors='replace')
+            logger.error(f"osmium extract 失败 (3 attempts): {stderr_msg}")
+            print(f"           Extract FAILED after 3 attempts: {stderr_msg}")
+            return False
+
+        area_size = os.path.getsize(area_pbf) / 1024 if os.path.exists(area_pbf) else 0
+        print(f"           Extract done: {area_size:.1f} KB")
+
+        # Step 1b: tags-filter 在裁切后的小文件上（不会触发 buffer error）
+        filtered_pbf = os.path.join(temp_dir, f"{base_name}_{tag_type}_full.pbf")
         cmd1 = [
             osmium_path, 'tags-filter',
-            pbf_file,
+            area_pbf,
         ] + filter_expr.split() + [
             '-o', filtered_pbf,
             '--overwrite'
         ]
 
-        logger.info(f"Step 1: {osmium_path} tags-filter {filter_expr} (on full PBF)")
-        print(f"  [Step 1/3] osmium tags-filter (filtering {tag_type} from full PBF)...")
-        print(f"           Command: osmium tags-filter {pbf_file} {filter_expr} -o {filtered_pbf} --overwrite")
-        t1 = time.time()
-        result1 = subprocess.run(cmd1, capture_output=True, timeout=120, creationflags=flags)
+        print(f"           Filter: osmium tags-filter {filter_expr}")
+        result1 = subprocess.run(cmd1, capture_output=True, timeout=600, creationflags=flags)
         elapsed1 = time.time() - t1
 
         if result1.returncode != 0:
             stderr_msg = result1.stderr.decode('utf-8', errors='replace')
             logger.error(f"osmium tags-filter 失败: {stderr_msg}")
-            print(f"           FAILED: {stderr_msg}")
+            print(f"           Filter FAILED: {stderr_msg}")
             return False
 
         filtered_size = os.path.getsize(filtered_pbf) / 1024 if os.path.exists(filtered_pbf) else 0
-        print(f"           Done in {elapsed1:.1f}s, output: {filtered_size:.1f} KB")
+        print(f"           Done in {elapsed1:.1f}s, filtered: {filtered_size:.1f} KB")
 
         if filtered_size == 0:
-            print(f"           WARNING: Filtered PBF is empty - no {tag_type} relations found!")
-            print(f"           Possible causes:")
-            print(f"             - No OSM relations match the filter in this region")
-            print(f"           Keeping temp file for debugging: {filtered_pbf}")
+            print(f"           WARNING: Filtered PBF is empty - no {tag_type} relations found in area")
             return False
 
         # Step 2: 导出为 GeoJSON（保持完整 relation 结构）
