@@ -86,10 +86,9 @@ OUTPUT_DIR = "output/paris_cli"
 # Sub-mesh on/off (一次性调参开关，改完跑即可)
 ENABLE_VEGETATION = False
 ENABLE_BLOCK_BASE = True
-# MERGE_BLOCK_LAYERS 和 _bldg_tag 现在由 Stage 0c 自动检测决定
-# 低密度城市（<150K 建筑）→ building 全量 + MERGE=True
-# 高密度城市（≥150K 建筑）→ building_landmarks + MERGE=True
-MERGE_BLOCK_LAYERS = True  # 默认值，Stage 0c 可能覆盖
+# MERGE_BLOCK_LAYERS 和 _bldg_tag 由 Stage 0c 自动检测决定
+# 低密度城市（<150K 建筑）→ 完整三层：block_base + BO + BL
+# 高密度城市（≥150K 建筑）→ MERGE 两层：block_base + BL（跳过 BO）
 
 print("=" * 70)
 print("  Pure Osmium CLI Pipeline: extract → tags-filter → export → 3MF")
@@ -115,16 +114,17 @@ else:
     print("  Using pure osmium CLI pipeline (extract → tags-filter → export)")
 
 # =====================================================================
-# Stage 0c: 自动检测建筑密度 — 决定用 building 还是 building_landmarks
+# Stage 0c: 自动检测建筑密度 — 决定过滤器和管线模式
 # =====================================================================
 print(f"\n[Stage 0c] Auto-detecting building density...")
 t0c = time.time()
 _density_info = sample_building_density(PBF_FILE, LAT1, LON1, LAT2, LON2)
 _bldg_tag = 'building_landmarks' if _density_info['should_filter'] else 'building'
-if _density_info['should_filter']:
-    print(f"  高密度城市: 使用 building_landmarks 过滤器 (跳过 {int(_density_info['count_est']-_density_info['count_est']*0.01):,} 普通建筑)")
+MERGE_BLOCK_LAYERS = _density_info['should_filter']  # 高密度才用 MERGE 模式
+if MERGE_BLOCK_LAYERS:
+    print(f"  高密度城市: building_landmarks + MERGE 两层模式")
 else:
-    print(f"  低密度城市: 使用全量 building 数据 (全部 {_density_info['count_est']:,} 建筑)")
+    print(f"  低密度城市: 全量 building + 完整三层模式 (block_base + BO + BL)")
 print(f"  Time: {time.time() - t0c:.1f}s")
 
 # =====================================================================
