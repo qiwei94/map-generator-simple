@@ -306,7 +306,7 @@ class OsmiumCLIFetcher:
                 print(f"  Output: {output_path}")
 
                 # Buildings: ensure est_height column matches osm.py fetch_buildings output
-                if tag_type == 'building' and len(gdf) > 0:
+                if tag_type in ('building', 'building_landmarks') and len(gdf) > 0:
                     from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.osm import (
                         _estimate_building_heights,
                         get_ndsm_grid,
@@ -699,6 +699,83 @@ def get_cli_fetcher(pbf_dir: str = None) -> OsmiumCLIFetcher:
     if _cli_fetcher is None:
         _cli_fetcher = OsmiumCLIFetcher(pbf_dir)
     return _cli_fetcher
+
+
+def sample_building_density(
+    pbf_file: str,
+    south: float, west: float, north: float, east: float,
+) -> dict:
+    """快速采样建筑密度，返回 {count_est, area_km2, density, should_filter}。
+
+    通过 osmium extract + tags-filter 裁剪 PBF，用 fileinfo -e 获取 way 数量估算建筑数。
+    should_filter=True 表示建筑过多，建议用 building_landmarks 过滤器。
+    """
+    import re, shutil, time as _time
+    fetcher = get_cli_fetcher()
+    osmium_path = fetcher._get_tool_path('osmium')
+    if not osmium_path:
+        return {'count_est': 0, 'area_km2': 0, 'density': 0, 'should_filter': False}
+
+    t0 = _time.time()
+    tmp_dir = os.path.join(os.path.dirname(__file__), '..', '..', '..', 'tmp', '_sample_density')
+    os.makedirs(tmp_dir, exist_ok=True)
+    area_pbf = os.path.join(tmp_dir, 'extract.osm.pbf')
+    bldg_pbf = os.path.join(tmp_dir, 'buildings.osm.pbf')
+    flags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+    count_est = 0
+    try:
+        # Step 1: osmium extract (bbox clip)
+        subprocess.run([
+            osmium_path, 'extract',
+            '-b', f'{west},{south},{east},{north}', '-s', 'smart',
+            pbf_file, '-o', area_pbf, '--overwrite'
+        ], capture_output=True, timeout=120, check=True, creationflags=flags)
+        # Step 2: osmium tags-filter (building only)
+        subprocess.run([
+            osmium_path, 'tags-filter',
+            area_pbf, 'nwr/building',
+            '-o', bldg_pbf, '--overwrite'
+        ], capture_output=True, timeout=60, check=True, creationflags=flags)
+        # Step 3: osmium fileinfo -e (text format) → parse "Number of ways"
+        info = subprocess.run([
+            osmium_path, 'fileinfo', '-e', bldg_pbf
+        ], capture_output=True, text=True, timeout=30, creationflags=flags)
+        if info.returncode == 0:
+            # Parse "Number of ways: 36118" from text output
+            m = re.search(r'Number of ways:\s*(\d+)', info.stdout)
+            if m:
+                count_est = int(m.group(1))
+            else:
+                # Fallback: file size estimate (~38 bytes/way in compressed PBF)
+                fsize = os.path.getsize(bldg_pbf)
+                count_est = max(0, fsize // 38)
+        else:
+            # Fallback: file size estimate
+            fsize = os.path.getsize(bldg_pbf)
+            count_est = max(0, fsize // 38)
+    except Exception as e:
+        print(f"  [sample] 采样失败: {e}")
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    # Compute area in km2
+    import numpy as np
+    mid_lat = (south + north) / 2
+    area_km2 = (north - south) * 111.0 * (east - west) * 111.0 * np.cos(np.radians(mid_lat))
+    density = count_est / area_km2 if area_km2 > 0 and count_est > 0 else 0
+    elapsed = _time.time() - t0
+
+    # Decision: >150K buildings or >500/km² → use building_landmarks filter
+    should_filter = count_est > 150000 or density > 500
+
+    print(f"  [sample] 建筑: ~{count_est:,} ways, 面积: {area_km2:.0f}km², "
+          f"密度: {density:.0f}/km², 过滤: {should_filter} ({elapsed:.1f}s)")
+    return {
+        'count_est': count_est,
+        'area_km2': area_km2,
+        'density': density,
+        'should_filter': should_filter,
+    }
 
 
 def fetch_from_cli(

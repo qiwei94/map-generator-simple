@@ -1,4 +1,4 @@
-"""使用纯 osmium CLI 管线生成西湖 3MF 模型
+"""使用纯 osmium CLI 管线生成巴黎 3MF 模型
 
 完整管线演示：
 PBF → osmium extract → osmium tags-filter → osmium export → GeoJSON → GeoDataFrame → 3MF
@@ -42,7 +42,7 @@ from _TEXTURE_STYLE_OF_DEEPSEEK.config import compute_scale, WATERWAY_WIDTHS, TE
 # CLI 参数
 # ---------------------------------------------------------------------------
 parser = argparse.ArgumentParser(
-    description="使用 osmium CLI 管线生成西湖 3MF 模型"
+    description="使用 osmium CLI 管线生成巴黎 3MF 模型"
 )
 parser.add_argument(
     '--elevation-file',
@@ -69,25 +69,19 @@ parser.add_argument(
     default=0.5,
     help='细长建筑高度缩放系数（默认 0.5，即减半）'
 )
-parser.add_argument(
-    '--sample-only',
-    action='store_true',
-    default=False,
-    help='仅采样统计建筑密度，自动推荐参数，不执行全管线'
-)
 cli_args = parser.parse_args()
 
 # PBF 文件
-PBF_FILE = os.path.join(_project_root, 'pbf_cache', 'zhejiang-latest.osm.pbf')
+PBF_FILE = os.path.join(_project_root, 'pbf_cache', 'ile-de-france-latest.osm.pbf')
 if not os.path.exists(PBF_FILE):
     print(f"ERROR: PBF file not found: {PBF_FILE}")
     sys.exit(1)
 
-# 西湖 25km 区域
-LAT1, LON1 = 30.13, 120.01
-LAT2, LON2 = 30.36, 120.29
-CITY_NAME = "westlake_cli"
-OUTPUT_DIR = "output/westlake_cli"
+# 巴黎 25km 区域
+LAT1, LON1 = 48.76, 2.18
+LAT2, LON2 = 48.98, 2.52
+CITY_NAME = "paris_cli"
+OUTPUT_DIR = "output/paris_cli"
 
 # Sub-mesh on/off (一次性调参开关，改完跑即可)
 ENABLE_VEGETATION = False
@@ -110,86 +104,6 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 # =====================================================================
 print("\n[Stage 0] Checking CLI tools...")
 fetcher = get_cli_fetcher()
-
-# =====================================================================
-# Stage 0b: 采样模式 — 快速统计建筑密度，推荐参数后退出
-# =====================================================================
-if cli_args.sample_only:
-    print(f"\n[Stage 0b] SAMPLE MODE — 快速采样建筑密度...")
-    import subprocess, json, shutil
-    t_s = time.time()
-    osmium = fetcher._get_tool_path('osmium')
-    if not osmium:
-        print("  ERROR: osmium not found")
-        sys.exit(1)
-    _tmp_dir = os.path.join(_project_root, 'tmp', f'_sample_{CITY_NAME}')
-    os.makedirs(_tmp_dir, exist_ok=True)
-    _pbf_extract = os.path.join(_tmp_dir, 'extract.osm.pbf')
-    _pbf_buildings = os.path.join(_tmp_dir, 'buildings.osm.pbf')
-    _flags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
-    n_buildings = -1
-    try:
-        # Step 1: osmium extract (bbox裁剪)
-        subprocess.run([
-            osmium, 'extract',
-            '-b', f'{LON1},{LAT1},{LON2},{LAT2}', '-s', 'smart',
-            PBF_FILE, '-o', _pbf_extract, '--overwrite'
-        ], capture_output=True, timeout=120, check=True, creationflags=_flags)
-        # Step 2: osmium tags-filter (只保留building)
-        subprocess.run([
-            osmium, 'tags-filter',
-            _pbf_extract, 'nwr/building',
-            '-o', _pbf_buildings, '--overwrite'
-        ], capture_output=True, timeout=60, check=True, creationflags=_flags)
-        # Step 3: osmium fileinfo -e 获取元素统计
-        info = subprocess.run([
-            osmium, 'fileinfo', '-e', '-f', 'json', _pbf_buildings
-        ], capture_output=True, text=True, timeout=30, creationflags=_flags)
-        data = json.loads(info.stdout)
-        # fileinfo json 里有 metadata count
-        for item in data.get('data', {}).get('count', []):
-            if item.get('type') == 'node':
-                pass  # nodes 不是建筑
-        # 更可靠: 用 osmium export 输出 geojsonseq 然后 count
-        # 但更快: 直接读取 PBF 的 way count
-        # 简化方案: 文件大小估算
-        fsize = os.path.getsize(_pbf_buildings)
-        # 粗略估算: 每个建筑约 200-500 bytes in PBF
-        n_buildings_est = max(0, fsize // 300)
-        print(f"  建筑 PBF 大小: {fsize / 1024:.1f} KB")
-        print(f"  估算建筑数: ~{n_buildings_est:,} (基于文件大小)")
-        # 更精确: 用 fileinfo
-        if info.returncode == 0:
-            # 解析 extended metadata
-            meta = data.get('data', {})
-            if 'metadata' in meta:
-                for m in meta['metadata']:
-                    if 'count' in m:
-                        print(f"  fileinfo: {m}")
-    except Exception as e:
-        print(f"  采样失败: {e}")
-        n_buildings_est = -1
-    finally:
-        shutil.rmtree(_tmp_dir, ignore_errors=True)
-
-    area_km2_est = (LAT2 - LAT1) * 111 * (LON2 - LON1) * 111 * \
-                   np.cos(np.radians((LAT1 + LAT2) / 2))
-    density = n_buildings_est / area_km2_est if area_km2_est > 0 and n_buildings_est > 0 else 0
-
-    print(f"\n  估计面积: {area_km2_est:.1f} km²")
-    print(f"  建筑密度: ~{density:.0f} /km²")
-    print()
-    if n_buildings_est > 500000:
-        print(f"  ⚠️  超高密度城市！建议:")
-        print(f"     - MERGE_BLOCK_LAYERS = True (必须)")
-        print(f"     - building_landmarks 过滤器 (已自动启用)")
-        print(f"     - 缩小 bbox 到核心区: 经纬度跨度 ≤ 0.1°")
-    elif n_buildings_est > 100000:
-        print(f"  ℹ️  高密度城市，MERGE 模式 + building_landmarks 过滤器已启用")
-    else:
-        print(f"  ✅ 建筑密度正常，可安全运行全管线")
-    print(f"  采样耗时: {time.time() - t_s:.1f}s")
-    sys.exit(0)
 print(f"  osmium available: {fetcher.osmium_available}")
 
 if not fetcher.osmium_available:
@@ -377,9 +291,6 @@ else:
 print(f"\n[Stage 3b] Fetching buildings data...")
 t3b = time.time()
 
-# MERGE 模式下高密度城市只需提取地标建筑（building_landmarks 过滤器），
-# 避免加载全量建筑数据（巴黎 1.9M → ~几百个），节省 20+ 分钟
-# 低密度城市（杭州等）自动使用全量 building，由 Stage 0c 决定
 # _bldg_tag 已在 Stage 0c 自动设置
 buildings_gdf = fetch_from_cli(
     tag_type=_bldg_tag,
@@ -502,7 +413,6 @@ layers = preprocess_layers(
     bbox_wgs84=(south, west, north, east),
     utm_crs=utm_crs,
     origin=origin,
-    merge_mode=MERGE_BLOCK_LAYERS,
 )
 print(f"  {layers.summary()}")
 print(f"  Time: {time.time() - t45:.1f}s")
