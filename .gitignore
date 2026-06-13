@@ -10,6 +10,15 @@ ENV/
 
 # Output and intermediate files
 output/
+tmp/
+cache/
+dem_cache/
+pbf_cache/
+to_delete/
+
+# Secrets and local config
+.env
+.claude/
 
 # OS
 .DS_Store

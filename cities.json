@@ -1,0 +1,614 @@
+[
+  {
+    "city": "shanghai_bund",
+    "country": "china",
+    "bbox": "31.230,121.470,31.250,121.490",
+    "pbf": "shanghai-latest.osm.pbf"
+  },
+  {
+    "city": "beijing_forbidden",
+    "country": "china",
+    "bbox": "39.910,116.385,39.930,116.405",
+    "pbf": "beijing-latest.osm.pbf"
+  },
+  {
+    "city": "guangzhou_canton",
+    "country": "china",
+    "bbox": "23.110,113.260,23.130,113.280",
+    "pbf": "guangdong-latest.osm.pbf"
+  },
+  {
+    "city": "chengdu_jinli",
+    "country": "china",
+    "bbox": "30.645,104.040,30.665,104.060",
+    "pbf": "sichuan-latest.osm.pbf"
+  },
+  {
+    "city": "guilin_lijiang",
+    "country": "china",
+    "bbox": "25.270,110.280,25.290,110.300",
+    "pbf": "guangxi-latest.osm.pbf"
+  },
+  {
+    "city": "hangzhou_westlake",
+    "country": "china",
+    "bbox": "30.230,120.130,30.250,120.150",
+    "pbf": "zhejiang-latest.osm.pbf"
+  },
+  {
+    "city": "hongkong_victoria",
+    "country": "china",
+    "bbox": "22.280,114.155,22.300,114.175",
+    "pbf": "hong-kong-latest.osm.pbf"
+  },
+  {
+    "city": "xian_terracotta",
+    "country": "china",
+    "bbox": "34.260,108.940,34.280,108.960",
+    "pbf": "shaanxi-latest.osm.pbf"
+  },
+  {
+    "city": "chongqing_hongya",
+    "country": "china",
+    "bbox": "29.550,106.570,29.570,106.590",
+    "pbf": "chongqing-latest.osm.pbf"
+  },
+  {
+    "city": "suzhou_garden",
+    "country": "china",
+    "bbox": "31.300,120.610,31.320,120.630",
+    "pbf": "jiangsu-latest.osm.pbf"
+  },
+  {
+    "city": "nanjing_confucius",
+    "country": "china",
+    "bbox": "32.040,118.780,32.060,118.800",
+    "pbf": "jiangsu-latest.osm.pbf"
+  },
+  {
+    "city": "dali_erhai",
+    "country": "china",
+    "bbox": "25.690,100.170,25.710,100.190",
+    "pbf": "yunnan-latest.osm.pbf"
+  },
+  {
+    "city": "macau_ruins",
+    "country": "china",
+    "bbox": "22.190,113.530,22.210,113.550",
+    "pbf": "guangdong-latest.osm.pbf"
+  },
+  {
+    "city": "shenzhen_huaqiang",
+    "country": "china",
+    "bbox": "22.540,114.080,22.560,114.100",
+    "pbf": "guangdong-latest.osm.pbf"
+  },
+  {
+    "city": "wuhan_yangtze",
+    "country": "china",
+    "bbox": "30.580,114.270,30.600,114.290",
+    "pbf": "hubei-latest.osm.pbf"
+  },
+  {
+    "city": "xiamen_gulangyu",
+    "country": "china",
+    "bbox": "24.440,118.070,24.460,118.090",
+    "pbf": "fujian-latest.osm.pbf"
+  },
+  {
+    "city": "lhasa_potala",
+    "country": "china",
+    "bbox": "29.650,91.110,29.670,91.130",
+    "pbf": "tibet-latest.osm.pbf"
+  },
+  {
+    "city": "harbin_ice",
+    "country": "china",
+    "bbox": "45.750,126.650,45.770,126.670",
+    "pbf": "heilongjiang-latest.osm.pbf"
+  },
+  {
+    "city": "kunming_dianchi",
+    "country": "china",
+    "bbox": "25.030,102.710,25.050,102.730",
+    "pbf": "yunnan-latest.osm.pbf"
+  },
+  {
+    "city": "changsha_yuelu",
+    "country": "china",
+    "bbox": "28.180,112.960,28.200,112.980",
+    "pbf": "hunan-latest.osm.pbf"
+  },
+  {
+    "city": "osaka_castle",
+    "country": "japan",
+    "bbox": "34.685,135.515,34.705,135.535",
+    "pbf": "kansai-latest.osm.pbf"
+  },
+  {
+    "city": "nara_temple",
+    "country": "japan",
+    "bbox": "34.675,135.800,34.695,135.820",
+    "pbf": "kansai-latest.osm.pbf"
+  },
+  {
+    "city": "sapporo_snow",
+    "country": "japan",
+    "bbox": "43.060,141.340,43.080,141.360",
+    "pbf": "hokkaido-latest.osm.pbf"
+  },
+  {
+    "city": "fukuoka_castle",
+    "country": "japan",
+    "bbox": "33.590,130.400,33.610,130.420",
+    "pbf": "kyushu-latest.osm.pbf"
+  },
+  {
+    "city": "busan_haeundae",
+    "country": "south-korea",
+    "bbox": "35.155,129.155,35.175,129.175",
+    "pbf": "south-korea-latest.osm.pbf"
+  },
+  {
+    "city": "jeju_seongsan",
+    "country": "south-korea",
+    "bbox": "33.460,126.940,33.480,126.960",
+    "pbf": "south-korea-latest.osm.pbf"
+  },
+  {
+    "city": "delhi_redfort",
+    "country": "india",
+    "bbox": "28.655,77.235,28.675,77.255",
+    "pbf": "northern-zone-latest.osm.pbf"
+  },
+  {
+    "city": "jaipur_palace",
+    "country": "india",
+    "bbox": "26.920,75.780,26.940,75.800",
+    "pbf": "northern-zone-latest.osm.pbf"
+  },
+  {
+    "city": "agra_tajmahal",
+    "country": "india",
+    "bbox": "27.170,78.040,27.190,78.060",
+    "pbf": "northern-zone-latest.osm.pbf"
+  },
+  {
+    "city": "phuket_beach",
+    "country": "thailand",
+    "bbox": "7.880,98.300,7.900,98.320",
+    "pbf": "thailand-latest.osm.pbf"
+  },
+  {
+    "city": "chiangmai_oldcity",
+    "country": "thailand",
+    "bbox": "18.780,98.980,18.800,99.000",
+    "pbf": "thailand-latest.osm.pbf"
+  },
+  {
+    "city": "hochiminh_downtown",
+    "country": "vietnam",
+    "bbox": "10.770,106.690,10.790,106.710",
+    "pbf": "vietnam-latest.osm.pbf"
+  },
+  {
+    "city": "losangeles_hollywood",
+    "country": "us",
+    "bbox": "34.100,-118.340,34.120,-118.320",
+    "pbf": "california-latest.osm.pbf"
+  },
+  {
+    "city": "seattle_pikeplace",
+    "country": "us",
+    "bbox": "47.600,-122.340,47.620,-122.320",
+    "pbf": "washington-latest.osm.pbf"
+  },
+  {
+    "city": "boston_freedomtrail",
+    "country": "us",
+    "bbox": "42.355,-71.060,42.375,-71.040",
+    "pbf": "massachusetts-latest.osm.pbf"
+  },
+  {
+    "city": "miami_southbeach",
+    "country": "us",
+    "bbox": "25.770,-80.140,25.790,-80.120",
+    "pbf": "florida-latest.osm.pbf"
+  },
+  {
+    "city": "honolulu_waikiki",
+    "country": "us",
+    "bbox": "21.280,-157.830,21.300,-157.810",
+    "pbf": "hawaii-latest.osm.pbf"
+  },
+  {
+    "city": "lasvegas_strip",
+    "country": "us",
+    "bbox": "36.110,-115.170,36.130,-115.150",
+    "pbf": "nevada-latest.osm.pbf"
+  },
+  {
+    "city": "washingtondc_capitol",
+    "country": "us",
+    "bbox": "38.890,-77.010,38.910,-76.990",
+    "pbf": "district-of-columbia-latest.osm.pbf"
+  },
+  {
+    "city": "melbourne_federation",
+    "country": "australia",
+    "bbox": "-37.820,144.960,-37.800,144.980",
+    "pbf": "victoria-latest.osm.pbf"
+  },
+  {
+    "city": "perth_riverside",
+    "country": "australia",
+    "bbox": "-31.960,115.860,-31.940,115.880",
+    "pbf": "western-australia-latest.osm.pbf"
+  },
+  {
+    "city": "luxor_valley",
+    "country": "egypt",
+    "bbox": "25.690,32.640,25.710,32.660",
+    "pbf": "egypt-latest.osm.pbf"
+  },
+  {
+    "city": "santorini_oia",
+    "country": "greece",
+    "bbox": "36.460,25.360,36.480,25.380",
+    "pbf": "greece-latest.osm.pbf"
+  },
+  {
+    "city": "bergen_wharf",
+    "country": "norway",
+    "bbox": "60.390,5.320,60.410,5.340",
+    "pbf": "norway-latest.osm.pbf"
+  },
+  {
+    "city": "salzburg_castle",
+    "country": "austria",
+    "bbox": "47.800,13.040,47.820,13.060",
+    "pbf": "austria-latest.osm.pbf"
+  },
+  {
+    "city": "geneva_lake",
+    "country": "switzerland",
+    "bbox": "46.200,6.140,46.220,6.160",
+    "pbf": "switzerland-latest.osm.pbf"
+  },
+  {
+    "city": "lyon_bellecour",
+    "country": "france",
+    "bbox": "45.750,4.830,45.770,4.850",
+    "pbf": "rhone-alpes-latest.osm.pbf"
+  },
+  {
+    "city": "milan_duomo",
+    "country": "italy",
+    "bbox": "45.460,9.180,45.480,9.200",
+    "pbf": "nord-ovest-latest.osm.pbf"
+  },
+  {
+    "city": "seville_alcazar",
+    "country": "spain",
+    "bbox": "37.380,-5.990,37.400,-5.970",
+    "pbf": "andalucia-latest.osm.pbf"
+  },
+  {
+    "city": "tokyo_shibuya",
+    "country": "japan",
+    "bbox": "35.655,139.695,35.675,139.715",
+    "pbf": "kanto-latest.osm.pbf"
+  },
+  {
+    "city": "kyoto_gion",
+    "country": "japan",
+    "bbox": "34.995,135.765,35.015,135.785",
+    "pbf": "kansai-latest.osm.pbf"
+  },
+  {
+    "city": "seoul_gangnam",
+    "country": "south-korea",
+    "bbox": "37.495,126.995,37.515,127.015",
+    "pbf": "south-korea-latest.osm.pbf"
+  },
+  {
+    "city": "bangkok_grandpalace",
+    "country": "thailand",
+    "bbox": "13.740,100.485,13.760,100.505",
+    "pbf": "thailand-latest.osm.pbf"
+  },
+  {
+    "city": "hanoi_oldquarter",
+    "country": "vietnam",
+    "bbox": "21.030,105.845,21.050,105.865",
+    "pbf": "vietnam-latest.osm.pbf"
+  },
+  {
+    "city": "singapore_marina",
+    "country": "malaysia-singapore-brunei",
+    "bbox": "1.275,103.845,1.295,103.865",
+    "pbf": "malaysia-singapore-brunei-latest.osm.pbf"
+  },
+  {
+    "city": "bali_ubud",
+    "country": "indonesia",
+    "bbox": "-8.520,115.255,-8.500,115.275",
+    "pbf": "indonesia-latest.osm.pbf"
+  },
+  {
+    "city": "mumbai_gateway",
+    "country": "india",
+    "bbox": "18.910,72.825,18.930,72.845",
+    "pbf": "western-zone-latest.osm.pbf"
+  },
+  {
+    "city": "manila_intramuros",
+    "country": "philippines",
+    "bbox": "14.585,120.965,14.605,120.985",
+    "pbf": "philippines-latest.osm.pbf"
+  },
+  {
+    "city": "taipei_101",
+    "country": "taiwan",
+    "bbox": "25.025,121.540,25.045,121.560",
+    "pbf": "taiwan-latest.osm.pbf"
+  },
+  {
+    "city": "dubai_downtown",
+    "country": "gcc-states",
+    "bbox": "25.185,55.265,25.205,55.285",
+    "pbf": "gcc-states-latest.osm.pbf"
+  },
+  {
+    "city": "istanbul_sultanahmet",
+    "country": "turkey",
+    "bbox": "41.000,28.970,41.020,28.990",
+    "pbf": "turkey-latest.osm.pbf"
+  },
+  {
+    "city": "paris_eiffel",
+    "country": "france",
+    "bbox": "48.850,2.285,48.870,2.305",
+    "pbf": "ile-de-france-latest.osm.pbf"
+  },
+  {
+    "city": "nice_promenade",
+    "country": "france",
+    "bbox": "43.690,7.255,43.710,7.275",
+    "pbf": "provence-alpes-cote-d-azur-latest.osm.pbf"
+  },
+  {
+    "city": "rome_colosseum",
+    "country": "italy",
+    "bbox": "41.885,12.480,41.905,12.500",
+    "pbf": "centro-latest.osm.pbf"
+  },
+  {
+    "city": "venice_sanmarco",
+    "country": "italy",
+    "bbox": "45.430,12.330,45.450,12.350",
+    "pbf": "nord-est-latest.osm.pbf"
+  },
+  {
+    "city": "florence_duomo",
+    "country": "italy",
+    "bbox": "43.765,11.245,43.785,11.265",
+    "pbf": "centro-latest.osm.pbf"
+  },
+  {
+    "city": "barcelona_sagrada",
+    "country": "spain",
+    "bbox": "41.395,2.160,41.415,2.180",
+    "pbf": "cataluna-latest.osm.pbf"
+  },
+  {
+    "city": "madrid_prado",
+    "country": "spain",
+    "bbox": "40.410,-3.700,40.430,-3.680",
+    "pbf": "madrid-latest.osm.pbf"
+  },
+  {
+    "city": "london_bigben",
+    "country": "great-britain",
+    "bbox": "51.495,-0.140,51.515,-0.120",
+    "pbf": "great-britain-latest.osm.pbf"
+  },
+  {
+    "city": "edinburgh_castle",
+    "country": "great-britain",
+    "bbox": "55.945,-3.205,55.965,-3.185",
+    "pbf": "great-britain-latest.osm.pbf"
+  },
+  {
+    "city": "berlin_brandenburggate",
+    "country": "germany",
+    "bbox": "52.510,13.370,52.530,13.390",
+    "pbf": "berlin-latest.osm.pbf"
+  },
+  {
+    "city": "munich_marienplatz",
+    "country": "germany",
+    "bbox": "48.130,11.565,48.150,11.585",
+    "pbf": "bayern-latest.osm.pbf"
+  },
+  {
+    "city": "amsterdam_canal",
+    "country": "netherlands",
+    "bbox": "52.365,4.885,52.385,4.905",
+    "pbf": "netherlands-latest.osm.pbf"
+  },
+  {
+    "city": "zurich_lake",
+    "country": "switzerland",
+    "bbox": "47.360,8.535,47.380,8.555",
+    "pbf": "switzerland-latest.osm.pbf"
+  },
+  {
+    "city": "vienna_stephansdom",
+    "country": "austria",
+    "bbox": "48.205,16.365,48.225,16.385",
+    "pbf": "austria-latest.osm.pbf"
+  },
+  {
+    "city": "athens_acropolis",
+    "country": "greece",
+    "bbox": "37.965,23.720,37.985,23.740",
+    "pbf": "greece-latest.osm.pbf"
+  },
+  {
+    "city": "lisbon_alfama",
+    "country": "portugal",
+    "bbox": "38.705,-9.140,38.725,-9.120",
+    "pbf": "portugal-latest.osm.pbf"
+  },
+  {
+    "city": "prague_oldtown",
+    "country": "czech-republic",
+    "bbox": "50.080,14.415,50.100,14.435",
+    "pbf": "czech-republic-latest.osm.pbf"
+  },
+  {
+    "city": "dubrovnik_oldcity",
+    "country": "croatia",
+    "bbox": "42.635,18.105,42.655,18.125",
+    "pbf": "croatia-latest.osm.pbf"
+  },
+  {
+    "city": "budapest_parliament",
+    "country": "hungary",
+    "bbox": "47.495,19.035,47.515,19.055",
+    "pbf": "hungary-latest.osm.pbf"
+  },
+  {
+    "city": "reykjavik_hallgrimskirkja",
+    "country": "iceland",
+    "bbox": "64.135,-21.935,64.155,-21.915",
+    "pbf": "iceland-latest.osm.pbf"
+  },
+  {
+    "city": "oslo_opera",
+    "country": "norway",
+    "bbox": "59.900,10.735,59.920,10.755",
+    "pbf": "norway-latest.osm.pbf"
+  },
+  {
+    "city": "stockholm_gamlastan",
+    "country": "sweden",
+    "bbox": "59.320,18.065,59.340,18.085",
+    "pbf": "sweden-latest.osm.pbf"
+  },
+  {
+    "city": "copenhagen_nyhavn",
+    "country": "denmark",
+    "bbox": "55.675,12.585,55.695,12.605",
+    "pbf": "denmark-latest.osm.pbf"
+  },
+  {
+    "city": "helsinki_cathedral",
+    "country": "finland",
+    "bbox": "60.165,24.935,60.185,24.955",
+    "pbf": "finland-latest.osm.pbf"
+  },
+  {
+    "city": "dublin_templebar",
+    "country": "ireland-and-northern-ireland",
+    "bbox": "53.340,-6.275,53.360,-6.255",
+    "pbf": "ireland-and-northern-ireland-latest.osm.pbf"
+  },
+  {
+    "city": "brussels_grandplace",
+    "country": "belgium",
+    "bbox": "50.840,4.345,50.860,4.365",
+    "pbf": "belgium-latest.osm.pbf"
+  },
+  {
+    "city": "warsaw_oldtown",
+    "country": "poland",
+    "bbox": "52.245,21.005,52.265,21.025",
+    "pbf": "poland-latest.osm.pbf"
+  },
+  {
+    "city": "moscow_kremlin",
+    "country": "russia",
+    "bbox": "55.745,37.605,55.765,37.625",
+    "pbf": "russia-latest.osm.pbf"
+  },
+  {
+    "city": "newyork_manhattan",
+    "country": "us",
+    "bbox": "40.745,-73.995,40.765,-73.975",
+    "pbf": "new-york-latest.osm.pbf"
+  },
+  {
+    "city": "sanfrancisco_fishermanswharf",
+    "country": "us",
+    "bbox": "37.805,-122.425,37.825,-122.405",
+    "pbf": "california-latest.osm.pbf"
+  },
+  {
+    "city": "chicago_loop",
+    "country": "us",
+    "bbox": "41.875,-87.640,41.895,-87.620",
+    "pbf": "illinois-latest.osm.pbf"
+  },
+  {
+    "city": "vancouver_stanley",
+    "country": "canada",
+    "bbox": "49.285,-123.145,49.305,-123.125",
+    "pbf": "british-columbia-latest.osm.pbf"
+  },
+  {
+    "city": "mexicocity_zocalo",
+    "country": "mexico",
+    "bbox": "19.425,-99.145,19.445,-99.125",
+    "pbf": "mexico-latest.osm.pbf"
+  },
+  {
+    "city": "rio_copacabana",
+    "country": "brazil",
+    "bbox": "-22.975,-43.195,-22.955,-43.175",
+    "pbf": "sudeste-latest.osm.pbf"
+  },
+  {
+    "city": "buenosaires_santelmo",
+    "country": "argentina",
+    "bbox": "-34.625,-58.385,-34.605,-58.365",
+    "pbf": "argentina-latest.osm.pbf"
+  },
+  {
+    "city": "lima_miraflores",
+    "country": "peru",
+    "bbox": "-12.125,-77.045,-12.105,-77.025",
+    "pbf": "peru-latest.osm.pbf"
+  },
+  {
+    "city": "sydney_operahouse",
+    "country": "australia",
+    "bbox": "-33.860,151.205,-33.840,151.225",
+    "pbf": "new-south-wales-latest.osm.pbf"
+  },
+  {
+    "city": "auckland_skytower",
+    "country": "new-zealand",
+    "bbox": "-36.855,174.755,-36.835,174.775",
+    "pbf": "new-zealand-latest.osm.pbf"
+  },
+  {
+    "city": "cairo_pyramids",
+    "country": "egypt",
+    "bbox": "29.975,31.130,29.995,31.150",
+    "pbf": "egypt-latest.osm.pbf"
+  },
+  {
+    "city": "marrakech_medina",
+    "country": "morocco",
+    "bbox": "31.625,-7.995,31.645,-7.975",
+    "pbf": "morocco-latest.osm.pbf"
+  },
+  {
+    "city": "capetown_waterfront",
+    "country": "south-africa",
+    "bbox": "-33.915,18.415,-33.895,18.435",
+    "pbf": "south-africa-latest.osm.pbf"
+  }
+]
