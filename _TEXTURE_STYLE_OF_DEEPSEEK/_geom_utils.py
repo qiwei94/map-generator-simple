@@ -175,6 +175,7 @@ def collect_water_polygons(
     max_edge_m: float = 100.0,
     polygon_priority: bool = True,
     overlap_threshold: float = 0.3,
+    linestring_width_scale: float = 0.5,
 ) -> List[Polygon]:
     """Filter + buffer water features into a list of qualifying polygons.
 
@@ -191,6 +192,9 @@ def collect_water_polygons(
             (Polygon takes precedence, matching the reference style).
         overlap_threshold: ratio of LineString-poly area covered by
             Polygon coverage above which the LineString poly is dropped.
+        linestring_width_scale: multiplier for LineString buffer width.
+            Default 0.5 = half the configured WATERWAY_WIDTHS value.
+            Prevents buffered rivers from cutting too wide into terrain.
 
     Returns:
         List of Shapely Polygons (densified) ready for extrusion.
@@ -214,7 +218,7 @@ def collect_water_polygons(
                 polygon_polys.append(poly)
 
         elif isinstance(geom, (LineString, MultiLineString)):
-            width = _resolve_waterway_width(row)
+            width = _resolve_waterway_width(row) * linestring_width_scale
             for poly in _buffered_linestring_polys(geom, width):
                 if poly.area >= min_area_m2:
                     linestring_polys.append(poly)
