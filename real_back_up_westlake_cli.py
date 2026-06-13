@@ -17,6 +17,7 @@ import os
 import sys
 import time
 import numpy as np
+import pandas as pd
 
 _project_root = os.path.dirname(os.path.abspath(__file__))
 if _project_root not in sys.path:
@@ -358,6 +359,63 @@ if __name__ == "__main__":
     if 'name' in water_gdf.columns:
         named = water_gdf['name'].dropna().unique()
         print(f"  Named features ({len(named)}): {list(named[:10])}")
+
+    # =====================================================================
+    # Stage 2b: 水体补全 — 高德卫星 + 自适应 buffer（提前到地形切割之前）
+    # =====================================================================
+    print(f"\n[Stage 2b] Water supplement (Gaode + adaptive buffer)...")
+    t2b = time.time()
+
+    if water_gdf is not None and len(water_gdf) > 0:
+        from shapely.geometry import LineString as _LS, MultiLineString as _MLS
+        from shapely.geometry import Polygon as _Poly, MultiPolygon as _MPoly
+
+        # Extract existing polygons and linestrings from water_gdf (UTM)
+        _wl_polys = []
+        _wl_lines = []
+        for _, _row in water_gdf.iterrows():
+            _g = _row.geometry
+            if _g is None or _g.is_empty:
+                continue
+            if isinstance(_g, (_Poly, _MPoly)):
+                _polys = _g.geoms if isinstance(_g, _MPoly) else [_g]
+                _wl_polys.extend(p for p in _polys if not p.is_empty)
+            elif isinstance(_g, (_LS, _MLS)):
+                _ww = _row.get('waterway', 'river')
+                _lines = _g.geoms if isinstance(_g, _MLS) else [_g]
+                _wl_lines.extend((l, _ww) for l in _lines if not l.is_empty)
+
+        if _wl_lines:
+            try:
+                from _TEXTURE_STYLE_OF_DEEPSEEK._water_supplement import supplement_wl_coverage
+                _enhanced = supplement_wl_coverage(
+                    _wl_polys, _wl_lines, (south, west, north, east),
+                    utm_crs=utm_crs, origin=origin,
+                )
+                _n_new = len(_enhanced) - len(_wl_polys)
+                if _n_new > 0:
+                    print(f"  Supplemented: {_n_new} new polygons from Gaode")
+                    # Replace water_gdf LineStrings with supplemented polygons
+                    import geopandas as gpd
+                    _new_rows = []
+                    for _p in _enhanced:
+                        if not _p.is_empty and _p.area > 0:
+                            _new_rows.append({'geometry': _p, 'waterway': 'river', 'name': 'supplemented'})
+                    if _new_rows:
+                        _suppl_gdf = gpd.GeoDataFrame(_new_rows, crs=water_gdf.crs)
+                        # Keep only Polygon rows from original + new supplemented
+                        _poly_mask = water_gdf.geometry.type.isin(['Polygon', 'MultiPolygon'])
+                        water_gdf = gpd.GeoDataFrame(
+                            pd.concat([water_gdf[_poly_mask], _suppl_gdf], ignore_index=True),
+                            crs=water_gdf.crs)
+                        print(f"  water_gdf updated: {len(water_gdf)} features (polygons only)")
+                else:
+                    print(f"  No new polygons from Gaode supplement")
+            except Exception as _e:
+                print(f"  Water supplement failed (non-fatal): {_e}")
+        else:
+            print(f"  No LineString rivers to supplement")
+    print(f"  Time: {time.time() - t2b:.1f}s")
 
     # =====================================================================
     # Stage 3: Fetch vegetation data (CLI only)
