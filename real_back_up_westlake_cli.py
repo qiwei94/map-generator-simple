@@ -37,6 +37,7 @@ from _TEXTURE_STYLE_OF_DEEPSEEK.vegetation_exclusion import build_deepseek_veget
 from _TEXTURE_STYLE_OF_DEEPSEEK.block_base import build_deepseek_block_base_v3
 from _TEXTURE_STYLE_OF_DEEPSEEK._layer_preprocess import preprocess_layers
 from _TEXTURE_STYLE_OF_DEEPSEEK._pipeline_cache import PipelineCache
+from _TEXTURE_STYLE_OF_DEEPSEEK._process_lock import acquire_lock
 from _TEXTURE_STYLE_OF_DEEPSEEK.exporter import export_deepseek_3mf, split_terrain_mesh
 from _TEXTURE_STYLE_OF_DEEPSEEK.config import compute_scale, WATERWAY_WIDTHS, TERRAIN_GRID, get_area_class, BUILDING_V2_HOTSPOT_RELAX
 
@@ -111,6 +112,9 @@ print("=" * 70)
 t_start = time.time()
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# Process lock: prevent multiple concurrent instances
+acquire_lock(OUTPUT_DIR, CITY_NAME)
 
 # Pipeline cache (saves terrain/preprocess to disk for faster re-runs)
 _pipeline_cache = PipelineCache(CITY_NAME, enabled=not cli_args.no_cache)
