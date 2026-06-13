@@ -12,6 +12,7 @@ conda install -c conda-forge osmium-tool
 """
 
 import argparse
+import hashlib
 import os
 import sys
 import time
@@ -35,6 +36,7 @@ from _TEXTURE_STYLE_OF_DEEPSEEK.water import build_deepseek_water, build_deepsee
 from _TEXTURE_STYLE_OF_DEEPSEEK.vegetation_exclusion import build_deepseek_vegetation_v3
 from _TEXTURE_STYLE_OF_DEEPSEEK.block_base import build_deepseek_block_base_v3
 from _TEXTURE_STYLE_OF_DEEPSEEK._layer_preprocess import preprocess_layers
+from _TEXTURE_STYLE_OF_DEEPSEEK._pipeline_cache import PipelineCache
 from _TEXTURE_STYLE_OF_DEEPSEEK.exporter import export_deepseek_3mf, split_terrain_mesh
 from _TEXTURE_STYLE_OF_DEEPSEEK.config import compute_scale, WATERWAY_WIDTHS, TERRAIN_GRID, get_area_class, BUILDING_V2_HOTSPOT_RELAX
 
@@ -75,6 +77,12 @@ parser.add_argument(
     default=False,
     help='仅采样统计建筑密度，自动推荐参数，不执行全管线'
 )
+parser.add_argument(
+    '--no-cache',
+    action='store_true',
+    default=False,
+    help='禁用管线缓存，强制重新计算所有阶段'
+)
 cli_args = parser.parse_args()
 
 # PBF 文件
@@ -103,6 +111,11 @@ print("=" * 70)
 t_start = time.time()
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# Pipeline cache (saves terrain/preprocess to disk for faster re-runs)
+_pipeline_cache = PipelineCache(CITY_NAME, enabled=not cli_args.no_cache)
+if cli_args.no_cache:
+    print("[CACHE] Disabled via --no-cache")
 
 # =====================================================================
 # Stage 0: 检查 CLI 工具可用性
@@ -452,30 +465,45 @@ else:
 print(f"\n[Stage 4] Building terrain mesh (obj_4: terrain + water hollow)...")
 t4 = time.time()
 
-if water_gdf is not None and len(water_gdf) > 0:
-    try:
-        has_roads = roads_gdf is not None and len(roads_gdf) > 0
-        terrain_result = build_terrain_with_water_holes_manifold(
-            elevation_grid, width_m, height_m, area_km2, scale,
-            water_gdf,
-            roads_gdf=roads_gdf if has_roads else None,
-            enable_roads_fusion=has_roads,
-            bridges_only=True,
-        )
-        terrain_solid = terrain_result["mesh"]
-        print(f"  Terrain (with water holes) faces: {len(terrain_solid.faces):,}")
-        print(f"  Watertight: {terrain_solid.is_watertight}")
-    except Exception as e:
-        print(f"  WARNING: Terrain with water holes failed: {e}")
-        print(f"  Falling back to basic terrain...")
-        terrain_solid = build_deepseek_terrain(
+# Cache key: based on elevation grid hash + scale + data feature counts
+_elev_hash = hashlib.md5(elevation_grid.tobytes()).hexdigest()[:12] if elevation_grid is not None else 'none'
+_n_water = len(water_gdf) if water_gdf is not None else 0
+_n_roads = len(roads_gdf) if roads_gdf is not None else 0
+_terrain_cache_key = {
+    'elev_hash': _elev_hash, 'scale': round(scale, 8),
+    'area_km2': round(area_km2, 2), 'width_m': round(width_m, 1),
+    'height_m': round(height_m, 1), 'n_water': _n_water, 'n_roads': _n_roads,
+}
+
+def _compute_terrain():
+    if water_gdf is not None and len(water_gdf) > 0:
+        try:
+            has_roads = roads_gdf is not None and len(roads_gdf) > 0
+            terrain_result = build_terrain_with_water_holes_manifold(
+                elevation_grid, width_m, height_m, area_km2, scale,
+                water_gdf,
+                roads_gdf=roads_gdf if has_roads else None,
+                enable_roads_fusion=has_roads,
+                bridges_only=True,
+            )
+            _mesh = terrain_result["mesh"]
+            print(f"  Terrain (with water holes) faces: {len(_mesh.faces):,}")
+            print(f"  Watertight: {_mesh.is_watertight}")
+        except Exception as e:
+            print(f"  WARNING: Terrain with water holes failed: {e}")
+            print(f"  Falling back to basic terrain...")
+            _mesh = build_deepseek_terrain(
+                elevation_grid, width_m, height_m, area_km2, scale, water_gdf
+            )
+    else:
+        _mesh = build_deepseek_terrain(
             elevation_grid, width_m, height_m, area_km2, scale, water_gdf
         )
-else:
-    terrain_solid = build_deepseek_terrain(
-        elevation_grid, width_m, height_m, area_km2, scale, water_gdf
-    )
-    print(f"  Terrain (no water data) faces: {len(terrain_solid.faces):,}")
+        print(f"  Terrain (no water data) faces: {len(_mesh.faces):,}")
+    return _mesh
+
+terrain_solid = _pipeline_cache.get_or_compute(
+    'terrain_v1', _terrain_cache_key, _compute_terrain, label='terrain mesh')
 
 print(f"  Time: {time.time() - t4:.1f}s")
 
@@ -486,24 +514,44 @@ print(f"\n[Stage 4.5] Preprocessing layers (subtraction + precision filter)...")
 t45 = time.time()
 
 bbox_local = (bbox_x_min, bbox_y_min, bbox_x_max, bbox_y_max)
-layers = preprocess_layers(
-    buildings_gdf=buildings_gdf,
-    roads_gdf=roads_gdf,
-    water_gdf=water_gdf,
-    vegetation_gdf=vegetation_gdf,
-    bbox_local=bbox_local,
-    scale=scale,
-    enable_hotspot=True,
-    hotspot_relax=BUILDING_V2_HOTSPOT_RELAX,
-    area_km2=area_km2,
-    landuse_gdf=landuse_gdf,
-    narrow_threshold=cli_args.narrow_threshold,
-    narrow_penalty=cli_args.narrow_penalty,
-    bbox_wgs84=(south, west, north, east),
-    utm_crs=utm_crs,
-    origin=origin,
-    merge_mode=MERGE_BLOCK_LAYERS,
-)
+
+# Cache key: based on input data sizes + key parameters
+_n_bldg = len(buildings_gdf) if buildings_gdf is not None else 0
+_n_veg = len(vegetation_gdf) if vegetation_gdf is not None else 0
+_n_landuse = len(landuse_gdf) if landuse_gdf is not None else 0
+_preprocess_cache_key = {
+    'n_bldg': _n_bldg, 'n_roads': _n_roads, 'n_water': _n_water,
+    'n_veg': _n_veg, 'n_landuse': _n_landuse,
+    'scale': round(scale, 8), 'area_km2': round(area_km2, 2),
+    'merge_mode': MERGE_BLOCK_LAYERS,
+    'narrow_threshold': cli_args.narrow_threshold,
+    'narrow_penalty': cli_args.narrow_penalty,
+}
+
+def _compute_preprocess():
+    return preprocess_layers(
+        buildings_gdf=buildings_gdf,
+        roads_gdf=roads_gdf,
+        water_gdf=water_gdf,
+        vegetation_gdf=vegetation_gdf,
+        bbox_local=bbox_local,
+        scale=scale,
+        enable_hotspot=True,
+        hotspot_relax=BUILDING_V2_HOTSPOT_RELAX,
+        area_km2=area_km2,
+        landuse_gdf=landuse_gdf,
+        narrow_threshold=cli_args.narrow_threshold,
+        narrow_penalty=cli_args.narrow_penalty,
+        bbox_wgs84=(south, west, north, east),
+        utm_crs=utm_crs,
+        origin=origin,
+        merge_mode=MERGE_BLOCK_LAYERS,
+    )
+
+layers = _pipeline_cache.get_or_compute(
+    'preprocess_v1', _preprocess_cache_key, _compute_preprocess,
+    label='preprocess layers')
+
 print(f"  {layers.summary()}")
 print(f"  Time: {time.time() - t45:.1f}s")
 
