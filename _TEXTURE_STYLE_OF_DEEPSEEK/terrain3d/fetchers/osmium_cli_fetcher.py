@@ -2,16 +2,11 @@
 
 高性能方案：使用 osmium 命令行工具，速度提升 10-20倍。
 
-标准流程（建筑、道路、植被等）：
+标准流程（所有要素类型，包括水体）：
 1. osmium extract - 区域裁剪
-2. osmium tags-filter - 标签过滤
+2. osmium tags-filter - 标签过滤（水体用 natural=water water waterway landuse=reservoir）
 3. osmium export - 导出 GeoJSON
 4. Python 读取 GeoJSON → GeoDataFrame
-
-河流 relation 专用流程（保留完整 multipolygon 结构）：
-1. osmium tags-filter - 从完整 PBF 过滤河流 relation（使用 r/ 前缀）
-2. osmium export - 导出 GeoJSON
-3. ogr2ogr -clipsrc - 精确裁剪到 bbox
 """
 
 import logging
@@ -58,6 +53,9 @@ class OsmiumCLIFetcher:
         ),
         'park': 'nwr/leisure=park,garden nwr/landuse=recreation_ground',
         'wetland': 'nwr/natural=wetland,marsh,swamp',
+        # 水体全量过滤：江河湖泊一网打尽
+        # 去掉了 r/ 前缀和 =* 后缀，让 Way 和 Relation 都能匹配
+        'water': 'natural=water water waterway landuse=reservoir',
         # 自然/植被地标：保护区 + 国家公园 + 命名湿地 / 景区
         # （西溪 OSM: boundary=national_park + leisure=nature_reserve + wikidata=Q1089272）
         'protected_area': ('nwr/boundary=national_park,protected_area '
@@ -74,14 +72,10 @@ class OsmiumCLIFetcher:
         'landuse': 'nwr/landuse',
     }
 
-    # 水体专用过滤器（使用 r/ 前缀提取 relation，保留完整 multipolygon 结构）
-    # 河流在 OSM 中以 multipolygon relation 形式存储，必须用 r/ 前缀
-    WATER_RELATION_FILTERS = {
-        'water': 'r/natural=water r/water=* r/waterway=* r/landuse=reservoir',
-    }
+    # (水体已移至 TAG_FILTERS，使用标准管线)
 
     # 是否对特定类型使用 relation-first 管线（先过滤后裁剪）
-    RELATION_FIRST_TYPES = {'water'}
+    RELATION_FIRST_TYPES = set()
 
     def __init__(self, pbf_dir: str = None):
         """
@@ -414,24 +408,32 @@ class OsmiumCLIFetcher:
         self, osmium_path, pbf_file, tag_type, south, west, north, east,
         output_path, temp_dir, base_name, flags
     ) -> bool:
-        """标准管线：extract → tags-filter → export"""
+        """标准管线：extract → tags-filter → export → (ogr2ogr clip for water)"""
         import time
 
-        # Step 1: 区域裁剪
-        area_pbf = os.path.join(temp_dir, f"{base_name}_area.pbf")
+        is_water = (tag_type == 'water')
+        n_steps = 4 if is_water else 3
         bbox_str = f"{west},{south},{east},{north}"
+
+        # Step 1: bbox 裁剪（水体用 -s smart 保留跨 bbox 的完整 way/relation）
+        area_pbf = os.path.join(temp_dir, f"{base_name}_area.pbf")
 
         cmd1 = [
             osmium_path, 'extract',
             '-b', bbox_str,
+        ]
+        if is_water:
+            cmd1.extend(['-s', 'smart'])
+        cmd1.extend([
             pbf_file,
             '-o', area_pbf,
             '--overwrite'
-        ]
+        ])
 
-        logger.info(f"Step 1: {osmium_path} extract -b {bbox_str}")
-        print(f"  [Step 1/3] osmium extract (clipping area)...")
-        print(f"           Command: osmium extract -b {bbox_str} {pbf_file} -o {area_pbf} --overwrite")
+        smart_label = ' -s smart' if is_water else ''
+        logger.info(f"Step 1: {osmium_path} extract -b {bbox_str}{smart_label}")
+        print(f"  [Step 1/{n_steps}] osmium extract (clipping area){' (smart mode)' if is_water else ''}...")
+        print(f"           Command: osmium extract -b {bbox_str}{smart_label} {pbf_file} -o {area_pbf} --overwrite")
         t1 = time.time()
         result1 = None
         for attempt in range(3):
@@ -470,7 +472,7 @@ class OsmiumCLIFetcher:
         ]
 
         logger.info(f"Step 2: {osmium_path} tags-filter {filter_expr}")
-        print(f"  [Step 2/3] osmium tags-filter (filtering {tag_type} features)...")
+        print(f"  [Step 2/{n_steps}] osmium tags-filter (filtering {tag_type} features)...")
         print(f"           Command: osmium tags-filter {area_pbf} {filter_expr} -o {filtered_pbf} --overwrite")
         t2 = time.time()
         result2 = subprocess.run(cmd2, capture_output=True, timeout=300, creationflags=flags)
@@ -489,18 +491,23 @@ class OsmiumCLIFetcher:
             print(f"           Keeping temp files for debugging: {area_pbf}, {filtered_pbf}")
             return False
 
-        # Step 3: 导出 GeoJSON
+        # Step 3: 导出 GeoJSON（水体先导出到临时文件，后面 ogr2ogr 裁剪后才是最终输出）
+        if is_water:
+            raw_geojson = os.path.join(temp_dir, f"{base_name}_{tag_type}_full.geojson")
+        else:
+            raw_geojson = output_path
+
         cmd3 = [
             osmium_path, 'export',
             filtered_pbf,
-            '-o', output_path,
+            '-o', raw_geojson,
             '-f', 'geojson',
             '--overwrite'
         ]
 
         logger.info(f"Step 3: {osmium_path} export -f geojson")
-        print(f"  [Step 3/3] osmium export (converting to GeoJSON)...")
-        print(f"           Command: osmium export {filtered_pbf} -o {output_path} -f geojson --overwrite")
+        print(f"  [Step 3/{n_steps}] osmium export (converting to GeoJSON)...")
+        print(f"           Command: osmium export {filtered_pbf} -o {raw_geojson} -f geojson --overwrite")
         t3 = time.time()
         result3 = subprocess.run(cmd3, capture_output=True, timeout=120, creationflags=flags)
         elapsed3 = time.time() - t3
@@ -510,15 +517,58 @@ class OsmiumCLIFetcher:
             print(f"           FAILED: {result3.stderr.decode()}")
             return False
 
-        geojson_size = os.path.getsize(output_path) / 1024 if os.path.exists(output_path) else 0
-        print(f"           Done in {elapsed3:.1f}s, output: {geojson_size:.1f} KB")
+        raw_size = os.path.getsize(raw_geojson) / 1024 if os.path.exists(raw_geojson) else 0
+        print(f"           Done in {elapsed3:.1f}s, output: {raw_size:.1f} KB")
 
-        if geojson_size == 0:
+        if raw_size == 0:
             print(f"           WARNING: GeoJSON output is empty!")
             print(f"           Debug: Check intermediate files:")
             print(f"             - Area PBF: {area_pbf}")
             print(f"             - Filtered PBF: {filtered_pbf}")
             return False
+
+        # Step 4 (水体专用): ogr2ogr 做最终边界硬裁剪
+        # smart 模式会带出边界外的毛刺，需要 ogr2ogr 硬切
+        elapsed4 = 0
+        if is_water:
+            if not self.ogr2ogr_available:
+                logger.warning("ogr2ogr 不可用，跳过 bbox 硬裁剪，返回 smart 模式原始数据")
+                print(f"  [Step 4/{n_steps}] ogr2ogr not available, skipping bbox clip")
+                import shutil
+                shutil.copy2(raw_geojson, output_path)
+            else:
+                ogr2ogr_path = self._get_tool_path('ogr2ogr')
+                cmd4 = [
+                    ogr2ogr_path,
+                    '-f', 'GeoJSON',
+                    output_path,
+                    raw_geojson,
+                    '-clipsrc', str(west), str(south), str(east), str(north)
+                ]
+
+                logger.info(f"Step 4: ogr2ogr -clipsrc {bbox_str}")
+                print(f"  [Step 4/{n_steps}] ogr2ogr -clipsrc (hard clipping to bbox)...")
+                print(f"           Command: ogr2ogr -f GeoJSON {output_path} {raw_geojson} -clipsrc {bbox_str}")
+                t4 = time.time()
+                result4 = subprocess.run(cmd4, capture_output=True, timeout=120, creationflags=flags)
+                elapsed4 = time.time() - t4
+
+                if result4.returncode != 0:
+                    stderr_msg = result4.stderr.decode('utf-8', errors='replace')
+                    logger.error(f"ogr2ogr 裁剪失败: {stderr_msg}")
+                    print(f"           FAILED: {stderr_msg}")
+                    import shutil
+                    shutil.copy2(raw_geojson, output_path)
+                    print(f"           Fallback: using unclipped data")
+                else:
+                    final_size = os.path.getsize(output_path) / 1024 if os.path.exists(output_path) else 0
+                    print(f"           Done in {elapsed4:.1f}s, output: {final_size:.1f} KB")
+
+            # 清理水体的临时 raw GeoJSON
+            try:
+                os.remove(raw_geojson)
+            except:
+                pass
 
         # 清理临时文件和目录
         try:
@@ -528,7 +578,7 @@ class OsmiumCLIFetcher:
         except:
             pass
 
-        total_time = elapsed1 + elapsed2 + elapsed3
+        total_time = elapsed1 + elapsed2 + elapsed3 + elapsed4
         logger.info(f"CLI 管道完成: {output_path}")
         print(f"  [Pipeline] Total time: {total_time:.1f}s")
         return True
