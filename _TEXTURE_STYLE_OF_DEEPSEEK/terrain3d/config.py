@@ -35,17 +35,16 @@ def _build_cache_paths():
     if env_cache_dir:
         paths.append(env_cache_dir)
     
-    # 2. 添加平台相关的默认路径
+    # 2. 添加平台相关的默认路径（仅添加驱动器/挂载点已存在的路径）
     if os.name == 'nt':  # Windows
-        paths.extend([
-            "F:/map_gen_cache/project_cache",  # Windows F盘（如果存在）
-            "D:/map_gen_cache/project_cache",  # Windows D盘备选
-        ])
+        for _drive in ['F', 'D', 'E']:
+            _p = f"{_drive}:/map_gen_cache/project_cache"
+            if os.path.exists(f"{_drive}:/"):
+                paths.append(_p)
     else:  # macOS / Linux
-        paths.extend([
-            os.path.expanduser("~/map_gen_cache/project_cache"),  # 用户目录
-            "/mnt/extra/map_gen_cache/project_cache",  # Linux 额外挂载点
-        ])
+        paths.append(os.path.expanduser("~/map_gen_cache/project_cache"))
+        if os.path.exists("/mnt/extra"):
+            paths.append("/mnt/extra/map_gen_cache/project_cache")
     
     # 3. 兜底：项目本地 cache 目录
     paths.append(CACHE_BASE_DIR)
@@ -82,9 +81,9 @@ def get_cache_paths() -> list:
                 os.makedirs(path, exist_ok=True)
                 valid_paths.append(path)
             except OSError:
-                logger.warning(f"无法创建缓存目录: {path}")
+                logger.debug(f"无法创建缓存目录: {path}")
         else:
-            logger.warning(f"缓存路径不可写: {path}")
+            logger.debug(f"缓存路径不可写: {path}")
     
     if not valid_paths:
         # 兜底：确保至少有一个可用路径
@@ -163,6 +162,11 @@ DECIMATION_TARGETS = {
 # --- Building Defaults ---
 BUILDING_DEFAULT_HEIGHT_M = 10.0
 BUILDING_LEVEL_HEIGHT_M = 3.5
+
+# --- nDSM (normalized Digital Surface Model) for building height estimation ---
+NDSM_MIN_HEIGHT_M = 3.0        # below this, nDSM value is ground noise
+NDSM_MAX_HEIGHT_M = 300.0      # above this, nDSM value is artifact
+NDSM_SAMPLE_PERCENTILE = 90    # P90 within footprint (robust to boundary noise)
 
 # Building LOD: min footprint area (m²) to include
 BUILDING_MIN_AREA = {
