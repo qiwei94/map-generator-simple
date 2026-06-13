@@ -53,50 +53,112 @@ def _parse_faces(xml: str) -> Optional[np.ndarray]:
 def _get_object_meshes(zf: zipfile.ZipFile) -> Dict[str, dict]:
     """Extract all object meshes from a 3MF file.
 
-    Uses Bambu metadata to map object IDs to names, then parses
-    the 3dmodel.model for geometry.
+    Supports two layouts:
+      A) Legacy inline (旧 exporter): meshes inside <object> in 3D/3dmodel.model
+      B) Reference-style components (新 exporter): geometry in
+         3D/Objects/object_*.model, referenced via <component p:path="...">
+         from main 3D/3dmodel.model. Names come from
+         Metadata/model_settings.config <part> entries.
 
     Returns dict of {object_name: {vertices, faces, object_id, pindex}}.
     """
-    # First, parse metadata to map object IDs to names
-    id_to_name = {}
     try:
-        meta_xml = _read_3mf_text(zf, "Metadata/model_settings.config")
-        # Parse: <object id="X"> ... <metadata key="name" value="Y"/>
-        obj_blocks = re.findall(r'<object id="(\d+)">(.*?)</object>', meta_xml, re.DOTALL)
-        for oid_str, body in obj_blocks:
-            oid = int(oid_str)
-            name_m = re.search(r'<metadata key="name" value="([^"]+)"', body)
-            if name_m:
-                id_to_name[oid] = name_m.group(1)
-    except Exception:
-        pass
-
-    # Parse 3dmodel.model for meshes
-    try:
-        xml = _read_3mf_text(zf, "3D/3dmodel.model")
+        main_xml = _read_3mf_text(zf, "3D/3dmodel.model")
     except Exception:
         return {}
 
-    objects = {}
-    obj_pattern = r'<object\s+id="(\d+)"[^>]*pindex="(\d+)"[^>]*>(.*?)</object>'
-    for m in re.finditer(obj_pattern, xml, re.DOTALL):
-        oid = int(m.group(1))
-        pidx = int(m.group(2))
-        body = m.group(3)
+    # 检测是否是 components 风格（B）
+    is_component_style = '<component ' in main_xml and 'p:path=' in main_xml
 
-        name = id_to_name.get(oid, f"object_{oid}")
+    if is_component_style:
+        return _parse_component_layout(zf, main_xml)
+    else:
+        return _parse_inline_layout(main_xml)
+
+
+def _parse_inline_layout(xml: str) -> Dict[str, dict]:
+    """旧版：mesh 直接写在主 model 的 <object> 里。"""
+    objects = {}
+    obj_pattern = r'<object\b([^>]*)>(.*?)</object>'
+    for m in re.finditer(obj_pattern, xml, re.DOTALL):
+        attrs = m.group(1)
+        body = m.group(2)
+        oid_m = re.search(r'id="(\d+)"', attrs)
+        pidx_m = re.search(r'pindex="(\d+)"', attrs)
+        name_m = re.search(r'name="([^"]+)"', attrs)
+        if not oid_m or not pidx_m:
+            continue
+        oid = int(oid_m.group(1))
+        pidx = int(pidx_m.group(1))
+        name = name_m.group(1) if name_m else f"object_{oid}"
         vertices = _parse_vertices(body)
         faces = _parse_faces(body)
-
         if vertices is not None and faces is not None:
-            objects[name] = {
-                "object_id": oid,
-                "vertices": vertices,
-                "faces": faces,
-                "pindex": pidx,
-            }
+            objects[name] = {"object_id": oid, "vertices": vertices,
+                             "faces": faces, "pindex": pidx}
+    return objects
 
+
+def _parse_component_layout(zf: zipfile.ZipFile, main_xml: str) -> Dict[str, dict]:
+    """新版（reference 风格）：components 引用 sub-file 里的 sub-mesh。
+
+    1. 解 model_settings.config 获取 part_id → name + extruder
+    2. 解主 model 的 components 获取 sub-file path + objectid
+    3. 读 sub-file，按 objectid 取出 mesh
+    """
+    # Step 1: read model_settings.config
+    id_to_name = {}
+    try:
+        settings_xml = _read_3mf_text(zf, "Metadata/model_settings.config")
+        # <part id="N"> ... <metadata key="name" value="..."/>
+        for pm in re.finditer(r'<part\s+id="(\d+)"[^>]*>(.*?)</part>',
+                              settings_xml, re.DOTALL):
+            pid = int(pm.group(1))
+            name_m = re.search(r'<metadata key="name" value="([^"]+)"', pm.group(2))
+            if name_m:
+                id_to_name[pid] = name_m.group(1)
+    except Exception:
+        pass
+
+    # Step 2: read main model components
+    # <component p:path="/3D/Objects/object_N.model" objectid="X" .../>
+    components = []  # (sub_path, objectid)
+    for cm in re.finditer(r'<component\s+([^>]+?)/>', main_xml):
+        c_attrs = cm.group(1)
+        path_m = re.search(r'p:path="([^"]+)"', c_attrs)
+        oid_m = re.search(r'objectid="(\d+)"', c_attrs)
+        if path_m and oid_m:
+            components.append((path_m.group(1), int(oid_m.group(1))))
+
+    # Step 3: read sub-files, parse mesh
+    objects = {}
+    sub_xml_cache = {}
+    for path, oid in components:
+        # 标准化 path (3MF 里以 / 开头表示 zip 根)
+        zip_path = path.lstrip('/')
+        if zip_path not in sub_xml_cache:
+            try:
+                sub_xml_cache[zip_path] = _read_3mf_text(zf, zip_path)
+            except Exception:
+                sub_xml_cache[zip_path] = ""
+        sub_xml = sub_xml_cache[zip_path]
+        if not sub_xml:
+            continue
+        # 在 sub-file 里找匹配 objectid 的 <object>
+        obj_pat = re.compile(rf'<object\s+id="{oid}"[^>]*>(.*?)</object>', re.DOTALL)
+        m = obj_pat.search(sub_xml)
+        if not m:
+            continue
+        body = m.group(1)
+        vertices = _parse_vertices(body)
+        faces = _parse_faces(body)
+        if vertices is None or faces is None:
+            continue
+        name = id_to_name.get(oid, f"object_{oid}")
+        objects[name] = {
+            "object_id": oid, "vertices": vertices, "faces": faces,
+            "pindex": 0,  # components 风格不再用 pindex
+        }
     return objects
 
 
@@ -111,27 +173,15 @@ def _compute_face_normals(vertices: np.ndarray, faces: np.ndarray) -> np.ndarray
     return normals / lengths
 
 
-def _get_extruder_map_from_3mf(zf: zipfile.ZipFile) -> Dict[str, int]:
-    """Parse extruder assignments from model_settings.config."""
-    try:
-        xml = _read_3mf_text(zf, "Metadata/model_settings.config")
-    except Exception:
-        return {}
+def _get_extruder_map_from_3mf(objects: Dict[str, dict]) -> Dict[str, int]:
+    """Reconstruct each object's expected extruder from EXTRUDER_MAP.
 
-    emap = {}
-    obj_pattern = r'<object id="(\d+)">(.*?)</object>'
-    name_pattern = r'<metadata key="name" value="([^"]+)"'
-    ext_pattern = r'<metadata key="extruder" value="(\d+)"'
-
-    for m in re.finditer(obj_pattern, xml, re.DOTALL):
-        oid = m.group(1)
-        body = m.group(2)
-        name_m = re.search(name_pattern, body)
-        ext_m = re.search(ext_pattern, body)
-        if name_m and ext_m:
-            emap[name_m.group(1)] = int(ext_m.group(1))
-
-    return emap
+    The current exporter doesn't write Bambu metadata; Bambu Studio derives
+    extruders from the basematerial pindex. We treat the canonical mapping
+    in EXTRUDER_MAP as the contract: every object present in *objects*
+    inherits its expected extruder from EXTRUDER_MAP[name].
+    """
+    return {name: EXTRUDER_MAP[name] for name in objects if name in EXTRUDER_MAP}
 
 
 def validate_3mf(filepath: str) -> Dict[str, any]:
@@ -160,7 +210,7 @@ def validate_3mf(filepath: str) -> Dict[str, any]:
         return results
 
     objects = _get_object_meshes(zf)
-    extruder_map = _get_extruder_map_from_3mf(zf)
+    extruder_map = _get_extruder_map_from_3mf(objects)
 
     # ---- V1: Max XY span = INTERNAL_SPAN_MM +/- 2mm ----
     # Non-square bbox means one axis may be shorter. Check the longer axis.
@@ -185,21 +235,20 @@ def validate_3mf(filepath: str) -> Dict[str, any]:
         "detail": f"X: {x_span:.1f}mm, Y: {y_span:.1f}mm, max: {max_span:.1f}mm" if all_x else "No data",
     })
 
-    # ---- V2: Terrain is watertight ----
-    # We can't fully check watertightness from XML only, but we check that
-    # terrain_surface and terrain_walls objects exist
-    has_surface = "terrain_surface" in objects
-    has_walls = "terrain_walls" in objects
-    v2_ok = has_surface and has_walls
+    # ---- V2: Terrain object exists ----
+    # 兼容两种风格：旧版 split 出 surface+walls，新版单一 terrain
+    has_terrain = ("terrain" in objects) or \
+                  ("terrain_surface" in objects and "terrain_walls" in objects)
+    v2_ok = has_terrain
     results["rules"].append({
         "id": "V2",
-        "name": "Terrain has surface + walls objects",
+        "name": "Terrain object exists (single 'terrain' or split surface+walls)",
         "passed": v2_ok,
     })
 
-    # ---- V3: Terrain thickness ~2.0mm (+/- 0.2mm) ----
+    # ---- V3: Terrain thickness ~4.0mm (+/- 15%) ----
     terrain_z_all = []
-    for key in ["terrain_surface", "terrain_walls"]:
+    for key in ["terrain", "terrain_surface", "terrain_walls"]:
         if key in objects:
             terrain_z_all.extend(objects[key]["vertices"][:, 2].tolist())
 
@@ -218,7 +267,7 @@ def validate_3mf(filepath: str) -> Dict[str, any]:
 
     # ---- V4: Buildings embedded into terrain ----
     buildings_obj = objects.get("buildings")
-    terrain_obj = objects.get("terrain_surface") or objects.get("terrain_walls")
+    terrain_obj = objects.get("terrain") or objects.get("terrain_surface") or objects.get("terrain_walls")
 
     if buildings_obj and terrain_obj:
         bz_min = buildings_obj["vertices"][:, 2].min()

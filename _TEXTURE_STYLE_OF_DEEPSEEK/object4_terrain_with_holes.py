@@ -81,7 +81,7 @@ def build_terrain_with_water_holes_manifold(elevation_grid: np.ndarray,
     t1 = time.time()
     print("\n[Step 1] 地形重建...")
     terrain_mesh = build_deepseek_terrain(
-        elevation_grid, width_m, height_m, area_km2, scale
+        elevation_grid, width_m, height_m, area_km2, scale,
     )
 
     stats["terrain_faces"] = len(terrain_mesh.faces)
@@ -97,39 +97,16 @@ def build_terrain_with_water_holes_manifold(elevation_grid: np.ndarray,
     print(f"  ⏱ trimesh→Manifold 转换: {time.time() - t1b:.1f}s")
 
     # ========================================
-    # Step 2: 道路布尔并集融合（可选）
+    # Step 2: 水体布尔差集镂空（先挖水）
+    # 重要：必须在桥梁融合之前做，否则水体柱的 Z 上限会把桥梁也挖掉。
+    # 水体柱 Z = terrain_z_max + 1.0（穿透地形顶面），如果桥梁已经融在
+    # terrain_z_max + 0.91（高度 ROAD_ABOVE_TERRAIN+thickness）的位置，
+    # 差集会一并挖掉。
     # ========================================
-    if enable_roads_fusion and roads_gdf is not None and len(roads_gdf) > 0:
-        print("\n[Step 2] 道路布尔并集融合...")
-        print(f"  桥梁过滤模式: {bridges_only}")
-
-        roads_mesh = build_deepseek_roads(
-            roads_gdf, terrain_mesh, area_km2, scale,
-            water_gdf=water_gdf,  # 传入水体数据用于桥梁过滤
-            filter_bridges_only=bridges_only  # 只处理桥梁
-        )
-
-        if roads_mesh is not None and len(roads_mesh.faces) > 0:
-            stats["roads_faces"] = len(roads_mesh.faces)
-            print(f"  道路网格: {len(roads_mesh.vertices)} vertices, {stats['roads_faces']} faces")
-
-            roads_m = trimesh_to_manifold(roads_mesh)
-            terrain_m = terrain_m + roads_m
-            stats["boolean_ops"].append("terrain ∪ roads (bridges only)")
-            print("  道路融合完成")
-        else:
-            print("  过滤后道路数据为空，跳过融合")
-    else:
-        print("\n[Step 2] 道路融合: 跳过")
-
-    # ========================================
-    # Step 3: 水体布尔差集镂空 — 批量 Union + 单次 Subtract
-    # ========================================
-    t3 = time.time()
-    print("\n[Step 3] 水体布尔差集镂空...")
+    t2 = time.time()
+    print("\n[Step 2] 水体布尔差集镂空（先于桥梁融合）...")
 
     if water_gdf is not None and len(water_gdf) > 0:
-        # 水体挤出柱的Z范围（确保穿透地形）
         terrain_z_min = terrain_mesh.bounds[0][2]
         terrain_z_max = terrain_mesh.bounds[1][2]
 
@@ -139,32 +116,53 @@ def build_terrain_with_water_holes_manifold(elevation_grid: np.ndarray,
         print(f"  地形Z范围: {terrain_z_min:.2f} → {terrain_z_max:.2f} mm")
         print(f"  水体挤出柱Z: {z_bottom:.2f} → {z_top:.2f} mm")
 
-        # 批量创建水体挤出柱并Union（坐标自动从model meters缩放到model mm）
-        t3a = time.time()
+        t2a = time.time()
         water_union = create_water_columns_union_manifold(
             water_gdf, z_bottom, z_top, scale,
         )
-        print(f"  ⏱ 水体 Union 创建: {time.time() - t3a:.1f}s")
+        print(f"  ⏱ 水体 Union 创建: {time.time() - t2a:.1f}s")
 
         if not water_union.is_empty():
             n_water_edges = int(water_union.num_edge())
             print(f"  水体Union网格: {n_water_edges} edges, "
                   f"volume={water_union.volume():.2f} mm³")
 
-            # 单次布尔差集: terrain - water
-            t3b = time.time()
+            t2b = time.time()
             terrain_m = terrain_m - water_union
-            print(f"  ⏱ 布尔差集 (terrain − water): {time.time() - t3b:.1f}s")
+            print(f"  ⏱ 布尔差集 (terrain − water): {time.time() - t2b:.1f}s")
             stats["boolean_ops"].append(f"terrain - water (union of {n_water_edges} cols)")
-
-            # 获取水体数量（从water_union统计）
-            n_water_features = n_water_edges
             print(f"  镂空完成 (terrain − water_union)")
         else:
             print("  无符合条件的水体，跳过镂空")
     else:
         print("  无水体数据，跳过镂空")
-    print(f"  ⏱ Step 3 总耗时: {time.time() - t3:.1f}s")
+    print(f"  ⏱ Step 2 总耗时: {time.time() - t2:.1f}s")
+
+    # ========================================
+    # Step 3: 道路布尔并集融合（最后加桥梁，跨越已挖好的水洞）
+    # ========================================
+    if enable_roads_fusion and roads_gdf is not None and len(roads_gdf) > 0:
+        print("\n[Step 3] 道路布尔并集融合（在水洞之上加桥梁）...")
+        print(f"  桥梁过滤模式: {bridges_only}")
+
+        roads_mesh = build_deepseek_roads(
+            roads_gdf, terrain_mesh, area_km2, scale,
+            water_gdf=water_gdf,
+            filter_bridges_only=bridges_only,
+        )
+
+        if roads_mesh is not None and len(roads_mesh.faces) > 0:
+            stats["roads_faces"] = len(roads_mesh.faces)
+            print(f"  道路网格: {len(roads_mesh.vertices)} vertices, {stats['roads_faces']} faces")
+
+            roads_m = trimesh_to_manifold(roads_mesh)
+            terrain_m = terrain_m + roads_m
+            stats["boolean_ops"].append("terrain ∪ roads (bridges only)")
+            print("  桥梁融合完成（保留在最终 mesh 顶面）")
+        else:
+            print("  过滤后道路数据为空，跳过融合")
+    else:
+        print("\n[Step 3] 道路融合: 跳过")
 
     # ========================================
     # Step 4: 转回trimesh并验证

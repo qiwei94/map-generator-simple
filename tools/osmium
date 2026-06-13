@@ -1,0 +1,5 @@
+#!/usr/bin/env python3
+import os, sys, runpy
+osmium_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, osmium_dir)
+runpy.run_path(os.path.join(osmium_dir, 'osmium_pyosmium.py'), run_name='__main__')

@@ -1,8 +1,10 @@
 """Fetch elevation data and build elevation grids.
 
-Strategy:
-1. Primary: SRTM HGT tiles (1–4 tile downloads, then local sampling — fast)
-2. Fallback: Open Elevation API (batch queries when SRTM has no coverage)
+Strategy (in order):
+1. Local Copernicus DEM GLO-30 GeoTIFF in dem_cache/cop30/ (best quality, no network)
+2. Local SRTM HGT in dem_cache/srtm/ (compatible with tools/manage_dem.py)
+3. SRTM HGT downloaded on-demand into _CACHE_DIR (legacy fallback path)
+4. Open Elevation API (batch queries when SRTM coverage is poor)
 """
 
 import logging
@@ -24,6 +26,13 @@ from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.utils import cache as cache_mgr
 
 logger = logging.getLogger(__name__)
 
+# Project-local DEM cache (populated by tools/manage_dem.py).
+# Keep separate from `_CACHE_DIR` (system cache) so users can ship a project
+# with a known-good DEM snapshot.
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__)))))
+DEM_CACHE_DIR = os.path.join(_PROJECT_ROOT, "dem_cache")
+
 # Local cache directory for downloaded HGT files (support multi-path)
 def _get_srtm_cache_dir():
     """获取SRTM缓存目录（支持多路径）"""
@@ -36,10 +45,21 @@ _CACHE_DIR = _get_srtm_cache_dir()
 _OPEN_ELEVATION_URL = "https://api.open-elevation.com/api/v1/lookup"
 _OPEN_ELEVATION_BATCH_SIZE = 200  # max locations per request
 
-# SRTM HGT tile mirrors (fallback)
+# SRTM HGT tile mirrors.
+# 顺序：第一个命中就停。多个端点是为了在某条网络路径偶发不通时自动绕道。
+#
+# 注意：
+#   1. AWS 的 elevation-tiles-prod 桶只存在于 us-east-1，没有亚太副本（实测
+#      ap-northeast-1 域名会 301 跳回 us-east-1）。两条 AWS URL 走的是同一
+#      物理桶，只是 host header / DNS 解析路径不同 —— 但有时一条卡的时候
+#      另一条还通。
+#   2. 国内"稳定下载"真正的解法是预先本地化，看 tools/manage_dem.py 与
+#      doc/data_and_performance.md。运行时尽量命中 cache/srtm/ 本地文件，
+#      不走任何 HTTP。
 _SRTM_URLS = [
-    "https://s3.amazonaws.com/elevation-tiles-prod/skadi/{dir}/{filename}",
+    # 两条 URL 走同一桶，但 DNS / host header 不同；偶有一条卡的时候另一条通
     "https://elevation-tiles-prod.s3.amazonaws.com/skadi/{dir}/{filename}",
+    "https://s3.amazonaws.com/elevation-tiles-prod/skadi/{dir}/{filename}",
 ]
 
 _VOID = -32768
@@ -125,10 +145,17 @@ def _tile_dir(lat: int) -> str:
 
 
 def _download_tile(lat: int, lon: int) -> str:
-    """Download an SRTM HGT tile and return the local file path."""
-    os.makedirs(_CACHE_DIR, exist_ok=True)
-
+    """Download an SRTM HGT tile (or use a project-local one) and return its path."""
     filename = _tile_filename(lat, lon)
+
+    # 0. Project-local cache populated by tools/manage_dem.py (offline-first)
+    project_local = os.path.join(
+        DEM_CACHE_DIR, "srtm", _tile_dir(lat), filename
+    )
+    if os.path.exists(project_local):
+        return project_local
+
+    os.makedirs(_CACHE_DIR, exist_ok=True)
     local_path = os.path.join(_CACHE_DIR, filename)
 
     if os.path.exists(local_path):
@@ -234,6 +261,76 @@ def download_srtm_tiles_for_bbox(south: float, west: float, north: float,
         if path:
             paths.append(path)
     return paths
+
+
+# ==================== Copernicus DEM GLO-30 (local GeoTIFF) ====================
+
+
+def _cop30_tile_path(lat: int, lon: int) -> str:
+    """Path layout matches tools/manage_dem.py."""
+    ns = "N" if lat >= 0 else "S"
+    ew = "E" if lon >= 0 else "W"
+    tid = f"Copernicus_DSM_COG_10_{ns}{abs(lat):02d}_00_{ew}{abs(lon):03d}_00_DEM"
+    return os.path.join(DEM_CACHE_DIR, "cop30", tid, f"{tid}.tif")
+
+
+def _fetch_elevation_grid_from_cop30(south: float, west: float, north: float,
+                                      east: float, rows: int, cols: int):
+    """Sample a regular lat/lon grid from local Copernicus GLO-30 GeoTIFFs.
+
+    Returns the grid on success; ``None`` if rasterio is unavailable or any
+    required tile is missing. The caller falls back to SRTM in that case.
+    """
+    try:
+        import rasterio
+        from rasterio.windows import from_bounds
+    except ImportError:
+        logger.debug("rasterio not installed — skipping Copernicus path")
+        return None
+
+    tile_lat_min = int(math.floor(south))
+    tile_lat_max = int(math.floor(north))
+    tile_lon_min = int(math.floor(west))
+    tile_lon_max = int(math.floor(east))
+
+    tiles = []
+    for tlat in range(tile_lat_min, tile_lat_max + 1):
+        for tlon in range(tile_lon_min, tile_lon_max + 1):
+            p = _cop30_tile_path(tlat, tlon)
+            if not os.path.exists(p):
+                # Need ALL covering tiles locally — partial coverage falls back
+                logger.debug(f"Copernicus tile missing locally: {p}")
+                return None
+            tiles.append((tlat, tlon, p))
+
+    logger.info(f"Reading Copernicus GLO-30 from {len(tiles)} local tile(s) in "
+                f"{DEM_CACHE_DIR}/cop30/")
+
+    lats = np.linspace(south, north, rows)
+    lons = np.linspace(west, east, cols)
+    lon_grid, lat_grid = np.meshgrid(lons, lats, indexing="xy")
+
+    grid = np.full((rows, cols), np.nan, dtype=np.float64)
+
+    for tlat, tlon, path in tiles:
+        # Per-tile mask: points whose lat/lon falls inside this 1°×1° tile
+        mask = ((lat_grid >= tlat) & (lat_grid < tlat + 1) &
+                (lon_grid >= tlon) & (lon_grid < tlon + 1))
+        if not np.any(mask):
+            continue
+        with rasterio.open(path) as src:
+            xs = lon_grid[mask]
+            ys = lat_grid[mask]
+            samples = list(src.sample(
+                np.column_stack([xs, ys]), indexes=1, masked=False
+            ))
+            vals = np.array([s[0] for s in samples], dtype=np.float64)
+            nodata = src.nodata
+            if nodata is not None:
+                vals[vals == nodata] = np.nan
+            grid[mask] = vals
+
+    return grid
 
 
 def _fetch_elevation_grid_from_srtm(south: float, west: float, north: float,
@@ -391,9 +488,23 @@ def fetch_elevation_grid(south: float, west: float, north: float, east: float,
         logger.info(f"Elevation range: {np.nanmin(grid):.1f}m - {np.nanmax(grid):.1f}m")
         return grid
 
-    # Primary: SRTM HGT tiles (1–4 downloads, then local sampling — fast)
-    logger.info("Trying SRTM HGT tiles (1–4 tile downloads)...")
-    grid = _fetch_elevation_grid_from_srtm(south, west, north, east, rows, cols)
+    # Primary: local Copernicus GLO-30 GeoTIFF (highest quality, no network)
+    grid = _fetch_elevation_grid_from_cop30(south, west, north, east, rows, cols)
+    if grid is not None:
+        nan_count = int(np.isnan(grid).sum())
+        total = int(grid.size)
+        if nan_count < total * 0.5:
+            logger.info(
+                f"Copernicus GLO-30 OK ({total - nan_count}/{total} points, "
+                f"{nan_count} missing will be filled)"
+            )
+        else:
+            grid = None  # too many NaN — fall through to SRTM
+
+    # Secondary: SRTM HGT tiles (local first, then network download — fast)
+    if grid is None:
+        logger.info("Trying SRTM HGT tiles...")
+        grid = _fetch_elevation_grid_from_srtm(south, west, north, east, rows, cols)
     nan_count = np.isnan(grid).sum()
     total = grid.size
     srtm_ok = nan_count < total * 0.5

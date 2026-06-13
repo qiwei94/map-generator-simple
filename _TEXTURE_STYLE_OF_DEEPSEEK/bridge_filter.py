@@ -11,24 +11,30 @@
 """
 
 import numpy as np
+import pandas as pd
 import geopandas as gpd
 from shapely.geometry import LineString, MultiLineString, Polygon, MultiPolygon
 from shapely.ops import split, unary_union, linemerge
 from typing import Optional
 
 
+def pd_false_series(index) -> pd.Series:
+    """All-False boolean Series aligned to *index* (helper for missing columns)."""
+    return pd.Series(False, index=index)
+
+
 def filter_bridges_only(roads_gdf: gpd.GeoDataFrame,
                         water_gdf: gpd.GeoDataFrame,
                         extract_water_crossing_only: bool = True) -> gpd.GeoDataFrame:
-    """只保留桥梁道路（跨越水体的部分）。
+    """只保留桥梁道路（跨越水体的完整 LineString）。
 
     Args:
         roads_gdf: 道路GeoDataFrame（包含 highway, bridge 等标签）
         water_gdf: 水体GeoDataFrame
-        extract_water_crossing_only: 是否只提取道路在水体内的片段
+        extract_water_crossing_only: 已废弃，保留签名兼容
 
     Returns:
-        过滤后的道路GeoDataFrame，只包含桥梁段
+        过滤后的道路GeoDataFrame，bridge=yes 且与水体相交的完整道路
     """
     if roads_gdf is None or len(roads_gdf) == 0:
         return roads_gdf
@@ -44,8 +50,12 @@ def filter_bridges_only(roads_gdf: gpd.GeoDataFrame,
     water_union = unary_union(water_gdf.geometry)
     print(f"  水体Union面积: {water_union.area:.1f} m²")
 
-    # Step 2: 筛选 bridge=yes 标签的道路
-    bridge_roads = roads_gdf[roads_gdf.get('bridge', '') == 'yes'].copy()
+    # Step 2: 筛选 bridge=yes 标签的道路（容忍缺列 / NaN）
+    if 'bridge' in roads_gdf.columns:
+        bridge_mask = (roads_gdf['bridge'] == 'yes').fillna(False)
+    else:
+        bridge_mask = pd_false_series(roads_gdf.index)
+    bridge_roads = roads_gdf[bridge_mask].copy()
     n_tagged_bridges = len(bridge_roads)
 
     print(f"  Step 1: 标记为 bridge=yes 的道路: {n_tagged_bridges} 条")
@@ -65,40 +75,12 @@ def filter_bridges_only(roads_gdf: gpd.GeoDataFrame,
         print("  无桥梁道路，返回空")
         return gpd.GeoDataFrame(columns=roads_gdf.columns, crs=roads_gdf.crs)
 
-    # Step 4: 提取纯桥梁段（道路在水体内的片段）
-    if extract_water_crossing_only:
-        print("  Step 2: 提取道路在水体内的片段...")
-        bridge_segments = []
-
-        for idx, row in bridge_roads.iterrows():
-            road_geom = row.geometry
-
-            # 提取道路与水体的交集（纯桥梁段）
-            intersection = road_geom.intersection(water_union)
-
-            if intersection.is_empty:
-                continue
-
-            # 处理交集结果（可能是 LineString 或 MultiLineString）
-            if isinstance(intersection, (LineString, MultiLineString)):
-                # 创建新的行，保留原有属性
-                new_row = row.copy()
-                new_row.geometry = intersection
-                bridge_segments.append(new_row)
-
-        if bridge_segments:
-            result_gdf = gpd.GeoDataFrame(bridge_segments, crs=roads_gdf.crs)
-            print(f"  提取的纯桥梁段: {len(result_gdf)} 条")
-            print(f"  桥梁段总长度: {result_gdf.geometry.length.sum():.1f} m")
-        else:
-            print("  无桥梁段，返回空")
-            return gpd.GeoDataFrame(columns=roads_gdf.columns, crs=roads_gdf.crs)
-
-        return result_gdf
-    else:
-        # 只返回完整的桥梁道路（不提取片段）
-        print(f"  返回完整桥梁道路: {len(bridge_roads)} 条")
-        return bridge_roads
+    # 直接返回完整桥梁道路（已经过 intersects 确认跨水体）
+    # 跳过逐条 .intersection(water_union) 精确切割 — 在 25km/0.007mm 模型尺度下
+    # 桥段延伸几十米 = 0.x mm，肉眼不可见，省掉 ~120s
+    print(f"  返回完整桥梁道路: {len(bridge_roads)} 条")
+    print(f"  桥梁总长度: {bridge_roads.geometry.length.sum():.1f} m")
+    return bridge_roads
 
 
 def split_road_at_water_boundary(road_geom: LineString,
@@ -169,9 +151,12 @@ def get_bridge_statistics(roads_gdf: gpd.GeoDataFrame,
         "bridge_length_m": 0.0,
     }
 
-    # 统计显式标记的桥梁
-    tagged = roads_gdf[roads_gdf.get('bridge', '') == 'yes']
-    stats["tagged_bridges"] = len(tagged)
+    # 统计显式标记的桥梁（容忍缺列 / NaN）
+    if 'bridge' in roads_gdf.columns:
+        tagged_mask = (roads_gdf['bridge'] == 'yes').fillna(False)
+    else:
+        tagged_mask = pd_false_series(roads_gdf.index)
+    stats["tagged_bridges"] = int(tagged_mask.sum())
 
     if water_gdf is not None and len(water_gdf) > 0:
         water_union = unary_union(water_gdf.geometry)

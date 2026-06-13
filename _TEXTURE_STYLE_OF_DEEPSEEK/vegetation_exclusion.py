@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """植被遮挡处理 — 使用 Manifold 布尔差集镂空水体、建筑、道路。
 
 根据 manifold_boolean_spec.md 第47-75行的遮挡关系矩阵：
@@ -10,6 +12,8 @@
 2. 合并所有排除柱（Manifold布尔并集）
 3. 植被布尔差集（镂空）
 """
+
+from typing import List
 
 import time
 import numpy as np
@@ -24,14 +28,21 @@ from _TEXTURE_STYLE_OF_DEEPSEEK._bridge import (
     manifold_to_trimesh,
     is_manifold_available,
 )
+from _TEXTURE_STYLE_OF_DEEPSEEK._geom_utils import shapely_poly_to_crosssection
 from _TEXTURE_STYLE_OF_DEEPSEEK.water_column import (
-    _shapely_poly_to_crosssection,
     create_water_columns_union_manifold,
 )
 from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.processors.terrain import sample_terrain_z
 from _TEXTURE_STYLE_OF_DEEPSEEK.config import (
     Z_TERRAIN_BASE,
+    Z_ROAD_ABOVE_TERRAIN_MM,
+    ROAD_THICKNESS_MM,
     VEGETATION_Z_OFFSET_MM,
+    VEGETATION_THICKNESS_MM,
+    VL_Z_OFFSET_MM,
+    VO_Z_OFFSET_MM,
+    BUILDING_EXCLUSION_TOP_MM,
+    ROAD_MIN_LINE_LENGTH_M,
 )
 
 
@@ -53,7 +64,7 @@ def create_exclusion_column_manifold(polygon: Polygon,
     if polygon.is_empty or len(polygon.exterior.coords) < 4:
         return manifold3d.Manifold()
 
-    cs = _shapely_poly_to_crosssection(polygon)
+    cs = shapely_poly_to_crosssection(polygon)
     if cs.is_empty():
         return manifold3d.Manifold()
 
@@ -124,7 +135,7 @@ def create_building_exclusion_columns_manifold(buildings_gdf: gpd.GeoDataFrame,
             # 建筑层高度: terrain_z - 0.04mm (嵌入) + building_height (约+5mm)
             # 排除柱需要穿透整个植被层到建筑层
             z_bottom = z_base - z_buffer
-            z_top = z_base + 5.0 + z_buffer  # 建筑高度约5mm，加上缓冲
+            z_top = z_base + BUILDING_EXCLUSION_TOP_MM + z_buffer
 
             col = create_exclusion_column_manifold(poly, z_bottom, z_top, scale)
             if not col.is_empty():
@@ -185,7 +196,7 @@ def create_road_exclusion_columns_manifold(roads_gdf: gpd.GeoDataFrame,
             continue
 
         for line in lines:
-            if line.length < 10:  # 过滤太短的道路
+            if line.length < ROAD_MIN_LINE_LENGTH_M:
                 continue
 
             # 道路缓冲为Polygon（用于创建排除柱）
@@ -204,7 +215,7 @@ def create_road_exclusion_columns_manifold(roads_gdf: gpd.GeoDataFrame,
             # 道路排除柱的Z范围
             # 道路层高度: terrain_z + 0.51mm
             z_bottom = z_base - z_buffer
-            z_top = z_base + 0.51 + 0.4 + z_buffer  # 道路厚度约0.4mm
+            z_top = z_base + Z_ROAD_ABOVE_TERRAIN_MM + ROAD_THICKNESS_MM + z_buffer
 
             col = create_exclusion_column_manifold(road_poly, z_bottom, z_top, scale)
             if not col.is_empty():
@@ -355,68 +366,240 @@ def build_vegetation_with_exclusions_manifold(vegetation_mesh: trimesh.Trimesh,
     return vegetation_final
 
 
-def build_deepseek_vegetation_with_exclusions(gdf: gpd.GeoDataFrame,
-                                               terrain_mesh: trimesh.Trimesh,
-                                               scale: float,
-                                               water_gdf: gpd.GeoDataFrame = None,
-                                               buildings_gdf: gpd.GeoDataFrame = None,
-                                               roads_gdf: gpd.GeoDataFrame = None,
-                                               exclude_water: bool = True,
-                                               exclude_buildings: bool = True,
-                                               exclude_roads: bool = False) -> trimesh.Trimesh:
-    """构建植被并处理遮挡关系（完整流程）。
+# ---------------------------------------------------------------------------
+# V3 builder: terrain-draped vegetation (per-vertex Z sampling)
+# ---------------------------------------------------------------------------
+
+from scipy.spatial import Delaunay
+from _TEXTURE_STYLE_OF_DEEPSEEK.block_base import _densify_ring
+
+_MAX_VEG_GRID_POINTS = 6000
+
+
+def _polygon_to_draped_mesh(
+    poly: Polygon,
+    terrain_mesh: trimesh.Trimesh,
+    scale: float,
+    z_offset: float,
+    thickness: float = VEGETATION_THICKNESS_MM,
+    grid_step_m: float = 80.0,
+) -> "trimesh.Trimesh | None":
+    """Build a terrain-conforming vegetation plate for one polygon.
+
+    Uses Delaunay triangulation + per-vertex terrain Z sampling so the plate
+    follows mountain contours instead of being flat.
+    """
+    from matplotlib.path import Path as MplPath
+
+    has_holes = len(poly.interiors) > 0
+
+    # Scale polygon exterior to mm
+    exterior_coords = np.array(poly.exterior.coords)[:, :2] * scale
+    poly_mm = Polygon(exterior_coords)
+    if poly_mm.is_empty or poly_mm.area < 0.01:
+        return None
+
+    # For polygons with holes, use earcut (handles holes natively)
+    if has_holes:
+        try:
+            from trimesh.creation import triangulate_polygon
+            hole_coords_mm = [np.array(h.coords)[:, :2] * scale for h in poly.interiors]
+            poly_with_holes_mm = Polygon(exterior_coords, hole_coords_mm)
+            verts_2d, faces_tri = triangulate_polygon(poly_with_holes_mm, engine="earcut")
+            if len(verts_2d) == 0 or len(faces_tri) == 0:
+                return None
+            all_pts = np.array(verts_2d, dtype=np.float64)
+            faces_top = np.array(faces_tri, dtype=np.int32)
+        except Exception:
+            return None
+    else:
+        # Adaptive grid step
+        grid_step_mm = grid_step_m * scale
+        minx, miny, maxx, maxy = poly_mm.bounds
+        effective_step = grid_step_mm
+        estimated_pts = poly_mm.area / (grid_step_mm ** 2)
+        if estimated_pts > _MAX_VEG_GRID_POINTS:
+            effective_step = np.sqrt(poly_mm.area / _MAX_VEG_GRID_POINTS)
+
+        # Interior grid points
+        xs = np.arange(minx + effective_step * 0.5, maxx, effective_step)
+        ys = np.arange(miny + effective_step * 0.5, maxy, effective_step)
+        if len(xs) == 0 or len(ys) == 0:
+            # Very small polygon — fall back to earcut
+            try:
+                from trimesh.creation import triangulate_polygon
+                verts_2d, faces_tri = triangulate_polygon(poly_mm, engine="earcut")
+                if len(verts_2d) == 0 or len(faces_tri) == 0:
+                    return None
+                all_pts = np.array(verts_2d, dtype=np.float64)
+                faces_top = np.array(faces_tri, dtype=np.int32)
+                n_total = len(all_pts)
+                # Sample terrain Z
+                tz = sample_terrain_z(terrain_mesh, all_pts[:, 0], all_pts[:, 1])
+                top_z = tz + z_offset
+                bot_z = tz + z_offset - thickness
+                top_verts = np.column_stack([all_pts[:, 0], all_pts[:, 1], top_z])
+                bot_verts = np.column_stack([all_pts[:, 0], all_pts[:, 1], bot_z])
+                vertices = np.vstack([top_verts, bot_verts])
+                faces_top_arr = faces_top
+                faces_bot_arr = np.column_stack([
+                    n_total + faces_top_arr[:, 0],
+                    n_total + faces_top_arr[:, 2],
+                    n_total + faces_top_arr[:, 1],
+                ])
+                # Boundary edges for side walls
+                edge_count: dict = {}
+                for fi in range(len(faces_top_arr)):
+                    a, b, c = int(faces_top_arr[fi, 0]), int(faces_top_arr[fi, 1]), int(faces_top_arr[fi, 2])
+                    for e in [(a, b), (b, c), (c, a)]:
+                        canon = (min(e), max(e))
+                        edge_count[canon] = edge_count.get(canon, 0) + 1
+                boundary_edges = []
+                for fi in range(len(faces_top_arr)):
+                    a, b, c = int(faces_top_arr[fi, 0]), int(faces_top_arr[fi, 1]), int(faces_top_arr[fi, 2])
+                    for e in [(a, b), (b, c), (c, a)]:
+                        canon = (min(e), max(e))
+                        if edge_count[canon] == 1:
+                            boundary_edges.append(e)
+                side_faces = []
+                for a, b in boundary_edges:
+                    ba, bb = n_total + a, n_total + b
+                    side_faces.append([a, ba, bb])
+                    side_faces.append([a, bb, b])
+                faces_arr = np.vstack([
+                    faces_top_arr,
+                    faces_bot_arr,
+                    np.array(side_faces, dtype=np.int32),
+                ])
+                return trimesh.Trimesh(vertices=vertices, faces=faces_arr, process=False)
+            except Exception:
+                return None
+
+        gx, gy = np.meshgrid(xs, ys)
+        grid_pts = np.column_stack([gx.ravel(), gy.ravel()])
+
+        mpl_path = MplPath(np.array(poly_mm.exterior.coords))
+        mask = mpl_path.contains_points(grid_pts)
+        interior_pts = grid_pts[mask]
+
+        # Densify boundary
+        boundary_coords = _densify_ring(exterior_coords, effective_step)
+        if len(boundary_coords) >= 2 and np.linalg.norm(boundary_coords[-1] - boundary_coords[0]) < 1e-6:
+            boundary_coords = boundary_coords[:-1]
+        if len(boundary_coords) < 3:
+            return None
+
+        # Combine boundary + interior
+        if len(interior_pts) > 0:
+            all_pts = np.vstack([boundary_coords, interior_pts])
+        else:
+            all_pts = boundary_coords.copy()
+        if len(all_pts) < 3:
+            return None
+
+        # Delaunay triangulation + centroid filter
+        try:
+            tri = Delaunay(all_pts)
+        except Exception:
+            return None
+
+        simplices = tri.simplices
+        centroids = all_pts[simplices].mean(axis=1)
+        centroid_mask = mpl_path.contains_points(centroids)
+        faces_top = simplices[centroid_mask].astype(np.int32)
+        if len(faces_top) == 0:
+            return None
+
+    # Per-vertex terrain Z sampling
+    n_total = len(all_pts)
+    tz = sample_terrain_z(terrain_mesh, all_pts[:, 0], all_pts[:, 1])
+
+    top_z = tz + z_offset
+    bot_z = tz + z_offset - thickness
+    top_verts = np.column_stack([all_pts[:, 0], all_pts[:, 1], top_z])
+    bot_verts = np.column_stack([all_pts[:, 0], all_pts[:, 1], bot_z])
+    vertices = np.vstack([top_verts, bot_verts])
+
+    # Top + bottom faces
+    faces_top_arr = faces_top
+    faces_bot_arr = np.column_stack([
+        n_total + faces_top_arr[:, 0],
+        n_total + faces_top_arr[:, 2],
+        n_total + faces_top_arr[:, 1],
+    ])
+
+    # Boundary edges (edges shared by exactly 1 face)
+    edge_count: dict = {}
+    for fi in range(len(faces_top_arr)):
+        a, b, c = int(faces_top_arr[fi, 0]), int(faces_top_arr[fi, 1]), int(faces_top_arr[fi, 2])
+        for e in [(a, b), (b, c), (c, a)]:
+            canon = (min(e), max(e))
+            edge_count[canon] = edge_count.get(canon, 0) + 1
+
+    boundary_edges = []
+    for fi in range(len(faces_top_arr)):
+        a, b, c = int(faces_top_arr[fi, 0]), int(faces_top_arr[fi, 1]), int(faces_top_arr[fi, 2])
+        for e in [(a, b), (b, c), (c, a)]:
+            canon = (min(e), max(e))
+            if edge_count[canon] == 1:
+                boundary_edges.append(e)
+
+    # Side wall faces
+    side_faces = []
+    for a, b in boundary_edges:
+        ba, bb = n_total + a, n_total + b
+        side_faces.append([a, ba, bb])
+        side_faces.append([a, bb, b])
+
+    faces_arr = np.vstack([
+        faces_top_arr,
+        faces_bot_arr,
+        np.array(side_faces, dtype=np.int32) if side_faces else np.empty((0, 3), dtype=np.int32),
+    ])
+    return trimesh.Trimesh(vertices=vertices, faces=faces_arr, process=False)
+
+
+def build_deepseek_vegetation_v3(
+    VL_polys: List[Polygon],
+    VO_polys: List[Polygon],
+    terrain_mesh: trimesh.Trimesh,
+    scale: float,
+) -> trimesh.Trimesh:
+    """V3 vegetation builder — terrain-draped plates (per-vertex Z sampling).
 
     Args:
-        gdf: 植被GeoDataFrame
-        terrain_mesh: 地形网格
-        scale: 比例尺
-        water_gdf: 水体数据（可选）
-        buildings_gdf: 建筑数据（可选）
-        roads_gdf: 道路数据（可选）
-        exclude_water: 是否镂空水体（默认True，P0）
-        exclude_buildings: 是否镂空建筑（默认True，P0）
-        exclude_roads: 是否镂空道路（默认False，P1）
+        VL_polys: 植被地标（公园 / 保护区）
+        VO_polys: 普通植被
+        terrain_mesh: 地形网格（用于 Z 采样）
+        scale: mm/m
 
     Returns:
-        镂空后的植被网格（watertight）
+        Trimesh of all vegetation plates conforming to terrain contour.
     """
-    if gdf is None or len(gdf) == 0:
+    all_groups = [("VL", VL_polys, VL_Z_OFFSET_MM),
+                  ("VO", VO_polys, VO_Z_OFFSET_MM)]
+
+    parts: list = []
+    n_total = 0
+    n_skipped = 0
+
+    for label, polys, z_offset in all_groups:
+        for poly in polys:
+            if poly.is_empty or poly.area < 10.0:
+                n_skipped += 1
+                continue
+
+            mesh = _polygon_to_draped_mesh(poly, terrain_mesh, scale, z_offset)
+            if mesh is not None:
+                parts.append(mesh)
+                n_total += 1
+            else:
+                n_skipped += 1
+
+    print(f"  Vegetation(v3): {n_total} draped ({len(VL_polys)} VL, {len(VO_polys)} VO), "
+          f"{n_skipped} skipped")
+
+    if not parts:
         return None
 
-    # Step 1: 构建基础植被网格
-    from _TEXTURE_STYLE_OF_DEEPSEEK.vegetation import build_deepseek_vegetation
-
-    print("\n[Step 1] 构建基础植被网格...")
-    vegetation_mesh = build_deepseek_vegetation(gdf, terrain_mesh, scale)
-
-    if vegetation_mesh is None or len(vegetation_mesh.faces) == 0:
-        print("  植被数据为空，返回None")
-        return None
-
-    print(f"  基础植被网格: {len(vegetation_mesh.vertices)} vertices, {len(vegetation_mesh.faces)} faces")
-
-    # Step 2: 检查是否需要遮挡处理
-    need_exclusion = (
-        (exclude_water and water_gdf is not None and len(water_gdf) > 0) or
-        (exclude_buildings and buildings_gdf is not None and len(buildings_gdf) > 0) or
-        (exclude_roads and roads_gdf is not None and len(roads_gdf) > 0)
-    )
-
-    if not need_exclusion:
-        print("  无需遮挡处理，返回基础植被")
-        return vegetation_mesh
-
-    # Step 3: 执行遮挡处理
-    vegetation_final = build_vegetation_with_exclusions_manifold(
-        vegetation_mesh,
-        water_gdf,
-        buildings_gdf,
-        roads_gdf,
-        terrain_mesh,
-        scale,
-        exclude_water,
-        exclude_buildings,
-        exclude_roads
-    )
-
-    return vegetation_final
+    return trimesh.util.concatenate(parts)

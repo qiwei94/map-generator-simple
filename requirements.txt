@@ -16,8 +16,10 @@ rich>=13.0.0
 # Optional (recommended for better performance)
 mapbox-earcut>=1.0.0
 
-# Optional (for local DEM/GeoTIFF files)
-# rasterio>=1.3.0
+# Local DEM/GeoTIFF reader — used by elevation.py for the Copernicus DEM path.
+# Optional: if not installed, elevation.py silently falls back to SRTM HGT.
+# >=1.4 bundles GDAL in the wheel (no `apt install gdal-bin` needed).
+rasterio>=1.4.0
 
 # 3D manifold mesh library — guaranteed watertight output for 3D printing
 manifold3d>=3.4.0

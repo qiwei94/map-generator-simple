@@ -571,9 +571,18 @@ def fetch_buildings(
     pipeline = OSMPipeline(pbf_path, "building", (south, west, north, east), config)
     result = pipeline.run(export_gpkg=export_gpkg)
 
-    # Add est_height column
+    # Add est_height column (with optional nDSM)
     if not result.empty:
-        result["est_height"] = _estimate_building_heights(result)
+        ndsm_heights = None
+        if _ndsm_grid_cache is not None:
+            from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.ndsm import (
+                sample_building_heights_from_ndsm,
+            )
+            grid, s, w, n, e = _ndsm_grid_cache
+            ndsm_heights = sample_building_heights_from_ndsm(
+                result, grid, s, w, n, e
+            )
+        result["est_height"] = _estimate_building_heights(result, ndsm_heights)
 
     # Save to tile cache
     if not result.empty:
@@ -738,19 +747,44 @@ def fetch_vegetation(
 
 
 # ===========================================================================
+# nDSM module-level grid cache (set by CLI before building fetch)
+# ===========================================================================
+
+_ndsm_grid_cache = None  # type: tuple[np.ndarray, float, float, float, float] | None
+
+
+def set_ndsm_grid(grid, south: float, west: float, north: float, east: float):
+    """Set the nDSM grid for building height estimation.
+
+    Called from CLI scripts before fetch_buildings() to make nDSM data
+    available to _estimate_building_heights().
+    """
+    global _ndsm_grid_cache
+    _ndsm_grid_cache = (grid, south, west, north, east)
+
+
+def get_ndsm_grid():
+    """Get the cached nDSM grid, or None if not set."""
+    return _ndsm_grid_cache
+
+
+# ===========================================================================
 # Internal utilities
 # ===========================================================================
 
-def _estimate_building_heights(gdf: gpd.GeoDataFrame) -> pd.Series:
-    """Estimate building heights from OSM tags.
+def _estimate_building_heights(gdf: gpd.GeoDataFrame,
+                                ndsm_heights: "pd.Series | None" = None) -> pd.Series:
+    """Estimate building heights from OSM tags + optional nDSM.
 
     Priority:
         1. height tag (direct value in meters)
         2. building:levels * BUILDING_LEVEL_HEIGHT_M
-        3. BUILDING_DEFAULT_HEIGHT_M fallback
+        3. nDSM satellite-derived height (if provided)
+        4. BUILDING_DEFAULT_HEIGHT_M fallback
 
     Args:
         gdf: Building GeoDataFrame.
+        ndsm_heights: Optional Series of nDSM-derived heights (NaN = unavailable).
 
     Returns:
         Series of estimated heights in meters.
@@ -780,5 +814,12 @@ def _estimate_building_heights(gdf: gpd.GeoDataFrame) -> pd.Series:
         heights[valid_levels] = (
             levels[valid_levels] * BUILDING_LEVEL_HEIGHT_M
         ).clip(upper=MAX_HEIGHT_M)
+
+    # Priority 3: nDSM — fill buildings still at default
+    if ndsm_heights is not None:
+        at_default = heights.eq(BUILDING_DEFAULT_HEIGHT_M)
+        valid_ndsm = ndsm_heights.notna() & (ndsm_heights > 0)
+        use_ndsm = at_default & valid_ndsm
+        heights[use_ndsm] = ndsm_heights[use_ndsm]
 
     return heights

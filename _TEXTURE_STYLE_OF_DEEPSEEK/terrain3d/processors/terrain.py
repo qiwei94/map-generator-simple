@@ -204,19 +204,39 @@ def carve_terrain_for_water(terrain_mesh: trimesh.Trimesh,
     return total_carved
 
 
+def _get_terrain_kdtree(mesh: trimesh.Trimesh):
+    """Build (or reuse) a cKDTree of mesh's XY vertices.
+
+    Cached on mesh.metadata so subsequent calls — typically thousands of them
+    from buildings / roads / vegetation — are O(query_size·log N) instead of
+    O(N) tree construction every time. For an 800K-vertex terrain, that's the
+    difference between 5–10 seconds vs <1ms per call.
+
+    Cache invalidates when the vertex count changes.
+    """
+    from scipy.spatial import cKDTree
+
+    cache = mesh.metadata.get("_kdtree_cache") if hasattr(mesh, "metadata") else None
+    if cache is not None and cache.get("nverts") == len(mesh.vertices):
+        return cache["tree"]
+
+    tree = cKDTree(mesh.vertices[:, :2])
+    if hasattr(mesh, "metadata"):
+        mesh.metadata["_kdtree_cache"] = {"tree": tree, "nverts": len(mesh.vertices)}
+    return tree
+
+
 def sample_terrain_z(mesh: trimesh.Trimesh, x: np.ndarray,
                      y: np.ndarray) -> np.ndarray:
     """Sample Z (elevation) values from terrain mesh at given X,Y positions.
 
-    Uses cKDTree nearest-neighbor interpolation instead of ray casting,
-    which is faster and avoids access violations on meshes with degenerate faces.
+    Uses cached cKDTree nearest-neighbor interpolation. Faster than ray casting
+    and avoids access violations on meshes with degenerate faces.
     """
     if len(x) == 0:
         return np.array([])
 
-    from scipy.spatial import cKDTree
-
-    tree = cKDTree(mesh.vertices[:, :2])
+    tree = _get_terrain_kdtree(mesh)
     k = min(8, len(mesh.vertices))
     dists, idxs = tree.query(np.column_stack([x, y]), k=k)
     if k == 1:

@@ -1,16 +1,31 @@
-"""3MF exporter — exact reference model XML structure with Bambu metadata.
+"""3MF exporter — reference-style multi-part 3MF (matches Bambu Urban Series).
 
-Produces a 3MF ZIP archive matching the Urban Series reference models:
-  - Object hierarchy: terrain_surface(1), terrain_walls(2), buildings(3),
-    roads(4), water(5)
-  - Extruders: E1=terrain+buildings, E2=roads, E3=water
-  - Bambu Studio metadata: model_settings.config + project_settings.config
+输出结构（与 demo/杭州 等 reference 文件一致）：
+
+    foo.3mf (ZIP)
+    ├── [Content_Types].xml
+    ├── _rels/.rels
+    ├── 3D/
+    │   ├── 3dmodel.model              ← 主文件，含 1 个外部对象 + N 个 component 引用
+    │   └── Objects/
+    │       └── object_1.model         ← 真正的几何，6 个内部 sub-mesh 各自占一个 <object>
+    └── Metadata/
+        └── model_settings.config      ← 每个 part 绑 extruder（Bambu Studio 读取）
+
+对比旧的"5 个独立 <object> 内联 mesh"风格：
+  - Bambu Studio 把它们当作 1 个可打印模型，不再做对象间几何重叠检测
+    （旧版 buildings 嵌入 terrain 0.04mm 触发 684K 非流形冲突报警，本格式消除）
+  - XML 体积更紧凑（references 共享几何元数据）
+  - 与 demo/* 的 reference 文件结构完全一致
 """
 
+from __future__ import annotations
+
 import os
-import xml.etree.ElementTree as ET
+import uuid as _uuid
 import zipfile
-import json
+from typing import Tuple
+
 import numpy as np
 import trimesh
 
@@ -19,334 +34,328 @@ from _TEXTURE_STYLE_OF_DEEPSEEK.config import (
     FILAMENT_COLOURS,
     TERRAIN_COLOR,
     BUILDING_COLOR,
+    LANDMARK_COLOR,
     ROAD_COLOR,
     WATER_COLOR,
     BASE_WALL_COLOR,
     VEGETATION_COLOR,
-    Z_TERRAIN_BASE,
-    Z_BUILDING_EMBED_MM,
-    Z_ROAD_ABOVE_TERRAIN_MM,
-    Z_WATER_BASE_MM,
-    VEGETATION_Z_OFFSET_MM,
+    BLOCK_BASE_COLOR,
 )
 
-# 3MF namespace constants
+# 3MF namespaces
 NS_3MF = "http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
-NS_SLIC3R = "http://schemas.slic3r.org/3mf/2017/06"
+NS_PRODUCTION = "http://schemas.microsoft.com/3dmanufacturing/production/2015/06"
+NS_BAMBU = "http://schemas.bambulab.com/package/2021"
 
 
-def _escape_xml(s: str) -> str:
-    """Escape special XML characters."""
-    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+def _uuid4() -> str:
+    """Generate a UUIDv4 hex string for 3MF p:UUID attributes (Bambu Studio
+    strictly checks these — missing UUIDs cause '对象体积为零' load error)."""
+    return str(_uuid.uuid4())
+
+# Sub-mesh definitions: (objectid_in_sub, name, displaycolor, extruder_1based)
+#
+# 与 reference 杭州/旧金山一致：每个 sub-mesh 都是单一 closed watertight solid，
+# 不再 split surface/walls（split 会产生开口面被 Bambu 当作 124K 非流形）。
+#
+# terrain key 收的是合并后的 obj4 + buildings + bridges union，整体米白
+# （reference mesh 1 + mesh 2 都用 E1 米白色，我们合成一个）。
+_SUB_MESH_DEFS: list[Tuple[int, str, str, int]] = [
+    (1, "terrain",     TERRAIN_COLOR,    EXTRUDER_MAP["terrain"]),       # E1 灰（含底盖）
+    (2, "buildings",   BUILDING_COLOR,   EXTRUDER_MAP["buildings"]),     # E1 灰（block_fill 街区填充，融入 terrain）
+    (3, "roads",       ROAD_COLOR,       EXTRUDER_MAP["roads"]),         # E2 黑
+    (4, "water",       WATER_COLOR,      EXTRUDER_MAP["water"]),         # E3 黑
+    (5, "vegetation",  VEGETATION_COLOR, EXTRUDER_MAP["vegetation"]),    # E4 绿
+    (6, "landmarks",   LANDMARK_COLOR,   EXTRUDER_MAP["landmarks"]),     # E5 暖砂石（地标突出）
+    (7, "block_base",  BLOCK_BASE_COLOR, EXTRUDER_MAP["block_base"]),    # E6 暖米色（PNG layer 1.5 城市底）
+]
+
+# 3MF 主对象 id（包含所有 components 的外层对象，与 reference 杭州的 id=5 对应）
+_MAIN_OBJECT_ID = 100
+
+# Identity transform 4×4（行主序 9 位旋转 + 3 位平移），全部 Z 偏移已经焙到几何里
+_IDENTITY_TRANSFORM = "1 0 0 0 1 0 0 0 1 0 0 0"
 
 
-def _make_slic3r_metadata(key: str, value: str) -> ET.Element:
-    """Create a slic3r:metadata element."""
-    el = ET.Element(f"{{{NS_SLIC3R}}}metadata")
-    el.set("key", key)
-    el.set("value", value)
-    return el
+# ---------------------------------------------------------------------------
+# Geometry XML — 写入 3D/Objects/object_1.model
+# ---------------------------------------------------------------------------
 
 
-def _make_metadata(key: str, value: str) -> ET.Element:
-    """Create a plain metadata element (non-slic3r)."""
-    el = ET.Element("metadata")
-    el.set("key", key)
-    el.set("value", value)
-    return el
+def _format_sub_mesh(oid: int, mesh: trimesh.Trimesh, p_uuid: str) -> str:
+    """单个 sub-mesh 的 XML（一个 <object id="N" p:UUID="..."> 内含 <mesh>）。"""
+    if mesh is None or len(mesh.faces) == 0:
+        return ""
 
+    verts = mesh.vertices
+    faces = mesh.faces
 
-def _format_vertices_xml(vertices: np.ndarray) -> str:
-    """Format vertices as 3MF XML vertices block."""
-    lines = ["      <vertices>"]
-    for v in vertices:
-        lines.append(
-            f'        <vertex x="{v[0]:.6f}" y="{v[1]:.6f}" z="{v[2]:.6f}"/>'
-        )
-    lines.append("      </vertices>")
-    return "\n".join(lines)
-
-
-def _format_triangles_xml(faces: np.ndarray, pid: int = 1, pindex: int = 0) -> str:
-    """Format triangles as 3MF XML triangles block."""
-    lines = ["      <triangles>"]
+    parts = [f'  <object id="{oid}" p:UUID="{p_uuid}" type="model">']
+    parts.append("   <mesh>")
+    parts.append("    <vertices>")
+    for v in verts:
+        parts.append(f'     <vertex x="{v[0]:.6f}" y="{v[1]:.6f}" z="{v[2]:.6f}"/>')
+    parts.append("    </vertices>")
+    parts.append("    <triangles>")
     for f in faces:
-        lines.append(
-            f'        <triangle v1="{f[0]}" v2="{f[1]}" v3="{f[2]}" pid="{pid}" p1="{pindex}"/>'
+        parts.append(f'     <triangle v1="{int(f[0])}" v2="{int(f[1])}" v3="{int(f[2])}"/>')
+    parts.append("    </triangles>")
+    parts.append("   </mesh>")
+    parts.append("  </object>")
+    return "\n".join(parts)
+
+
+def _build_object_1_model(active_meshes: list, sub_uuids: list) -> str:
+    """3D/Objects/object_1.model — 收纳所有 sub-mesh 的几何文件。
+
+    active_meshes: list of (oid, name, displaycolor, extruder, mesh)
+    sub_uuids:     list of UUID strings, one per sub-mesh
+    """
+    body = []
+    body.append('<?xml version="1.0" encoding="UTF-8"?>')
+    body.append(
+        f'<model unit="millimeter" xml:lang="en-US" '
+        f'xmlns="{NS_3MF}" xmlns:p="{NS_PRODUCTION}" requiredextensions="p" '
+        f'xmlns:BambuStudio="{NS_BAMBU}">'
+    )
+    body.append(' <resources>')
+    for (oid, _name, _color, _ext, mesh), uid in zip(active_meshes, sub_uuids):
+        body.append(_format_sub_mesh(oid, mesh, uid))
+    body.append(' </resources>')
+    body.append(' <build/>')
+    body.append('</model>')
+    return "\n".join(b for b in body if b)
+
+
+# ---------------------------------------------------------------------------
+# Main XML — 3D/3dmodel.model
+# ---------------------------------------------------------------------------
+
+
+def _build_main_model(active_meshes: list, sub_uuids: list,
+                       main_uuid: str, build_uuid: str, item_uuid: str,
+                       build_root_uuid: str) -> str:
+    """主 3D/3dmodel.model：1 个外部对象 + N 个 components 引用 object_1.model。
+
+    Bambu Studio 严格要求 p:UUID — 缺失会导致 "对象体积为零" 加载错误。
+    """
+    body = []
+    body.append('<?xml version="1.0" encoding="UTF-8"?>')
+    body.append(
+        f'<model unit="millimeter" xml:lang="en-US" '
+        f'xmlns="{NS_3MF}" xmlns:p="{NS_PRODUCTION}" requiredextensions="p" '
+        f'xmlns:BambuStudio="{NS_BAMBU}">'
+    )
+    body.append(' <metadata name="Application">deepseek-pipeline</metadata>')
+    body.append(' <metadata name="Title">City Texture 1/125K</metadata>')
+    body.append(' <resources>')
+
+    # basematerials
+    body.append('  <basematerials id="1">')
+    for _oid, name, color, _ext, _mesh in active_meshes:
+        body.append(f'   <base name="{name}" displaycolor="{color}"/>')
+    body.append('  </basematerials>')
+
+    # 主外部对象 id=100，含全部 components
+    body.append(f'  <object id="{_MAIN_OBJECT_ID}" p:UUID="{main_uuid}" type="model">')
+    body.append('   <components>')
+    for (oid, _name, _color, _ext, _mesh), uid in zip(active_meshes, sub_uuids):
+        # component 的 p:UUID 与 sub-mesh 的 UUID 不同，但通常是基于 sub UUID 派生
+        comp_uuid = _uuid4()
+        body.append(
+            f'    <component p:path="/3D/Objects/object_1.model" '
+            f'objectid="{oid}" p:UUID="{comp_uuid}" '
+            f'transform="{_IDENTITY_TRANSFORM}"/>'
         )
-    lines.append("      </triangles>")
+    body.append('   </components>')
+    body.append('  </object>')
+    body.append(' </resources>')
+
+    # build 区块
+    body.append(f' <build p:UUID="{build_root_uuid}">')
+    body.append(
+        f'  <item objectid="{_MAIN_OBJECT_ID}" p:UUID="{item_uuid}" '
+        f'transform="{_IDENTITY_TRANSFORM}" printable="1"/>'
+    )
+    body.append(' </build>')
+    body.append('</model>')
+    return "\n".join(body)
+
+
+# ---------------------------------------------------------------------------
+# model_settings.config — Bambu Studio 读取的 per-part metadata
+# ---------------------------------------------------------------------------
+
+
+def _build_model_settings(active_meshes: list) -> str:
+    """Metadata/model_settings.config — 把每个 sub-mesh 标为 part，绑 extruder。
+
+    与 reference 杭州/旧金山的 config 结构一致：
+        <object id="100">
+          <metadata key="name" value="..."/>
+          <part id="N">
+            <metadata key="name" value="terrain_surface"/>
+            <metadata key="extruder" value="1"/>
+            <metadata key="matrix" value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1"/>
+          </part>
+          ...
+        </object>
+    """
+    lines = []
+    lines.append('<?xml version="1.0" encoding="UTF-8"?>')
+    lines.append('<config>')
+    lines.append(f'  <object id="{_MAIN_OBJECT_ID}">')
+    lines.append('    <metadata key="name" value="City Texture 1/125K"/>')
+    lines.append(f'    <metadata key="extruder" value="1"/>')
+
+    # 4×4 identity matrix（行优先按 model_settings 的写法）
+    identity_44 = "1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1"
+
+    for oid, name, _color, ext, mesh in active_meshes:
+        face_count = len(mesh.faces) if mesh is not None else 0
+        lines.append(f'    <part id="{oid}" subtype="normal_part">')
+        lines.append(f'      <metadata key="name" value="{name}"/>')
+        lines.append(f'      <metadata key="extruder" value="{ext}"/>')
+        lines.append(f'      <metadata key="matrix" value="{identity_44}"/>')
+        lines.append(f'      <mesh_stat face_count="{face_count}"/>')
+        lines.append('    </part>')
+
+    lines.append('  </object>')
+
+    # 第一台 plate（包含主对象）
+    lines.append('  <plate>')
+    lines.append('    <metadata key="plater_id" value="1"/>')
+    lines.append('    <metadata key="plater_name" value="City"/>')
+    lines.append('    <model_instance>')
+    lines.append(f'      <metadata key="object_id" value="{_MAIN_OBJECT_ID}"/>')
+    lines.append('      <metadata key="instance_id" value="0"/>')
+    lines.append('    </model_instance>')
+    lines.append('  </plate>')
+    lines.append('</config>')
     return "\n".join(lines)
 
 
-def _build_3mf_xml(meshes: dict) -> str:
-    """Build the full 3D/3dmodel.model XML string.
+# ---------------------------------------------------------------------------
+# 静态文件
+# ---------------------------------------------------------------------------
 
-    Meshes dict keys: 'terrain_surface', 'terrain_walls', 'buildings', 'roads', 'water'
-    Each mesh is a trimesh.Trimesh in model mm coordinates.
-
-    Material mapping (matches reference Urban Series models):
-      - Basematerials id=1 with 5 materials:
-          pindex=0: terrain_surface -> #C8B48C
-          pindex=1: terrain_walls   -> #464137
-          pindex=2: buildings       -> #F5E6C8
-          pindex=3: roads           -> #5A5A5A
-          pindex=4: water           -> #3C96DC
-      - Each object gets its own pindex for correct display color in Bambu Studio
-    """
-    ET.register_namespace("", NS_3MF)
-    ET.register_namespace("slic3r", NS_SLIC3R)
-
-    model = ET.Element("model", {
-        "unit": "millimeter",
-        "xml:lang": "en-US",
-        "xmlns": NS_3MF,
-        "xmlns:slic3r": NS_SLIC3R,
-    })
-
-    resources = ET.SubElement(model, "resources")
-
-    # Basematerials — one per object type (matches reference model structure)
-    basematerials = ET.SubElement(resources, "basematerials", {"id": "1"})
-    mat_defs = [
-        ("terrain_surface", TERRAIN_COLOR),
-        ("terrain_walls", BASE_WALL_COLOR),
-        ("buildings", BUILDING_COLOR),
-        ("roads", ROAD_COLOR),
-        ("water", WATER_COLOR),
-        ("vegetation", VEGETATION_COLOR),
-    ]
-    for name, color in mat_defs:
-        ET.SubElement(basematerials, "base", {
-            "name": name,
-            "displaycolor": color,
-        })
-
-    # Object definitions — each object gets its own pindex
-    # id=1 is reserved for basematerials, objects start at id=2
-    object_defs = [
-        ("2", "terrain_surface", 0),
-        ("3", "terrain_walls", 1),
-        ("4", "buildings", 2),
-        ("5", "roads", 3),
-        ("6", "water", 4),
-        ("7", "vegetation", 5),
-    ]
-
-    # Only include objects that have actual mesh data
-    active_objects = []
-    for oid, name, pidx in object_defs:
-        obj_mesh = meshes.get(name)
-        if obj_mesh is None or len(obj_mesh.faces) == 0:
-            continue  # skip empty placeholders — Bambu warns "volume=0"
-
-        active_objects.append((oid, name, pidx, obj_mesh))
-
-    for oid, name, pidx, obj_mesh in active_objects:
-        obj_el = ET.SubElement(resources, "object", {
-            "id": oid, "name": name, "type": "model", "pid": "1", "pindex": str(pidx),
-        })
-        mesh_el = ET.SubElement(obj_el, "mesh")
-
-        # Vertices
-        verts_el = ET.SubElement(mesh_el, "vertices")
-        for v in obj_mesh.vertices:
-            ET.SubElement(verts_el, "vertex", {
-                "x": f"{v[0]:.6f}",
-                "y": f"{v[1]:.6f}",
-                "z": f"{v[2]:.6f}",
-            })
-
-        # Triangles
-        tris_el = ET.SubElement(mesh_el, "triangles")
-        pid_str = str(pidx)
-        for f in obj_mesh.faces:
-            ET.SubElement(tris_el, "triangle", {
-                "v1": str(int(f[0])),
-                "v2": str(int(f[1])),
-                "v3": str(int(f[2])),
-                "pid": "1",
-                "p1": pid_str,
-            })
-
-    # Build section — only include active objects
-    build = ET.SubElement(model, "build")
-    for oid, _, _, _ in active_objects:
-        ET.SubElement(build, "item", {"objectid": oid})
-
-    # Extract elementree string
-    xml_str = ET.tostring(model, encoding="unicode", xml_declaration=True)
-    return xml_str
-
-
-def _generate_bambu_metadata(meshes: dict) -> dict:
-    """Generate Bambu Studio metadata files for the 3MF.
-
-    Returns dict of {archive_path: content_string}.
-    """
-    metadata = {}
-
-    # model_settings.config — per-object extruder assignments and source offsets
-    model_settings_lines = []
-    model_settings_lines.append('<?xml version="1.0" encoding="UTF-8"?>')
-    model_settings_lines.append('<config>')
-
-    # Filament colours
-    filament_json = json.dumps(FILAMENT_COLOURS)
-    model_settings_lines.append(f'  <metadata key="filament_colour" value=\'{filament_json}\'/>')
-
-    # Object definitions with extruder assignments and source Z offsets
-    # Object IDs must match 3MF XML (id=2-7, since id=1 is basematerials)
-    object_configs = [
-        ("2", "terrain_surface", "1", f"{Z_TERRAIN_BASE:.2f}"),
-        ("3", "terrain_walls", "1", f"{Z_TERRAIN_BASE:.2f}"),
-        ("4", "buildings", "1", f"{-Z_BUILDING_EMBED_MM:.2f}"),  # embedded below terrain
-        ("5", "roads", "2", f"{Z_ROAD_ABOVE_TERRAIN_MM:.2f}"),
-        ("6", "water", "3", f"{Z_WATER_BASE_MM:.2f}"),
-        ("7", "vegetation", "4", f"{VEGETATION_Z_OFFSET_MM:.2f}"),
-    ]
-
-    for oid, name, extruder, z_offset in object_configs:
-        obj_mesh = meshes.get(name)
-        face_count = len(obj_mesh.faces) if obj_mesh is not None and obj_mesh.faces is not None else 0
-        model_settings_lines.append(f'  <object id="{oid}">')
-        model_settings_lines.append(f'    <metadata key="name" value="{name}"/>')
-        model_settings_lines.append(f'    <metadata key="extruder" value="{extruder}"/>')
-        if face_count > 0:
-            model_settings_lines.append(f'    <part id="0" source_file="" source_object_id="{oid}" face_count="{face_count}">')
-            model_settings_lines.append(f'      <metadata key="source_offset_z" value="{z_offset}"/>')
-            model_settings_lines.append(f'    </part>')
-        model_settings_lines.append(f'  </object>')
-
-    model_settings_lines.append('</config>')
-    metadata["Metadata/model_settings.config"] = "\n".join(model_settings_lines) + "\n"
-
-    # project_settings.config
-    metadata["Metadata/project_settings.config"] = """<?xml version="1.0" encoding="UTF-8"?>
-<config>
-  <metadata key="extruders_count" value="4"/>
-</config>
-"""
-
-    return metadata
-
-
-def _generate_content_types() -> str:
-    """Generate [Content_Types].xml."""
-    return '''<?xml version="1.0" encoding="UTF-8"?>
+_CONTENT_TYPES = '''<?xml version="1.0" encoding="UTF-8"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
   <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
   <Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/>
   <Default Extension="config" ContentType="text/xml"/>
 </Types>'''
 
-
-def _generate_rels() -> str:
-    """Generate _rels/.rels."""
-    return '''<?xml version="1.0" encoding="UTF-8"?>
+_RELS = '''<?xml version="1.0" encoding="UTF-8"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
   <Relationship Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"
                 Target="/3D/3dmodel.model" Id="rel0"/>
 </Relationships>'''
 
+# 主 model 引用 sub-file (object_*.model) 时，必须在 3D/_rels/3dmodel.model.rels
+# 里登记 Relationship。Bambu Studio 按 OPC 规范严格检查，缺这个会导致主 model
+# 的 component 解不到几何，报"对象体积为零"错误。
+_MAIN_RELS_TEMPLATE = '''<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+{relationships}
+</Relationships>'''
 
-def export_deepseek_3mf(meshes: dict, output_path: str,
-                        extruders: int = 3) -> str:
-    """Export a _TEXTURE_STYLE_OF_DEEPSEEK 3MF file.
+
+def _build_main_rels(sub_paths: list) -> str:
+    """生成 3D/_rels/3dmodel.model.rels — 登记 main model 引用的每个 sub-file。"""
+    rels = []
+    for i, path in enumerate(sub_paths, start=1):
+        rels.append(
+            f' <Relationship Target="{path}" Id="rel-{i}" '
+            f'Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/>'
+        )
+    return _MAIN_RELS_TEMPLATE.format(relationships="\n".join(rels))
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+
+def export_deepseek_3mf(meshes: dict, output_path: str) -> str:
+    """Write a reference-style 3MF with shared geometry via components.
 
     Args:
-        meshes: dict with keys:
-            'terrain_surface' - terrain top surface (trimesh)
-            'terrain_walls'   - terrain walls + bottom (trimesh)
-            'buildings'       - building blocks (trimesh or None)
-            'roads'           - road ribbons (trimesh or None)
-            'water'           - water plates (trimesh or None)
-        output_path: path for the .3mf file
-        extruders: number of extruders (always 3 for this pipeline)
+        meshes: dict with keys 'terrain_surface', 'terrain_walls', 'buildings',
+            'roads', 'water', 'vegetation'. Missing/None/empty entries are dropped.
+        output_path: target .3mf path.
 
     Returns:
-        Path to the created .3mf file.
+        output_path on success.
     """
-    os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else ".", exist_ok=True)
+    parent = os.path.dirname(output_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
 
-    # Ensure all required keys exist (empty mesh for missing layers)
-    empty_mesh = trimesh.Trimesh(vertices=np.zeros((0, 3)), faces=np.zeros((0, 3), dtype=np.int64))
-    for key in ["terrain_surface", "terrain_walls", "buildings", "roads", "water", "vegetation"]:
-        if key not in meshes or meshes[key] is None:
-            meshes[key] = empty_mesh
+    # 收集非空的 sub-mesh
+    active = []
+    for oid, name, color, ext in _SUB_MESH_DEFS:
+        mesh = meshes.get(name)
+        if mesh is None or len(mesh.faces) == 0:
+            continue
+        active.append((oid, name, color, ext, mesh))
 
-    # Build 3MF XML
-    xml_content = _build_3mf_xml(meshes)
+    if not active:
+        raise ValueError("No non-empty meshes to export")
 
-    # Build Bambu metadata
-    bambu_meta = _generate_bambu_metadata(meshes)
+    # 为每个 sub-mesh + 主对象 + build/item 生成 UUID
+    sub_uuids = [_uuid4() for _ in active]
+    main_uuid = _uuid4()
+    build_root_uuid = _uuid4()
+    item_uuid = _uuid4()
+    build_uuid = _uuid4()
 
-    # Write ZIP — NO Bambu metadata files (reference model works without them)
-    # Bambu Studio determines extruders from basematerials in 3dmodel.model
+    # 构造 3 个 XML
+    object_1_xml = _build_object_1_model(active, sub_uuids)
+    main_xml = _build_main_model(
+        active, sub_uuids, main_uuid, build_uuid, item_uuid, build_root_uuid
+    )
+    settings_xml = _build_model_settings(active)
+
+    # 登记主 model 引用的所有 sub-file（OPC 规范，Bambu 严格检查）
+    main_rels = _build_main_rels(["/3D/Objects/object_1.model"])
+
     with zipfile.ZipFile(output_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr("[Content_Types].xml", _generate_content_types())
-        zf.writestr("_rels/.rels", _generate_rels())
-        zf.writestr("3D/3dmodel.model", xml_content)
-
-        # Skip Bambu metadata files - they cause all objects to default to extruder 1
-        # for path, content in bambu_meta.items():
-        #     zf.writestr(path, content)
+        zf.writestr("[Content_Types].xml", _CONTENT_TYPES)
+        zf.writestr("_rels/.rels", _RELS)
+        zf.writestr("3D/_rels/3dmodel.model.rels", main_rels)  # ★ 关键：登记 sub-file 引用
+        zf.writestr("3D/3dmodel.model", main_xml)
+        zf.writestr("3D/Objects/object_1.model", object_1_xml)
+        zf.writestr("Metadata/model_settings.config", settings_xml)
 
     return output_path
 
 
-def split_terrain_mesh(terrain_solid: trimesh.Trimesh,
-                       surface_color_threshold_z: float = None) -> dict:
-    """Split a watertight terrain solid into surface and walls/bottom.
+def split_terrain_mesh(terrain_solid: trimesh.Trimesh) -> dict:
+    """Split a watertight terrain solid into top surface vs walls/bottom.
 
-    The terrain solid has:
-      - Top surface: faces with normals pointing roughly +Z
-      - Walls + bottom: everything else
-
-    Args:
-        terrain_solid: watertight terrain trimesh (model mm)
-        surface_color_threshold_z: not used here, kept for compatibility
-
-    Returns:
-        dict with 'terrain_surface' and 'terrain_walls' meshes.
+    Faces with normal Z > 0.1 are top surface; the rest are walls and bottom.
+    Each subset is repacked into its own trimesh with remapped vertex indices.
     """
     if terrain_solid is None or len(terrain_solid.faces) == 0:
         return {"terrain_surface": None, "terrain_walls": None}
 
-    normals = terrain_solid.face_normals
-    z_component = normals[:, 2]
-
-    # Faces with normal Z > 0 are the top surface
+    z_component = terrain_solid.face_normals[:, 2]
     surface_mask = z_component > 0.1
     walls_mask = ~surface_mask
 
-    surface_indices = np.where(surface_mask)[0]
-    walls_indices = np.where(walls_mask)[0]
+    def _repack(mask):
+        idx = np.where(mask)[0]
+        if len(idx) == 0:
+            return None
+        sub_faces = terrain_solid.faces[idx]
+        used, inverse = np.unique(sub_faces, return_inverse=True)
+        return trimesh.Trimesh(
+            vertices=terrain_solid.vertices[used],
+            faces=inverse.reshape(sub_faces.shape),
+        )
 
-    if len(surface_indices) == 0:
-        return {"terrain_surface": None, "terrain_walls": terrain_solid}
-
-    if len(walls_indices) == 0:
-        return {"terrain_surface": terrain_solid, "terrain_walls": None}
-
-    # Build surface mesh from face subset
-    surface_verts = terrain_solid.vertices.copy()
-    surface_faces = terrain_solid.faces[surface_indices]
-    # Remap face indices to use only referenced vertices
-    used_verts, inverse = np.unique(surface_faces, return_inverse=True)
-    surface_faces_remapped = inverse.reshape(surface_faces.shape)
-    surface_mesh = trimesh.Trimesh(
-        vertices=surface_verts[used_verts],
-        faces=surface_faces_remapped,
-    )
-
-    # Build walls mesh from face subset
-    walls_verts = terrain_solid.vertices.copy()
-    walls_faces = terrain_solid.faces[walls_indices]
-    used_verts_w, inverse_w = np.unique(walls_faces, return_inverse=True)
-    walls_faces_remapped = inverse_w.reshape(walls_faces.shape)
-    walls_mesh = trimesh.Trimesh(
-        vertices=walls_verts[used_verts_w],
-        faces=walls_faces_remapped,
-    )
-
-    return {"terrain_surface": surface_mesh, "terrain_walls": walls_mesh}
+    return {
+        "terrain_surface": _repack(surface_mask),
+        "terrain_walls": _repack(walls_mask),
+    }
