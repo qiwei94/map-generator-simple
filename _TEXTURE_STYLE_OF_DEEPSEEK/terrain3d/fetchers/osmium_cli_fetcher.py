@@ -296,6 +296,29 @@ class OsmiumCLIFetcher:
         print(f"  Bounding box: ({south:.4f}, {west:.4f}, {north:.4f}, {east:.4f})")
 
         try:
+            # GeoJSON cache: if file already exists and is non-empty, reuse it
+            if os.path.exists(output_path) and os.path.getsize(output_path) > 100:
+                print(f"  [CLI Pipeline] Using cached GeoJSON: {output_path}")
+                gdf = gpd.read_file(output_path)
+                if len(gdf) > 0:
+                    print(f"  [CLI Pipeline] Loaded {len(gdf)} features from cache\n")
+                    # Buildings: ensure est_height column
+                    if tag_type in ('building', 'building_landmarks') and len(gdf) > 0:
+                        from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.osm import (
+                            _estimate_building_heights, get_ndsm_grid,
+                        )
+                        ndsm_heights = None
+                        ndsm_cache = get_ndsm_grid()
+                        if ndsm_cache is not None:
+                            from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.ndsm import (
+                                sample_building_heights_from_ndsm,
+                            )
+                            grid, s, w, n, e = ndsm_cache
+                            ndsm_heights = sample_building_heights_from_ndsm(
+                                gdf, grid, s, w, n, e)
+                        gdf["est_height"] = _estimate_building_heights(gdf, ndsm_heights)
+                    return gdf
+
             result = self._run_osmium_pipeline(
                 pbf_file, tag_type, south, west, north, east, output_path
             )
@@ -357,10 +380,11 @@ class OsmiumCLIFetcher:
         """
         import time
 
-        # 临时文件放在项目 tmp/ 目录下，便于调试
+        # 临时文件放在项目 tmp/ 目录下，用 PID 隔离防止多进程冲突
         project_tmp = os.path.join(os.path.dirname(__file__), '..', '..', '..', 'tmp')
         os.makedirs(project_tmp, exist_ok=True)
-        temp_dir = os.path.join(project_tmp, f"osmium_cli_{tag_type}_{south:.4f}_{west:.4f}")
+        _pid = os.getpid()
+        temp_dir = os.path.join(project_tmp, f"osmium_cli_{tag_type}_{south:.4f}_{west:.4f}_pid{_pid}")
         os.makedirs(temp_dir, exist_ok=True)
 
         base_name = os.path.splitext(os.path.basename(pbf_file))[0]
