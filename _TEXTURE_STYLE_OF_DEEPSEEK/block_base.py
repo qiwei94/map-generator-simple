@@ -325,6 +325,17 @@ def _build_textured(
     combined = trimesh.util.concatenate(meshes)
     print(f"  BlockBase concat: {_time.time()-t_merge:.1f}s, "
           f"faces={len(combined.faces)}, bodies={len(meshes)}")
+
+    # Manifold repair: merge duplicate vertices at shared block boundaries
+    # (adjacent blocks share edges which become non-manifold after concat)
+    t_repair = _time.time()
+    from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.processors.mesh_repair import (
+        validate_and_repair_mesh_manifold,
+    )
+    combined = validate_and_repair_mesh_manifold(combined, name="block_base")
+    print(f"  BlockBase Manifold repair: {_time.time()-t_repair:.1f}s, "
+          f"watertight={combined.is_watertight}")
+
     return combined
 
 

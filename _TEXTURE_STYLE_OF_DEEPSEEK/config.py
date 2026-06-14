@@ -153,6 +153,12 @@ BUILDING_V2_BLOCK_FILL_CONVEX = True
 # 地标 simplify
 BUILDING_SIMPLIFY_TOL_M = 25.0   # [TUNE] 大楼 footprint 简化 (D-P)
 
+# 地标增强：高度暴击 + 2D膨胀 + 排斥缓冲区
+LANDMARK_HEIGHT_BOOST = 1.4             # [DESIGN] 地标高度额外 ×1.4（log压缩后再乘）
+LANDMARK_HEIGHT_BOOST_CAP_MM = 5.5      # [SAFETY] 地标最终高度上限 mm（防冲破沙盘罩）
+LANDMARK_BUFFER_M = 5.0                 # [DESIGN] 地标 2D 轮廓向外膨胀 m（视觉留白）
+LANDMARK_EXCLUSION_BUFFER_M = 8.0       # [DESIGN] 减法时地标额外排斥 m（腾出广场空间）
+
 # Building hotspot 相关
 BUILDING_V2_HOTSPOT_RELAX = 10.0                 # [TUNE] top X% 热点 block 内放宽 landmark 阈值
 BUILDING_V2_MAX_BLOCK_AREA_M2 = 500000.0         # [TUNE] block_fill 过滤过大 block

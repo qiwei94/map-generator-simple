@@ -65,6 +65,10 @@ from _TEXTURE_STYLE_OF_DEEPSEEK.config import (
     BUILDING_FLAT_HEIGHT_HIGH_MM,
     BUILDING_FLAT_AREA_MID_M2,
     BUILDING_FLAT_AREA_HIGH_M2,
+    LANDMARK_HEIGHT_BOOST,
+    LANDMARK_HEIGHT_BOOST_CAP_MM,
+    LANDMARK_BUFFER_M,
+    LANDMARK_EXCLUSION_BUFFER_M,
 )
 from _TEXTURE_STYLE_OF_DEEPSEEK.buildings import (
     _build_city_blocks,
@@ -329,6 +333,16 @@ def _extract_BL_vectorized(
             h_mm = _narrow_building_penalty(poly, h_mm,
                                             threshold=narrow_threshold,
                                             factor=narrow_penalty_factor)
+            # Landmark height boost + 2D expansion
+            h_mm = min(h_mm * LANDMARK_HEIGHT_BOOST, LANDMARK_HEIGHT_BOOST_CAP_MM)
+            if LANDMARK_BUFFER_M > 0:
+                poly = poly.buffer(LANDMARK_BUFFER_M, join_style=2)
+                if poly.is_empty:
+                    continue
+                if isinstance(poly, MultiPolygon):
+                    poly = max(poly.geoms, key=lambda g: g.area)
+                if not isinstance(poly, Polygon) or poly.is_empty:
+                    continue
             BL_with_heights.append((poly, h_mm))
         else:
             BO_input_smalls.append(poly)
@@ -453,6 +467,16 @@ def _extract_BL_legacy(
             h_mm = _narrow_building_penalty(poly, h_mm,
                                             threshold=narrow_threshold,
                                             factor=narrow_penalty_factor)
+            # Landmark height boost + 2D expansion
+            h_mm = min(h_mm * LANDMARK_HEIGHT_BOOST, LANDMARK_HEIGHT_BOOST_CAP_MM)
+            if LANDMARK_BUFFER_M > 0:
+                poly = poly.buffer(LANDMARK_BUFFER_M, join_style=2)
+                if poly.is_empty:
+                    continue
+                if isinstance(poly, MultiPolygon):
+                    poly = max(poly.geoms, key=lambda g: g.area)
+                if not isinstance(poly, Polygon) or poly.is_empty:
+                    continue
             BL_with_heights.append((poly, h_mm))
         else:
             BO_input_smalls.append(poly)
@@ -736,8 +760,22 @@ def _apply_subtraction_and_filter(
 
     BL_polys = [p for p, _ in BL]
 
-    # all_landmarks = BL ∪ WL ∪ VL
-    all_bits = BL_polys + WL + VL
+    # Exclusion zone: buffer BL polygons for subtraction from BO/VO
+    # (gives landmarks a "plaza" — surrounding small buildings pushed back)
+    if LANDMARK_EXCLUSION_BUFFER_M > 0:
+        BL_exclusion = []
+        for p in BL_polys:
+            try:
+                buffered = p.buffer(LANDMARK_EXCLUSION_BUFFER_M, join_style=2)
+                if not buffered.is_empty:
+                    BL_exclusion.append(buffered)
+            except Exception:
+                BL_exclusion.append(p)
+    else:
+        BL_exclusion = BL_polys
+
+    # all_landmarks = BL(exclusion) ∪ WL ∪ VL
+    all_bits = BL_exclusion + WL + VL
     all_landmarks = None
     try:
         all_landmarks = unary_union([p for p in all_bits if not p.is_empty])
