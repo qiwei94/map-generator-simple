@@ -153,11 +153,67 @@ BUILDING_V2_BLOCK_FILL_CONVEX = True
 # 地标 simplify
 BUILDING_SIMPLIFY_TOL_M = 25.0   # [TUNE] 大楼 footprint 简化 (D-P)
 
-# 地标增强：高度暴击 + 2D膨胀 + 排斥缓冲区
-LANDMARK_HEIGHT_BOOST = 1.4             # [DESIGN] 地标高度额外 ×1.4（log压缩后再乘）
-LANDMARK_HEIGHT_BOOST_CAP_MM = 5.5      # [SAFETY] 地标最终高度上限 mm（防冲破沙盘罩）
-LANDMARK_BUFFER_M = 5.0                 # [DESIGN] 地标 2D 轮廓向外膨胀 m（视觉留白）
-LANDMARK_EXCLUSION_BUFFER_M = 8.0       # [DESIGN] 减法时地标额外排斥 m（腾出广场空间）
+# ---------------------------------------------------------------------------
+# 地标增强: Kevin Lynch 4-category classification
+# ---------------------------------------------------------------------------
+from _TEXTURE_STYLE_OF_DEEPSEEK._landmark import LandmarkCategory
+
+LANDMARK_CATEGORY_PARAMS = {
+    # Cat 1: Spiritual/Cultural Anchors (historic, religious)
+    LandmarkCategory.SPIRITUAL: {
+        "height_boost": 1.8,
+        "height_boost_cap_mm": 6.0,
+        "buffer_m": 5.0,
+        "exclusion_buffer_m": 12.0,
+    },
+    # Cat 2: Urban Machinery Hubs (stadiums, stations, hospitals)
+    LandmarkCategory.URBAN_HUB: {
+        "height_boost": 1.3,
+        "height_boost_cap_mm": 5.5,
+        "buffer_m": 8.0,
+        "exclusion_buffer_m": 15.0,
+    },
+    # Cat 3: Visual Rulers (geometric outliers by height/area)
+    LandmarkCategory.GEOMETRIC: {
+        "height_boost": 1.5,
+        "height_boost_cap_mm": 5.5,
+        "buffer_m": 5.0,
+        "exclusion_buffer_m": 10.0,
+    },
+    # Cat 4: Semantic Matches (name regex)
+    LandmarkCategory.SEMANTIC: {
+        "height_boost": 1.5,
+        "height_boost_cap_mm": 5.5,
+        "buffer_m": 5.0,
+        "exclusion_buffer_m": 8.0,
+    },
+}
+
+# Geometric outlier thresholds (Cat 3)
+LANDMARK_HEIGHT_TOP_PERCENT = 2.0       # height top 2%
+LANDMARK_AREA_TOP_PERCENT = 5.0         # area top 5%
+
+# Name regex (Cat 4)
+LANDMARK_NAME_REGEX = (
+    r"(?:"
+    r"塔|中心|大厦|大楼|广场|宮|宫|寺|庙|廟|院|祠|阁|閣|楼|樓"
+    r"|Tower|Center|Plaza|Headquarters|Cathedral|Palace|Museum"
+    r")"
+)
+LANDMARK_NAME_MIN_AREA_M2 = 2500.0      # Cat 4 面积下限
+
+# Backward-compat aliases (for v1 builder, tune tools, logs)
+LANDMARK_HEIGHT_BOOST = 1.8             # max across categories
+LANDMARK_HEIGHT_BOOST_CAP_MM = 6.0      # max across categories
+LANDMARK_BUFFER_M = 5.0                 # min across categories
+LANDMARK_EXCLUSION_BUFFER_M = 8.0       # fallback for empty categories list
+
+# ---------------------------------------------------------------------------
+# Overture Maps 高度注入开关
+# ---------------------------------------------------------------------------
+OVERTURE_ENABLED = False                # [TOGGLE] 设为 True 启用 Overture AI 高度注入
+OVERTURE_CACHE_DIR = "data/height_cache"  # 离线 Parquet 缓存目录
+OVERTURE_AUTO_DOWNLOAD = False          # 缓存未命中时是否自动下载
 
 # Building hotspot 相关
 BUILDING_V2_HOTSPOT_RELAX = 10.0                 # [TUNE] top X% 热点 block 内放宽 landmark 阈值

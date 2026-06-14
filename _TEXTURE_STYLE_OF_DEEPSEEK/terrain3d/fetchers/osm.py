@@ -574,7 +574,7 @@ def fetch_buildings(
     pipeline = OSMPipeline(pbf_path, "building", (south, west, north, east), config)
     result = pipeline.run(export_gpkg=export_gpkg)
 
-    # Add est_height column (with optional nDSM)
+    # Add est_height column (with optional nDSM + Overture)
     if not result.empty:
         ndsm_heights = None
         if _ndsm_grid_cache is not None:
@@ -585,7 +585,33 @@ def fetch_buildings(
             ndsm_heights = sample_building_heights_from_ndsm(
                 result, grid, s, w, n, e
             )
-        result["est_height"] = _estimate_building_heights(result, ndsm_heights)
+
+        # Overture Maps height enrichment (priority 4, between nDSM and default)
+        overture_heights = None
+        from _TEXTURE_STYLE_OF_DEEPSEEK.config import OVERTURE_ENABLED
+        if OVERTURE_ENABLED:
+            try:
+                from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.height_enrichment import (
+                    load_overture_heights,
+                )
+                bbox_wgs84 = (south, west, north, east)
+                overture_heights, overture_names = load_overture_heights(
+                    result, bbox_wgs84=bbox_wgs84)
+                if overture_heights is not None:
+                    # Also enrich OSM names with Overture names (for landmark detection)
+                    if overture_names is not None and "name" in result.columns:
+                        missing_name = result["name"].isna() | (result["name"] == "")
+                        has_ov_name = overture_names.notna()
+                        fill_name = missing_name & has_ov_name
+                        result.loc[fill_name, "name"] = overture_names[fill_name]
+            except ImportError:
+                pass  # height_enrichment module not available
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).warning(f"Overture enrichment failed: {e}")
+
+        result["est_height"] = _estimate_building_heights(
+            result, ndsm_heights, overture_heights)
 
     # Save to tile cache
     if not result.empty:
@@ -776,18 +802,21 @@ def get_ndsm_grid():
 # ===========================================================================
 
 def _estimate_building_heights(gdf: gpd.GeoDataFrame,
-                                ndsm_heights: "pd.Series | None" = None) -> pd.Series:
-    """Estimate building heights from OSM tags + optional nDSM.
+                                ndsm_heights: "pd.Series | None" = None,
+                                overture_heights: "pd.Series | None" = None) -> pd.Series:
+    """Estimate building heights from OSM tags + optional nDSM + Overture.
 
     Priority:
         1. height tag (direct value in meters)
         2. building:levels * BUILDING_LEVEL_HEIGHT_M
         3. nDSM satellite-derived height (if provided)
-        4. BUILDING_DEFAULT_HEIGHT_M fallback
+        4. Overture Maps AI-estimated height (if provided)
+        5. BUILDING_DEFAULT_HEIGHT_M fallback
 
     Args:
         gdf: Building GeoDataFrame.
         ndsm_heights: Optional Series of nDSM-derived heights (NaN = unavailable).
+        overture_heights: Optional Series of Overture AI heights (NaN = unavailable).
 
     Returns:
         Series of estimated heights in meters.
@@ -824,5 +853,12 @@ def _estimate_building_heights(gdf: gpd.GeoDataFrame,
         valid_ndsm = ndsm_heights.notna() & (ndsm_heights > 0)
         use_ndsm = at_default & valid_ndsm
         heights[use_ndsm] = ndsm_heights[use_ndsm]
+
+    # Priority 4: Overture Maps — fill buildings still at default
+    if overture_heights is not None:
+        at_default = heights.eq(BUILDING_DEFAULT_HEIGHT_M)
+        valid_ov = overture_heights.notna() & (overture_heights > 0) & (overture_heights <= MAX_HEIGHT_M)
+        use_ov = at_default & valid_ov
+        heights[use_ov] = overture_heights[use_ov]
 
     return heights

@@ -32,6 +32,8 @@ from shapely.strtree import STRtree
 
 from _TEXTURE_STYLE_OF_DEEPSEEK._landmark import (
     is_tag_landmark,
+    classify_landmark,
+    LandmarkCategory,
     is_vegetation_landmark,
     is_water_landmark,
     is_road_landmark,
@@ -65,6 +67,9 @@ from _TEXTURE_STYLE_OF_DEEPSEEK.config import (
     BUILDING_FLAT_HEIGHT_HIGH_MM,
     BUILDING_FLAT_AREA_MID_M2,
     BUILDING_FLAT_AREA_HIGH_M2,
+    LANDMARK_CATEGORY_PARAMS,
+    LANDMARK_HEIGHT_TOP_PERCENT,
+    LANDMARK_AREA_TOP_PERCENT,
     LANDMARK_HEIGHT_BOOST,
     LANDMARK_HEIGHT_BOOST_CAP_MM,
     LANDMARK_BUFFER_M,
@@ -87,6 +92,7 @@ from _TEXTURE_STYLE_OF_DEEPSEEK.buildings import (
 class LayerPolygons:
     """7 类 polygon 集合 + 精度元信息。"""
     BL: List[Tuple[Polygon, float]] = field(default_factory=list)
+    BL_categories: List = field(default_factory=list)  # List[LandmarkCategory], parallel to BL
     BO: List[Polygon] = field(default_factory=list)
     VL: List[Polygon] = field(default_factory=list)
     VO: List[Polygon] = field(default_factory=list)
@@ -99,8 +105,13 @@ class LayerPolygons:
     min_area_m2: float = 0.0
 
     def summary(self) -> str:
+        from collections import Counter
+        cat_dist = ""
+        if self.BL_categories:
+            counts = Counter(c.name for c in self.BL_categories)
+            cat_dist = " " + " ".join(f"{k}={v}" for k, v in sorted(counts.items()))
         return (
-            f"BL={len(self.BL)} BO={len(self.BO)} "
+            f"BL={len(self.BL)}{cat_dist} BO={len(self.BO)} "
             f"VL={len(self.VL)} VO={len(self.VO)} "
             f"WL={len(self.WL)} WO={len(self.WO)} "
             f"block_base={len(self.block_base)} "
@@ -199,17 +210,17 @@ def _extract_BL(
     height_mode: str = "height",
     narrow_threshold: float = 6.0,
     narrow_penalty_factor: float = 0.5,
-) -> Tuple[List[Tuple[Polygon, float]], List[Polygon]]:
-    """返回 (BL_with_heights, BO_input_smalls)。Dispatches to vectorized or legacy."""
+) -> Tuple[List[Tuple[Polygon, float]], List[Polygon], List]:
+    """返回 (BL_with_heights, BO_input_smalls, BL_categories)。Dispatches to vectorized or legacy."""
     args = (buildings_gdf, city_blocks, enable_hotspot, hotspot_relax,
             height_mode, narrow_threshold, narrow_penalty_factor)
 
     if _VERIFY_EXTRACT_BL:
         t0 = time.time()
-        bl_leg, bo_leg = _extract_BL_legacy(*args)
+        bl_leg, bo_leg, cat_leg = _extract_BL_legacy(*args)
         t_leg = time.time() - t0
         t0 = time.time()
-        bl_vec, bo_vec = _extract_BL_vectorized(*args)
+        bl_vec, bo_vec, cat_vec = _extract_BL_vectorized(*args)
         t_vec = time.time() - t0
         # Compare
         areas_leg = sorted([p.area for p, _ in bl_leg])
@@ -221,8 +232,8 @@ def _extract_BL(
         print(f"  [verify] time: legacy={t_leg:.1f}s, vec={t_vec:.1f}s, speedup={t_leg/max(t_vec,0.01):.1f}x")
         if not bl_match or not bo_match:
             print(f"  [verify] WARNING: mismatch! Using legacy result.")
-            return bl_leg, bo_leg
-        return bl_vec, bo_vec
+            return bl_leg, bo_leg, cat_leg
+        return bl_vec, bo_vec, cat_vec
 
     if _USE_VECTORIZED_BL:
         return _extract_BL_vectorized(*args)
@@ -237,10 +248,10 @@ def _extract_BL_vectorized(
     height_mode: str = "height",
     narrow_threshold: float = 6.0,
     narrow_penalty_factor: float = 0.5,
-) -> Tuple[List[Tuple[Polygon, float]], List[Polygon]]:
+) -> Tuple[List[Tuple[Polygon, float]], List[Polygon], List]:
     """Vectorized version of _extract_BL using geopandas batch operations."""
     if buildings_gdf is None or len(buildings_gdf) == 0:
-        return [], []
+        return [], [], []
 
     use_landmark_tags = BUILDING_V2_USE_LANDMARK_TAGS
 
@@ -248,12 +259,12 @@ def _extract_BL_vectorized(
     gdf = buildings_gdf[buildings_gdf.geometry.notnull()].copy()
     gdf = gdf[gdf.geometry.type.isin(['Polygon', 'MultiPolygon'])]
     if len(gdf) == 0:
-        return [], []
+        return [], [], []
 
     exploded = gdf.explode(index_parts=False)
     exploded = exploded[exploded.geometry.area >= 1.0]
     if len(exploded) == 0:
-        return [], []
+        return [], [], []
 
     exploded = exploded.copy()
     exploded['geometry'] = exploded.geometry.simplify(BUILDING_SIMPLIFY_TOL_M)
@@ -261,7 +272,7 @@ def _extract_BL_vectorized(
     valid = (~exploded.geometry.is_empty) & (exploded.geometry.area >= 1.0)
     exploded = exploded[valid]
     if len(exploded) == 0:
-        return [], []
+        return [], [], []
 
     mp_mask = exploded.geometry.type == 'MultiPolygon'
     if mp_mask.any():
@@ -270,15 +281,28 @@ def _extract_BL_vectorized(
     exploded = exploded[exploded.geometry.type == 'Polygon']
     exploded = exploded[~exploded.geometry.is_empty]
     if len(exploded) == 0:
-        return [], []
+        return [], [], []
 
-    # ---- Step 2: Top percentile threshold ----
+    # ---- Step 2: Top percentile thresholds ----
     all_areas = exploded.geometry.area.values
     if BUILDING_V2_LANDMARK_TOP_PERCENT > 0:
         landmark_top_thr = compute_top_percent_threshold(
             all_areas.tolist(), BUILDING_V2_LANDMARK_TOP_PERCENT)
     else:
         landmark_top_thr = float("inf")
+
+    # Cat 3 geometric outlier thresholds
+    area_top_thr_5pct = compute_top_percent_threshold(
+        all_areas.tolist(), LANDMARK_AREA_TOP_PERCENT)
+    if "est_height" in exploded.columns:
+        all_heights = exploded["est_height"].values
+        nonzero_heights = [h for h in all_heights
+                          if h > 0 and h != BUILDING_DEFAULT_HEIGHT_M]
+        height_top_thr = (compute_top_percent_threshold(
+            nonzero_heights, LANDMARK_HEIGHT_TOP_PERCENT)
+            if nonzero_heights else float("inf"))
+    else:
+        height_top_thr = float("inf")
 
     # ---- Hotspot blocks ----
     hotspot_blocks: Set[int] = set()
@@ -295,10 +319,10 @@ def _extract_BL_vectorized(
 
     # ---- Step 3: Classify ----
     BL_with_heights: List[Tuple[Polygon, float]] = []
+    BL_categories: List[LandmarkCategory] = []
     BO_input_smalls: List[Polygon] = []
-    n_lm_tag = 0
-    n_lm_size = 0
-    n_lm_top = 0
+    n_lm_cat = {c.name: 0 for c in LandmarkCategory if c != LandmarkCategory.NONE}
+    n_lm_other = 0
 
     for _, row in exploded.iterrows():
         poly = row.geometry
@@ -311,32 +335,46 @@ def _extract_BL_vectorized(
             if len(candidates) > 0:
                 is_hotspot = True
 
-        tag_lm = use_landmark_tags and is_tag_landmark(row, area_m2=area, hotspot=is_hotspot)
-        size_lm = area >= BUILDING_PRINT_LIMIT_M2
-        top_lm = area >= landmark_top_thr
         est_height = row.get("est_height", 0)
 
+        # 4-category classification
+        cat = (classify_landmark(
+            row, area_m2=area, est_height_m=est_height,
+            height_top_thr=height_top_thr,
+            area_top_thr_5pct=area_top_thr_5pct,
+            hotspot=is_hotspot)
+            if use_landmark_tags else LandmarkCategory.NONE)
+
+        size_lm = area >= BUILDING_PRINT_LIMIT_M2
+        top_lm = area >= landmark_top_thr
+
         if height_mode == "height":
-            is_landmark = tag_lm or size_lm or top_lm
+            is_landmark = (cat != LandmarkCategory.NONE) or size_lm or top_lm
         else:
             has_real_height = (est_height != BUILDING_DEFAULT_HEIGHT_M and est_height > 0)
-            is_landmark = tag_lm and has_real_height
+            is_landmark = ((cat != LandmarkCategory.NONE) and has_real_height) or \
+                          (size_lm and has_real_height) or \
+                          (top_lm and has_real_height)
 
         if is_landmark:
-            if tag_lm:
-                n_lm_tag += 1
-            elif size_lm:
-                n_lm_size += 1
-            elif top_lm:
-                n_lm_top += 1
+            # Determine effective category (size_lm/top_lm fallback → GEOMETRIC)
+            if cat == LandmarkCategory.NONE:
+                effective_cat = LandmarkCategory.GEOMETRIC
+                n_lm_other += 1
+            else:
+                effective_cat = cat
+                n_lm_cat[effective_cat.name] += 1
+
+            params = LANDMARK_CATEGORY_PARAMS[effective_cat]
+
             h_mm = _compress_height(est_height, area)
             h_mm = _narrow_building_penalty(poly, h_mm,
                                             threshold=narrow_threshold,
                                             factor=narrow_penalty_factor)
-            # Landmark height boost + 2D expansion
-            h_mm = min(h_mm * LANDMARK_HEIGHT_BOOST, LANDMARK_HEIGHT_BOOST_CAP_MM)
-            if LANDMARK_BUFFER_M > 0:
-                poly = poly.buffer(LANDMARK_BUFFER_M, join_style=2)
+            # Category-specific height boost + 2D expansion
+            h_mm = min(h_mm * params["height_boost"], params["height_boost_cap_mm"])
+            if params["buffer_m"] > 0:
+                poly = poly.buffer(params["buffer_m"], join_style=2)
                 if poly.is_empty:
                     continue
                 if isinstance(poly, MultiPolygon):
@@ -344,16 +382,18 @@ def _extract_BL_vectorized(
                 if not isinstance(poly, Polygon) or poly.is_empty:
                     continue
             BL_with_heights.append((poly, h_mm))
+            BL_categories.append(effective_cat)
         else:
             BO_input_smalls.append(poly)
 
-    print(f"  _extract_BL: {len(BL_with_heights)} BL "
-          f"(tag={n_lm_tag}, size≥{BUILDING_PRINT_LIMIT_M2:.0f}={n_lm_size}, "
-          f"top{BUILDING_V2_LANDMARK_TOP_PERCENT}%={n_lm_top}), "
+    cat_summary = ", ".join(f"{k}={v}" for k, v in n_lm_cat.items() if v > 0)
+    if n_lm_other > 0:
+        cat_summary += f", size/top={n_lm_other}"
+    print(f"  _extract_BL: {len(BL_with_heights)} BL ({cat_summary}), "
           f"{len(BO_input_smalls)} smalls, "
           f"hotspot_blocks={len(hotspot_blocks)}")
 
-    return BL_with_heights, BO_input_smalls
+    return BL_with_heights, BO_input_smalls, BL_categories
 
 
 def _extract_BL_legacy(
@@ -364,10 +404,10 @@ def _extract_BL_legacy(
     height_mode: str = "height",
     narrow_threshold: float = 6.0,
     narrow_penalty_factor: float = 0.5,
-) -> Tuple[List[Tuple[Polygon, float]], List[Polygon]]:
+) -> Tuple[List[Tuple[Polygon, float]], List[Polygon], List]:
     """Legacy iterrows-based implementation of _extract_BL."""
     if buildings_gdf is None or len(buildings_gdf) == 0:
-        return [], []
+        return [], [], []
 
     use_landmark_tags = BUILDING_V2_USE_LANDMARK_TAGS
 
@@ -394,14 +434,25 @@ def _extract_BL_legacy(
             all_areas.append(simplified.area)
 
     if not all_simplified:
-        return [], []
+        return [], [], []
 
-    # ---- Top percentile threshold ----
+    # ---- Top percentile thresholds ----
     if BUILDING_V2_LANDMARK_TOP_PERCENT > 0:
         landmark_top_thr = compute_top_percent_threshold(
             all_areas, BUILDING_V2_LANDMARK_TOP_PERCENT)
     else:
         landmark_top_thr = float("inf")
+
+    area_top_thr_5pct = compute_top_percent_threshold(
+        all_areas, LANDMARK_AREA_TOP_PERCENT)
+    if "est_height" in buildings_gdf.columns:
+        nonzero_heights = [h for h in buildings_gdf["est_height"].values
+                          if h > 0 and h != BUILDING_DEFAULT_HEIGHT_M]
+        height_top_thr = (compute_top_percent_threshold(
+            nonzero_heights, LANDMARK_HEIGHT_TOP_PERCENT)
+            if nonzero_heights else float("inf"))
+    else:
+        height_top_thr = float("inf")
 
     # ---- Hotspot blocks ----
     hotspot_blocks: Set[int] = set()
@@ -421,11 +472,10 @@ def _extract_BL_legacy(
 
     # ---- Second pass: classify ----
     BL_with_heights: List[Tuple[Polygon, float]] = []
+    BL_categories: List[LandmarkCategory] = []
     BO_input_smalls: List[Polygon] = []
-    n_lm_tag = 0
-    n_lm_size = 0
-    n_lm_top = 0
-    n_lm_hot = 0
+    n_lm_cat = {c.name: 0 for c in LandmarkCategory if c != LandmarkCategory.NONE}
+    n_lm_other = 0
 
     for poly, idx in all_simplified:
         row = buildings_gdf.loc[idx]
@@ -439,38 +489,45 @@ def _extract_BL_legacy(
             if len(candidates) > 0:
                 is_hotspot = True
 
-        # Three-tier landmark check
-        tag_lm = use_landmark_tags and is_tag_landmark(row, area_m2=area, hotspot=is_hotspot)
-        size_lm = area >= BUILDING_PRINT_LIMIT_M2
-        top_lm = area >= landmark_top_thr
         est_height = row.get("est_height", 0)
 
+        # 4-category classification
+        cat = (classify_landmark(
+            row, area_m2=area, est_height_m=est_height,
+            height_top_thr=height_top_thr,
+            area_top_thr_5pct=area_top_thr_5pct,
+            hotspot=is_hotspot)
+            if use_landmark_tags else LandmarkCategory.NONE)
+
+        size_lm = area >= BUILDING_PRINT_LIMIT_M2
+        top_lm = area >= landmark_top_thr
+
         if height_mode == "height":
-            # Normal mode: all three tiers qualify as landmark
-            is_landmark = tag_lm or size_lm or top_lm
+            is_landmark = (cat != LandmarkCategory.NONE) or size_lm or top_lm
         else:
-            # Flat mode: only tag-based landmarks WITH real height data
             has_real_height = (est_height != BUILDING_DEFAULT_HEIGHT_M and est_height > 0)
-            is_landmark = tag_lm and has_real_height
+            is_landmark = ((cat != LandmarkCategory.NONE) and has_real_height) or \
+                          (size_lm and has_real_height) or \
+                          (top_lm and has_real_height)
 
         if is_landmark:
-            if tag_lm:
-                n_lm_tag += 1
-            elif size_lm:
-                n_lm_size += 1
-            elif top_lm:
-                n_lm_top += 1
-            if height_mode == "height":
-                h_mm = _compress_height(est_height, area)
+            if cat == LandmarkCategory.NONE:
+                effective_cat = LandmarkCategory.GEOMETRIC
+                n_lm_other += 1
             else:
-                h_mm = _compress_height(est_height, area)
+                effective_cat = cat
+                n_lm_cat[effective_cat.name] += 1
+
+            params = LANDMARK_CATEGORY_PARAMS[effective_cat]
+
+            h_mm = _compress_height(est_height, area)
             h_mm = _narrow_building_penalty(poly, h_mm,
                                             threshold=narrow_threshold,
                                             factor=narrow_penalty_factor)
-            # Landmark height boost + 2D expansion
-            h_mm = min(h_mm * LANDMARK_HEIGHT_BOOST, LANDMARK_HEIGHT_BOOST_CAP_MM)
-            if LANDMARK_BUFFER_M > 0:
-                poly = poly.buffer(LANDMARK_BUFFER_M, join_style=2)
+            # Category-specific height boost + 2D expansion
+            h_mm = min(h_mm * params["height_boost"], params["height_boost_cap_mm"])
+            if params["buffer_m"] > 0:
+                poly = poly.buffer(params["buffer_m"], join_style=2)
                 if poly.is_empty:
                     continue
                 if isinstance(poly, MultiPolygon):
@@ -478,16 +535,18 @@ def _extract_BL_legacy(
                 if not isinstance(poly, Polygon) or poly.is_empty:
                     continue
             BL_with_heights.append((poly, h_mm))
+            BL_categories.append(effective_cat)
         else:
             BO_input_smalls.append(poly)
 
-    print(f"  _extract_BL: {len(BL_with_heights)} BL "
-          f"(tag={n_lm_tag}, size≥{BUILDING_PRINT_LIMIT_M2:.0f}={n_lm_size}, "
-          f"top{BUILDING_V2_LANDMARK_TOP_PERCENT}%={n_lm_top}), "
+    cat_summary = ", ".join(f"{k}={v}" for k, v in n_lm_cat.items() if v > 0)
+    if n_lm_other > 0:
+        cat_summary += f", size/top={n_lm_other}"
+    print(f"  _extract_BL: {len(BL_with_heights)} BL ({cat_summary}), "
           f"{len(BO_input_smalls)} smalls, "
           f"hotspot_blocks={len(hotspot_blocks)}")
 
-    return BL_with_heights, BO_input_smalls
+    return BL_with_heights, BO_input_smalls, BL_categories
 
 
 # ---------------------------------------------------------------------------
@@ -741,6 +800,7 @@ def _extract_roads(
 
 def _apply_subtraction_and_filter(
     BL: List[Tuple[Polygon, float]],
+    BL_categories: List,
     BO: List[Polygon],
     VL: List[Polygon],
     VO: List[Polygon],
@@ -760,19 +820,30 @@ def _apply_subtraction_and_filter(
 
     BL_polys = [p for p, _ in BL]
 
-    # Exclusion zone: buffer BL polygons for subtraction from BO/VO
+    # Exclusion zone: buffer BL polygons with category-specific radius
     # (gives landmarks a "plaza" — surrounding small buildings pushed back)
-    if LANDMARK_EXCLUSION_BUFFER_M > 0:
-        BL_exclusion = []
-        for p in BL_polys:
+    default_excl = LANDMARK_EXCLUSION_BUFFER_M
+    BL_exclusion = []
+    for i, p in enumerate(BL_polys):
+        # Determine exclusion radius from category
+        if BL_categories and i < len(BL_categories):
+            cat = BL_categories[i]
+            params = LANDMARK_CATEGORY_PARAMS.get(cat, {})
+            excl_m = params.get("exclusion_buffer_m", default_excl)
+        else:
+            excl_m = default_excl
+
+        if excl_m > 0:
             try:
-                buffered = p.buffer(LANDMARK_EXCLUSION_BUFFER_M, join_style=2)
+                buffered = p.buffer(excl_m, join_style=2)
                 if not buffered.is_empty:
                     BL_exclusion.append(buffered)
+                else:
+                    BL_exclusion.append(p)
             except Exception:
                 BL_exclusion.append(p)
-    else:
-        BL_exclusion = BL_polys
+        else:
+            BL_exclusion.append(p)
 
     # all_landmarks = BL(exclusion) ∪ WL ∪ VL
     all_bits = BL_exclusion + WL + VL
@@ -1138,7 +1209,7 @@ def preprocess_layers(
 
     # ---- Step 3: BL ----
     t3 = time.time()
-    BL_with_heights, BO_input_smalls = _extract_BL(
+    BL_with_heights, BO_input_smalls, BL_categories = _extract_BL(
         buildings_gdf, city_blocks, enable_hotspot, hotspot_relax,
         height_mode=height_mode,
         narrow_threshold=narrow_threshold,
@@ -1183,7 +1254,7 @@ def preprocess_layers(
     # ---- Step 7 + 8: subtraction + filter ----
     t7 = time.time()
     filtered = _apply_subtraction_and_filter(
-        BL_with_heights, BO_polys, VL_polys, VO_polys,
+        BL_with_heights, BL_categories, BO_polys, VL_polys, VO_polys,
         WL_polys, WO_polys, BO_filled_ids, min_area_m2)
     print(f"[preprocess] subtraction+filter: {time.time() - t7:.1f}s")
 
@@ -1218,6 +1289,7 @@ def preprocess_layers(
     # ---- Step 10: assemble ----
     result = LayerPolygons(
         BL=filtered["BL"],
+        BL_categories=BL_categories,
         BO=filtered["BO"],
         VL=filtered["VL"],
         VO=filtered["VO"],

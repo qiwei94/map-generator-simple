@@ -6,12 +6,34 @@
   Tier 3: name 非空 AND building 非住宅类
   + 调用方可选叠加: top X% 面积 OR area ≥ 阈值
 
-依赖最少（仅 pandas），让 tune 工具和主管道都能复用。
+Kevin Lynch 4-category classification:
+  SPIRITUAL (Cat 1): historic/religious buildings
+  URBAN_HUB (Cat 2): stadiums, stations, hospitals, universities
+  GEOMETRIC (Cat 3): height top 2% or area top 5%
+  SEMANTIC  (Cat 4): name regex match
+
+依赖最少（仅 pandas + enum），让 tune 工具和主管道都能复用。
 """
 
 from __future__ import annotations
 
+import enum
+import re
+
 import pandas as pd
+
+
+class LandmarkCategory(enum.IntEnum):
+    """Kevin Lynch 4-category landmark classification.
+
+    Lower value = higher priority. When a building matches multiple
+    categories, the highest priority (lowest value) wins.
+    """
+    NONE = 0           # Not a landmark
+    SPIRITUAL = 1      # Cat 1: historic / religious anchors
+    URBAN_HUB = 2      # Cat 2: urban machinery / civic hubs
+    GEOMETRIC = 3      # Cat 3: visual rulers (height/area outliers)
+    SEMANTIC = 4       # Cat 4: name-based semantic matches
 
 # Tier 2: 这些 building=* 一律算地标（curated 清单，不含 school/kindergarten 太多）
 LANDMARK_BUILDING_TYPES = frozenset({
@@ -111,6 +133,103 @@ def is_tag_landmark(row: pd.Series, area_m2: float = None,
             return True
 
     return False
+
+
+# =============================================================================
+# Kevin Lynch 4-category landmark classification
+# =============================================================================
+
+# Cat 1: Spiritual/Cultural Anchors — building types
+_CAT1_BUILDING_TYPES = frozenset({
+    "cathedral", "church", "temple", "mosque", "pagoda",
+    "shrine", "monastery", "chapel", "convent", "abbey",
+})
+
+# Cat 2: Urban Machinery Hubs — building types
+_CAT2_BUILDING_TYPES = frozenset({
+    "stadium", "train_station", "airport", "mall",
+})
+
+# Cat 2: Urban Machinery Hubs — amenity types
+_CAT2_AMENITY_TYPES = frozenset({
+    "townhall", "courthouse", "university", "hospital", "theatre",
+})
+
+# Cat 4: Name regex (compiled at module level)
+_LANDMARK_NAME_RE = re.compile(
+    r"(?:"
+    r"塔|中心|大厦|大楼|广场|宮|宫|寺|庙|廟|院|祠|阁|閣|楼|樓"
+    r"|Tower|Center|Plaza|Headquarters|Cathedral|Palace|Museum"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def classify_landmark(
+    row: pd.Series,
+    area_m2: float,
+    est_height_m: float = 0.0,
+    height_top_thr: float = float("inf"),
+    area_top_thr_5pct: float = float("inf"),
+    hotspot: bool = False,
+) -> LandmarkCategory:
+    """Kevin Lynch 4-category landmark classification.
+
+    Priority order (first match wins):
+      Cat 1 (SPIRITUAL):  historic/religion/worship building types
+      Cat 2 (URBAN_HUB):  stadium/station/mall/townhall/hospital/university
+      Cat 3 (GEOMETRIC):  height top 2% OR area top 5% (not in cat 1/2)
+      Cat 4 (SEMANTIC):   name regex match + area >= threshold
+
+    Args:
+        row: GeoDataFrame row (use .get(key) for field access).
+        area_m2: 2D footprint area in m².
+        est_height_m: estimated building height in meters.
+        height_top_thr: pre-computed height threshold for top 2%.
+        area_top_thr_5pct: pre-computed area threshold for top 5%.
+        hotspot: True if building is in a hotspot block.
+
+    Returns:
+        LandmarkCategory (NONE if no category matches).
+    """
+    g = row.get
+
+    # ---- Cat 1: Spiritual/Cultural Anchors ----
+    if pd.notna(g("historic")):
+        return LandmarkCategory.SPIRITUAL
+    if pd.notna(g("religion")):
+        return LandmarkCategory.SPIRITUAL
+    bldg = g("building")
+    if pd.notna(bldg) and bldg in _CAT1_BUILDING_TYPES:
+        return LandmarkCategory.SPIRITUAL
+    amen = g("amenity")
+    if pd.notna(amen) and amen == "place_of_worship":
+        return LandmarkCategory.SPIRITUAL
+
+    # ---- Cat 2: Urban Machinery Hubs ----
+    if pd.notna(bldg) and bldg in _CAT2_BUILDING_TYPES:
+        return LandmarkCategory.URBAN_HUB
+    if pd.notna(amen) and amen in _CAT2_AMENITY_TYPES:
+        return LandmarkCategory.URBAN_HUB
+
+    # ---- Cat 3: Visual Rulers (Geometric Outliers) ----
+    if est_height_m > 0 and est_height_m >= height_top_thr:
+        return LandmarkCategory.GEOMETRIC
+    if area_m2 >= area_top_thr_5pct:
+        return LandmarkCategory.GEOMETRIC
+
+    # ---- Cat 4: Semantic Matches (Name-based) ----
+    name = g("name")
+    name_en = g("name:en")
+    for n in (name, name_en):
+        if pd.notna(n) and _LANDMARK_NAME_RE.search(str(n)):
+            # Require minimum area to avoid small shops with grand names
+            from _TEXTURE_STYLE_OF_DEEPSEEK.config import LANDMARK_NAME_MIN_AREA_M2
+            if area_m2 >= LANDMARK_NAME_MIN_AREA_M2:
+                return LandmarkCategory.SEMANTIC
+            break  # name matched but area too small → don't check name:en
+
+    return LandmarkCategory.NONE
 
 
 # =============================================================================

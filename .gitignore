@@ -35,6 +35,7 @@ Thumbs.db
 
 # Downloads / binary assets
 *.dmg
+data/
 
 # Rebuild specs (generated)
 rebuild/
