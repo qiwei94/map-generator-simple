@@ -165,12 +165,10 @@ def get_bridge_statistics(roads_gdf: gpd.GeoDataFrame,
         intersecting = roads_gdf[roads_gdf.geometry.intersects(water_union)]
         stats["water_intersecting"] = len(intersecting)
 
-        # 计算桥梁长度（交集长度）
+        # 计算桥梁长度（交集长度）— vectorized, no iterrows
         if len(intersecting) > 0:
-            for idx, row in intersecting.iterrows():
-                intersection = row.geometry.intersection(water_union)
-                if not intersection.is_empty:
-                    stats["bridge_length_m"] += intersection.length
+            intersections = intersecting.geometry.intersection(water_union)
+            stats["bridge_length_m"] = float(intersections.length.sum())
 
     return stats
 

@@ -22,6 +22,7 @@ from typing import Dict, List, Optional, Tuple
 
 import geopandas as gpd
 import pandas as pd
+import shapely
 from shapely.geometry import LineString, MultiLineString, MultiPolygon, Polygon
 
 logger = logging.getLogger(__name__)
@@ -308,7 +309,7 @@ def _relation_to_multipolygon(
                 except Exception:
                     continue
             if not inner.is_valid:
-                inner = inner.buffer(0)
+                inner = shapely.make_valid(inner)
             if not inner.is_empty and outer.contains(inner):
                 if inner.geom_type == "Polygon":
                     interiors.append(list(inner.exterior.coords))

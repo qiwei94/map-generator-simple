@@ -14,6 +14,7 @@ from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.processors.terrain import (
 from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.processors.mesh_repair import (
     validate_and_repair_mesh,
     validate_and_repair_mesh_manifold,
+    optimize_and_repair_mesh,
 )
 
 from _TEXTURE_STYLE_OF_DEEPSEEK.config import (
@@ -201,10 +202,16 @@ def build_deepseek_terrain(elevation_grid: np.ndarray,
     solid = _add_walls_and_bottom(mesh, Z_TERRAIN_BASE)
 
     # Step 5: Validate and repair
+    # Use optimize_and_repair_mesh as safety net: it decimates large meshes
+    # via fast_simplification C ext BEFORE sending to Manifold, preventing
+    # OOM / timeout on huge inputs (e.g. 1.7M faces from 1024x1024 DEM).
     n_faces = len(solid.faces)
     if n_faces > 100_000:
-        print(f"[terrain] Large mesh ({n_faces} faces) — using Manifold-backed repair")
-        solid = validate_and_repair_mesh_manifold(solid, name="terrain")
+        print(f"[terrain] Large mesh ({n_faces} faces) — "
+              f"using optimize_and_repair_mesh (decimate + Manifold)")
+        solid = optimize_and_repair_mesh(
+            solid, max_faces=100_000, agg=7.0, name="terrain",
+        )
     else:
         solid = validate_and_repair_mesh(solid, name="terrain",
                                          fix_watertight=True,

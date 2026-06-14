@@ -1,6 +1,7 @@
 """Coordinate projection utilities: WGS84 <-> UTM."""
 
 import numpy as np
+import shapely
 from pyproj import Transformer, CRS
 import geopandas as gpd
 
@@ -125,9 +126,9 @@ def project_geodataframe(gdf: gpd.GeoDataFrame, utm_crs: CRS,
         clip_box = box(local_min_x, local_min_y, local_max_x, local_max_y)
 
         gdf_utm = gdf_utm.copy()
-        # Fix invalid geometries before intersection (buffer(0) repairs self-intersections)
+        # Fix invalid geometries before intersection (make_valid preserves self-intersecting area)
         gdf_utm["geometry"] = gdf_utm["geometry"].apply(
-            lambda geom: geom.buffer(0) if not geom.is_valid else geom
+            lambda geom: shapely.make_valid(geom) if not geom.is_valid else geom
         )
         try:
             gdf_utm["geometry"] = gdf_utm["geometry"].intersection(clip_box)
@@ -136,7 +137,7 @@ def project_geodataframe(gdf: gpd.GeoDataFrame, utm_crs: CRS,
             safe_geoms = []
             for geom in gdf_utm["geometry"]:
                 try:
-                    repaired = geom.buffer(0) if not geom.is_valid else geom
+                    repaired = shapely.make_valid(geom) if not geom.is_valid else geom
                     result = repaired.intersection(clip_box)
                     safe_geoms.append(result)
                 except Exception:

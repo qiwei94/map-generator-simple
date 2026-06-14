@@ -37,6 +37,7 @@ from typing import Callable, Dict, Optional, Set, Tuple
 
 import geopandas as gpd
 import pandas as pd
+import shapely
 from shapely.geometry import box
 from shapely.ops import unary_union
 
@@ -413,7 +414,9 @@ class OSMPipeline:
             count = mask_invalid.sum()
             logger.info("Step 4 [%s]: Repairing %d invalid geometries",
                          self.feature_type, count)
-            gdf.loc[mask_invalid, "geometry"] = gdf.loc[mask_invalid, "geometry"].buffer(0)
+            gdf.loc[mask_invalid, "geometry"] = gdf.loc[mask_invalid, "geometry"].apply(
+                lambda g: shapely.make_valid(g) if g is not None and not g.is_valid else g
+            )
 
         # Remove empty geometries
         gdf = gdf[~gdf.geometry.is_empty & gdf.geometry.notna()].copy()

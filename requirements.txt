@@ -23,3 +23,6 @@ rasterio>=1.4.0
 
 # 3D manifold mesh library — guaranteed watertight output for 3D printing
 manifold3d>=3.4.0
+
+# Data validation & settings management — strict type checking for city profiles
+pydantic>=2.0.0

@@ -32,3 +32,9 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Downloads / binary assets
+*.dmg
+
+# Rebuild specs (generated)
+rebuild/

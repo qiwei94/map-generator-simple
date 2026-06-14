@@ -844,24 +844,24 @@ def _classify_block_base(
 
     # Phase 1: landuse spatial join (majority overlap > 15%)
     if landuse_gdf is not None and len(landuse_gdf) > 0:
-        lu_polys = []
-        lu_classes = []
-        for _, row in landuse_gdf.iterrows():
-            geom = row.geometry
-            if geom is None or geom.is_empty:
-                continue
-            lu_tag = row.get("landuse", "")
-            cls = _LANDUSE_CLASS_MAP.get(lu_tag)
-            if cls is None:
-                continue
-            if isinstance(geom, Polygon):
-                lu_polys.append(geom)
-                lu_classes.append(cls)
-            elif isinstance(geom, MultiPolygon):
-                for g in geom.geoms:
-                    if not g.is_empty:
-                        lu_polys.append(g)
-                        lu_classes.append(cls)
+        # Vectorized landuse extraction (no iterrows)
+        lu_valid = landuse_gdf[
+            landuse_gdf.geometry.notnull()
+            & ~landuse_gdf.geometry.is_empty
+            & landuse_gdf.geometry.type.isin(['Polygon', 'MultiPolygon'])
+        ].copy()
+        lu_polys: list = []
+        lu_classes: list = []
+        if len(lu_valid) > 0:
+            lu_valid['_cls'] = lu_valid.get('landuse', pd.Series('', index=lu_valid.index)).map(
+                _LANDUSE_CLASS_MAP
+            )
+            lu_valid = lu_valid[lu_valid['_cls'].notna()]
+        if len(lu_valid) > 0:
+            lu_exploded = lu_valid.explode(index_parts=False)
+            lu_exploded = lu_exploded[~lu_exploded.geometry.is_empty]
+            lu_polys = lu_exploded.geometry.tolist()
+            lu_classes = lu_exploded['_cls'].tolist()
 
         if lu_polys:
             tree = STRtree(lu_polys)

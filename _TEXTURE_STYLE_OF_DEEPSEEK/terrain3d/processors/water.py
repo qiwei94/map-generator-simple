@@ -2,6 +2,7 @@
 
 import logging
 import numpy as np
+import shapely
 import trimesh
 import geopandas as gpd
 from shapely.geometry import Polygon, MultiPolygon, LineString, MultiLineString
@@ -160,7 +161,7 @@ def _build_water_polygon(geom, terrain_mesh: trimesh.Trimesh,
     meshes = []
     for polygon in polygons:
         if not polygon.is_valid:
-            polygon = polygon.buffer(0)
+            polygon = shapely.make_valid(polygon)
         if polygon.is_empty or polygon.area < WATER_MIN_AREA_M2:
             continue
 
@@ -264,10 +265,10 @@ def _triangulate_polygon(polygon: Polygon,
     # Post-densification sanity check: warn if any edge still exceeds threshold
     _check_water_edges(all_points_2d, ring_end_indices)
 
-    # Triangulate: earcut first; high-detail: retry with buffer(0) to fix invalid geometry before Delaunay.
+    # Triangulate: earcut first; high-detail: retry with make_valid() to fix invalid geometry before Delaunay.
     tri_indices = _earcut_triangulate(all_points_2d, ring_end_indices)
     if tri_indices is None and get_water_high_detail() and has_holes:
-        fixed = polygon.buffer(0)
+        fixed = shapely.make_valid(polygon)
         if fixed.geom_type == "Polygon" and not fixed.is_empty and fixed.area >= 1.0:
             rings_f, _ = _polygon_to_rings(fixed)
             if rings_f is not None:

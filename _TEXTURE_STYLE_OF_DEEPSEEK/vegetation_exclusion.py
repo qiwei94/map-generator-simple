@@ -17,6 +17,7 @@ from typing import List
 
 import time
 import numpy as np
+import shapely
 import trimesh
 import manifold3d
 from shapely.geometry import Polygon, MultiPolygon, LineString, MultiLineString
@@ -86,6 +87,10 @@ def create_building_exclusion_columns_manifold(buildings_gdf: gpd.GeoDataFrame,
                                                 z_buffer: float = 0.5) -> manifold3d.Manifold:
     """创建建筑排除柱（用于植被镂空）。
 
+    Optimized: vectorized geometry extraction + batch terrain Z sampling.
+    Only the per-building Manifold extrusion remains as a loop (3D geometry
+    construction that cannot be vectorized).
+
     Args:
         buildings_gdf: 建筑GeoDataFrame
         terrain_mesh: 地形网格（用于采样地形高度）
@@ -98,49 +103,58 @@ def create_building_exclusion_columns_manifold(buildings_gdf: gpd.GeoDataFrame,
     if buildings_gdf is None or len(buildings_gdf) == 0:
         return manifold3d.Manifold()
 
-    print(f"\n[建筑排除柱] 创建 {len(buildings_gdf)} 个建筑的排除柱...")
+    print(f"\n[建筑排除柱] 处理 {len(buildings_gdf)} 个建筑...")
+
+    # ── 1. Vectorized geometry extraction (no iterrows) ──
+    geoms = buildings_gdf.geometry.values
+
+    # Explode MultiPolygon → individual Polygon + collect single Polygons
+    all_polys: list = []
+    for geom in geoms:
+        if geom is None or geom.is_empty:
+            continue
+        if isinstance(geom, MultiPolygon):
+            all_polys.extend(geom.geoms)
+        elif isinstance(geom, Polygon):
+            all_polys.append(geom)
+
+    if not all_polys:
+        print("  无有效建筑多边形")
+        return manifold3d.Manifold()
+
+    # ── 2. Vectorized area filter ──
+    areas = np.array([p.area for p in all_polys])
+    keep = areas >= 10.0
+    filtered_polys = [p for p, k in zip(all_polys, keep) if k]
+
+    if not filtered_polys:
+        print("  所有建筑面积 < 10 m², 全部过滤")
+        return manifold3d.Manifold()
+
+    # ── 3. Batch centroid extraction + single terrain Z sampling call ──
+    centroids = shapely.centroid(filtered_polys)
+    cx = shapely.get_x(centroids) * scale
+    cy = shapely.get_y(centroids) * scale
+
+    terrain_z_all = sample_terrain_z(terrain_mesh, cx, cy)
+    valid_z = ~(np.isnan(terrain_z_all) | (terrain_z_all == 0))
+
+    # ── 4. 3D geometry construction loop (Manifold — cannot vectorize) ──
     columns = []
     n_created = 0
 
-    for idx, row in buildings_gdf.iterrows():
-        geom = row.geometry
-        if geom is None or geom.is_empty:
+    for i, poly in enumerate(filtered_polys):
+        if not valid_z[i]:
             continue
 
-        # 处理Polygon和MultiPolygon
-        polygons = []
-        if isinstance(geom, MultiPolygon):
-            polygons = list(geom.geoms)
-        elif isinstance(geom, Polygon):
-            polygons = [geom]
-        else:
-            continue
+        z_base = float(terrain_z_all[i])
+        z_bottom = z_base - z_buffer
+        z_top = z_base + BUILDING_EXCLUSION_TOP_MM + z_buffer
 
-        for poly in polygons:
-            if poly.area < 10:  # 过滤太小的建筑
-                continue
-
-            # 采样地形高度（建筑中心点）
-            centroid = poly.centroid
-            terrain_z = sample_terrain_z(terrain_mesh,
-                                          np.array([centroid.x]) * scale,
-                                          np.array([centroid.y]) * scale)
-            if len(terrain_z) == 0 or np.isnan(terrain_z[0]):
-                continue
-
-            z_base = float(terrain_z[0])
-
-            # 建筑排除柱的Z范围（从植被下方到建筑上方）
-            # 植被层高度: terrain_z + VEGETATION_Z_OFFSET_MM (约0.1mm)
-            # 建筑层高度: terrain_z - 0.04mm (嵌入) + building_height (约+5mm)
-            # 排除柱需要穿透整个植被层到建筑层
-            z_bottom = z_base - z_buffer
-            z_top = z_base + BUILDING_EXCLUSION_TOP_MM + z_buffer
-
-            col = create_exclusion_column_manifold(poly, z_bottom, z_top, scale)
-            if not col.is_empty():
-                columns.append(col)
-                n_created += 1
+        col = create_exclusion_column_manifold(poly, z_bottom, z_top, scale)
+        if not col.is_empty():
+            columns.append(col)
+            n_created += 1
 
     print(f"  创建成功: {n_created} 个建筑排除柱")
 
@@ -164,6 +178,10 @@ def create_road_exclusion_columns_manifold(roads_gdf: gpd.GeoDataFrame,
                                             z_buffer: float = 0.5) -> manifold3d.Manifold:
     """创建道路排除柱（用于植被镂空）。
 
+    Optimized: vectorized geometry extraction + batch terrain Z sampling.
+    Only the per-road Manifold extrusion remains as a loop (3D geometry
+    construction that cannot be vectorized).
+
     Args:
         roads_gdf: 道路GeoDataFrame
         terrain_mesh: 地形网格
@@ -177,50 +195,59 @@ def create_road_exclusion_columns_manifold(roads_gdf: gpd.GeoDataFrame,
     if roads_gdf is None or len(roads_gdf) == 0:
         return manifold3d.Manifold()
 
-    print(f"\n[道路排除柱] 创建 {len(roads_gdf)} 条道路的排除柱...")
+    print(f"\n[道路排除柱] 处理 {len(roads_gdf)} 条道路...")
+
+    # ── 1. Vectorized geometry extraction (no iterrows) ──
+    geoms = roads_gdf.geometry.values
+
+    all_lines: list = []
+    for geom in geoms:
+        if geom is None or geom.is_empty:
+            continue
+        if isinstance(geom, MultiLineString):
+            all_lines.extend(geom.geoms)
+        elif isinstance(geom, LineString):
+            all_lines.append(geom)
+
+    if not all_lines:
+        print("  无有效道路线")
+        return manifold3d.Manifold()
+
+    # ── 2. Vectorized length filter ──
+    lengths = np.array([line.length for line in all_lines])
+    keep = lengths >= ROAD_MIN_LINE_LENGTH_M
+    filtered_lines = [ln for ln, k in zip(all_lines, keep) if k]
+
+    if not filtered_lines:
+        print(f"  所有道路长度 < {ROAD_MIN_LINE_LENGTH_M} m, 全部过滤")
+        return manifold3d.Manifold()
+
+    # ── 3. Batch centroid extraction + single terrain Z sampling call ──
+    centroids = shapely.centroid(filtered_lines)
+    cx = shapely.get_x(centroids) * scale
+    cy = shapely.get_y(centroids) * scale
+
+    terrain_z_all = sample_terrain_z(terrain_mesh, cx, cy)
+    valid_z = ~(np.isnan(terrain_z_all) | (terrain_z_all == 0))
+
+    # ── 4. 3D geometry construction loop (Manifold — cannot vectorize) ──
     columns = []
     n_created = 0
 
-    for idx, row in roads_gdf.iterrows():
-        geom = row.geometry
-        if geom is None or geom.is_empty:
+    for i, line in enumerate(filtered_lines):
+        if not valid_z[i]:
             continue
 
-        # 处理LineString和MultiLineString
-        lines = []
-        if isinstance(geom, MultiLineString):
-            lines = list(geom.geoms)
-        elif isinstance(geom, LineString):
-            lines = [geom]
-        else:
-            continue
+        z_base = float(terrain_z_all[i])
+        z_bottom = z_base - z_buffer
+        z_top = z_base + Z_ROAD_ABOVE_TERRAIN_MM + ROAD_THICKNESS_MM + z_buffer
 
-        for line in lines:
-            if line.length < ROAD_MIN_LINE_LENGTH_M:
-                continue
+        road_poly = line.buffer(road_width_m / 2)
 
-            # 道路缓冲为Polygon（用于创建排除柱）
-            road_poly = line.buffer(road_width_m / 2)
-
-            # 采样地形高度（道路中心）
-            centroid = line.centroid
-            terrain_z = sample_terrain_z(terrain_mesh,
-                                          np.array([centroid.x]) * scale,
-                                          np.array([centroid.y]) * scale)
-            if len(terrain_z) == 0 or np.isnan(terrain_z[0]):
-                continue
-
-            z_base = float(terrain_z[0])
-
-            # 道路排除柱的Z范围
-            # 道路层高度: terrain_z + 0.51mm
-            z_bottom = z_base - z_buffer
-            z_top = z_base + Z_ROAD_ABOVE_TERRAIN_MM + ROAD_THICKNESS_MM + z_buffer
-
-            col = create_exclusion_column_manifold(road_poly, z_bottom, z_top, scale)
-            if not col.is_empty():
-                columns.append(col)
-                n_created += 1
+        col = create_exclusion_column_manifold(road_poly, z_bottom, z_top, scale)
+        if not col.is_empty():
+            columns.append(col)
+            n_created += 1
 
     print(f"  创建成功: {n_created} 条道路排除柱")
 

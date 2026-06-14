@@ -17,6 +17,7 @@ from functools import partial
 from typing import List, Tuple
 
 import numpy as np
+import shapely
 import shapely.affinity as sa
 from shapely.geometry import Polygon, MultiPolygon
 
@@ -189,7 +190,7 @@ def brick_transform_polygon(
 
     result = Polygon(ring_jittered)
     if result.is_empty or not result.is_valid:
-        result = result.buffer(0)
+        result = shapely.make_valid(result)
     if result.is_empty:
         return cell
     if isinstance(result, MultiPolygon):

@@ -9,6 +9,52 @@ from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.config import COLORS, get_area_class, 
 logger = logging.getLogger(__name__)
 
 
+def _fast_simplify_direct(vertices, faces, target_count, agg=7.0):
+    """Call fast_simplification C extension directly, bypassing the
+    Python wrapper that uses ``X | None`` syntax (Python 3.10+).
+
+    Returns (vertices_f64, faces_i64) or None if the C ext is unavailable.
+    """
+    import importlib.util
+    import pathlib
+    import sys
+
+    # Find the compiled C extension via sys.path
+    so_path = None
+    for d in sys.path:
+        p = pathlib.Path(d) / "fast_simplification"
+        if not p.is_dir():
+            continue
+        for so in p.glob("_simplify*.so"):
+            so_path = str(so)
+            break
+        if so_path is None:
+            for so in p.glob("_simplify*.pyd"):
+                so_path = str(so)
+                break
+        if so_path:
+            break
+
+    if so_path is None:
+        return None
+
+    # Module name must be "_simplify" to match PyInit__simplify in the .so
+    spec = importlib.util.spec_from_file_location("_simplify", so_path)
+    _c = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(_c)
+
+    pts = np.ascontiguousarray(vertices, dtype=np.float64)
+    tri = np.ascontiguousarray(faces, dtype=np.int32)
+    n_pts, n_tri = pts.shape[0], tri.shape[0]
+
+    _c.load_int32(n_pts, n_tri, pts, tri)
+    _c.simplify(int(target_count), float(agg), False)
+
+    out_pts = _c.return_points()
+    out_tri = _c.return_faces_int32_no_padding().reshape(-1, 3)
+    return out_pts, out_tri.astype(np.int64)
+
+
 def build_terrain_mesh(elevation_grid: np.ndarray,
                        width_m: float, height_m: float,
                        area_km2: float = 0) -> trimesh.Trimesh:
@@ -59,15 +105,26 @@ def build_terrain_mesh(elevation_grid: np.ndarray,
     if target and len(mesh.faces) > target:
         logger.info(f"Decimating terrain from {len(mesh.faces)} to ~{target} faces")
         try:
-            mesh = mesh.simplify_quadric_decimation(face_count=target)
-            # Re-apply colors after decimation (vertices may have changed)
-            new_elevations = mesh.vertices[:, 2]
-            mesh.visual.vertex_colors = _elevation_to_colors(new_elevations)
-        except (TypeError, AttributeError, ImportError) as e:
-            # fast_simplification may be incompatible with Python 3.9
-            # Skip decimation and keep full-resolution mesh
-            logger.warning(f"Terrain decimation failed ({e}), using full-resolution mesh "
-                          f"({len(mesh.faces)} faces)")
+            import time as _time
+            _t0 = _time.time()
+            simplified = _fast_simplify_direct(
+                mesh.vertices, mesh.faces, target_count=target, agg=7.0,
+            )
+            if simplified is not None:
+                simp_verts, simp_faces = simplified
+                mesh = trimesh.Trimesh(
+                    vertices=simp_verts, faces=simp_faces, process=False,
+                )
+                new_elevations = mesh.vertices[:, 2]
+                mesh.visual.vertex_colors = _elevation_to_colors(new_elevations)
+                logger.info(f"Decimation done in {_time.time()-_t0:.1f}s "
+                           f"→ {len(mesh.faces)} faces")
+            else:
+                logger.warning("fast_simplification C ext unavailable, "
+                              "keeping full-resolution mesh")
+        except Exception as e:
+            logger.warning(f"Terrain decimation failed ({e}), "
+                          f"using full-resolution mesh ({len(mesh.faces)} faces)")
 
     logger.info(f"Terrain mesh: {len(mesh.vertices)} vertices, {len(mesh.faces)} faces")
     return mesh

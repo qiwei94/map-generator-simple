@@ -75,7 +75,8 @@ def _polygon_to_textured_mesh(
     Uses Delaunay triangulation with known-boundary side walls
     to guarantee watertight manifold output.
     """
-    from matplotlib.path import Path as MplPath
+    import shapely
+    from shapely.geometry import Point as ShapelyPoint
 
     h = thickness_mm if thickness_mm is not None else BLOCK_BASE_THICKNESS_MM
 
@@ -101,9 +102,9 @@ def _polygon_to_textured_mesh(
     gx, gy = np.meshgrid(xs, ys)
     grid_pts = np.column_stack([gx.ravel(), gy.ravel()])
 
-    # Vectorized point-in-polygon via matplotlib Path
-    mpl_path = MplPath(np.array(poly_mm.exterior.coords))
-    mask = mpl_path.contains_points(grid_pts)
+    # Vectorized point-in-polygon via shapely 2.x
+    shapely_pts = shapely.points(grid_pts[:, 0], grid_pts[:, 1])
+    mask = shapely.contains(poly_mm, shapely_pts)
     interior_pts = grid_pts[mask]
 
     # Densify boundary
@@ -130,7 +131,9 @@ def _polygon_to_textured_mesh(
     # Vectorized centroid-in-polygon filter
     simplices = tri.simplices
     centroids = all_pts[simplices].mean(axis=1)
-    centroid_mask = mpl_path.contains_points(centroids)
+    # Vectorized centroid-in-polygon filter via shapely
+    centroid_pts = shapely.points(centroids[:, 0], centroids[:, 1])
+    centroid_mask = shapely.contains(poly_mm, centroid_pts)
     faces_top = simplices[centroid_mask]
 
     if len(faces_top) == 0:

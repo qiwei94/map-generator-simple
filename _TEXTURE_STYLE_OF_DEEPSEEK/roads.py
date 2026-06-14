@@ -341,4 +341,3 @@ def build_deepseek_roads_v3(
     verts = np.array(mesh_data.vert_properties, dtype=np.float64)
     faces = np.array(mesh_data.tri_verts, dtype=np.int64)
     return trimesh.Trimesh(vertices=verts, faces=faces, process=False)
-    return trimesh.Trimesh(vertices=verts, faces=faces, process=False)

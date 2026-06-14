@@ -3,10 +3,15 @@
 Detects terrain relief, water coverage, building density, road density,
 vegetation ratio, coastal presence, and OSM data quality to build a
 CityProfile that drives parameter selection.
-"""
 
-from dataclasses import dataclass, asdict
+CityProfile uses Pydantic V2 for strict type validation and documentation
+of each spatial dimension field.
+"""
+from __future__ import annotations
+
 import numpy as np
+from pydantic import BaseModel, Field
+from typing import Literal
 
 try:
     import geopandas as gpd
@@ -14,24 +19,52 @@ except ImportError:
     gpd = None
 
 
-@dataclass
-class CityProfile:
-    """Feature vector describing a city's characteristics."""
+class CityProfile(BaseModel):
+    """Feature vector describing a city's spatial characteristics.
 
-    area_km2: float
-    elevation_range_m: float
-    relief_ratio: str              # flat / moderate / mountainous
-    water_ratio: float             # water_area / bbox_area (0..1)
-    building_density: float        # buildings per km²
-    avg_building_area_m2: float
-    height_tag_coverage: float     # fraction of buildings with real height
-    road_density_km_per_km2: float
-    vegetation_ratio: float        # vegetation_area / bbox_area (0..1)
-    is_coastal: bool
-    osm_quality: str               # poor / fair / good
+    All 11 dimensions are validated at construction time via Pydantic V2.
+    """
+
+    area_km2: float = Field(
+        ge=0, description="Bounding-box area in square kilometers."
+    )
+    elevation_range_m: float = Field(
+        ge=0, description="Elevation range (max - min) in meters."
+    )
+    relief_ratio: Literal["flat", "moderate", "mountainous"] = Field(
+        description="Terrain relief classification based on elevation_range / bbox_diagonal."
+    )
+    water_ratio: float = Field(
+        ge=0, le=1,
+        description="Fraction of bounding-box area covered by water polygons (0..1).",
+    )
+    building_density: float = Field(
+        ge=0, description="Number of building footprints per km²."
+    )
+    avg_building_area_m2: float = Field(
+        ge=0, description="Mean 2D area of building footprints in m²."
+    )
+    height_tag_coverage: float = Field(
+        ge=0, le=1,
+        description="Fraction of buildings with explicit height or building:levels tag (0..1).",
+    )
+    road_density_km_per_km2: float = Field(
+        ge=0, description="Total road length (km) per km² of area."
+    )
+    vegetation_ratio: float = Field(
+        ge=0, le=1,
+        description="Fraction of bounding-box area covered by vegetation polygons (0..1).",
+    )
+    is_coastal: bool = Field(
+        description="True if any feature in water_gdf has natural=coastline tag."
+    )
+    osm_quality: Literal["poor", "fair", "good"] = Field(
+        description="Assessed OSM data quality based on building/road density and height coverage."
+    )
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        """Serialize to a plain Python dict (Pydantic V2 model_dump)."""
+        return self.model_dump()
 
 
 # ─── Relief thresholds ───────────────────────────────────────────────

@@ -9,7 +9,7 @@ v1: Copernicus DEM GLO-30 (DSM) - SRTM (DEM proxy). Both already cached locally.
 import logging
 import numpy as np
 import pandas as pd
-from shapely.geometry import Point
+import shapely
 
 from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.config import (
     NDSM_MIN_HEIGHT_M,
@@ -57,10 +57,11 @@ def sample_building_heights_from_ndsm(
     max_height: float = None,
     percentile: float = None,
 ) -> pd.Series:
-    """Sample building heights from nDSM grid using footprint P90.
+    """Sample building heights from nDSM grid using footprint percentile.
 
-    For each building polygon, rasterizes the footprint onto the nDSM grid
-    and takes the given percentile of covered pixel values.
+    Vectorized implementation — no iterrows().
+    Uses shapely 2.0 vectorized contains() for bulk pixel-in-polygon tests,
+    replacing the per-pixel Python loop with a single C-level call per building.
 
     Args:
         gdf: Buildings GeoDataFrame in WGS84 (EPSG:4326).
@@ -80,69 +81,96 @@ def sample_building_heights_from_ndsm(
     if percentile is None:
         percentile = NDSM_SAMPLE_PERCENTILE
 
+    heights = pd.Series(np.nan, index=gdf.index)
+    geoms = gdf.geometry.values  # shapely 2.0 GeometryArray
+
+    # ── 1. Filter valid geometries (vectorized) ──
+    valid_mask = shapely.is_valid(geoms) & ~shapely.is_empty(geoms)
+    if not valid_mask.any():
+        logger.info("nDSM sampling: no valid building geometries")
+        return heights
+
+    valid_indices = np.where(valid_mask)[0]
+    valid_geoms = geoms[valid_mask]
+
+    # ── 2. Pre-compute pixel-center meshgrid (once, shared across all buildings) ──
     rows, cols = ndsm_grid.shape
     lat_res = (north - south) / rows
     lon_res = (east - west) / cols
 
-    heights = pd.Series(np.nan, index=gdf.index)
+    pixel_lats = south + (np.arange(rows) + 0.5) * lat_res
+    pixel_lons = west + (np.arange(cols) + 0.5) * lon_res
+    grid_lons, grid_lats = np.meshgrid(pixel_lons, pixel_lats)
+    # grid_lons[r, c] / grid_lats[r, c] = center of pixel (r, c)
 
+    # ── 3. Batch-compute grid bounding-box indices (numpy, no loop) ──
+    # shapely.bounds → (N, 4) array: [xmin, ymin, xmax, ymax]
+    bounds_arr = shapely.bounds(valid_geoms)
+
+    c_min_all = np.clip((bounds_arr[:, 0] - west) / lon_res, 0, cols - 1).astype(int)
+    r_min_all = np.clip((bounds_arr[:, 1] - south) / lat_res, 0, rows - 1).astype(int)
+    c_max_all = np.clip((bounds_arr[:, 2] - west) / lon_res, 0, cols - 1).astype(int)
+    r_max_all = np.clip((bounds_arr[:, 3] - south) / lat_res, 0, rows - 1).astype(int)
+
+    # Drop buildings whose grid bbox is degenerate
+    grid_valid = (r_min_all <= r_max_all) & (c_min_all <= c_max_all)
+    active_indices = valid_indices[grid_valid]
+    active_geoms = valid_geoms[grid_valid]
+    r_mins, r_maxs = r_min_all[grid_valid], r_max_all[grid_valid]
+    c_mins, c_maxs = c_min_all[grid_valid], c_max_all[grid_valid]
+
+    if len(active_indices) == 0:
+        logger.info("nDSM sampling: no buildings overlap the nDSM grid")
+        return heights
+
+    # ── 4. Pre-compute centroids for fallback (vectorized) ──
+    centroids = shapely.centroid(active_geoms)
+    centroid_coords = shapely.get_coordinates(centroids)
+    cr_cent = np.clip(
+        ((centroid_coords[:, 1] - south) / lat_res).astype(int), 0, rows - 1
+    )
+    cc_cent = np.clip(
+        ((centroid_coords[:, 0] - west) / lon_res).astype(int), 0, cols - 1
+    )
+
+    # ── 5. Per-building sampling (vectorized pixel-in-polygon via shapely 2.0) ──
     n_sampled = 0
     n_valid = 0
 
-    for idx, row in gdf.iterrows():
-        geom = row.geometry
-        if geom is None or geom.is_empty:
-            continue
+    for i, geom_idx in enumerate(active_indices):
+        geom = active_geoms[i]
+        r_min, r_max = r_mins[i], r_maxs[i]
+        c_min, c_max = c_mins[i], c_maxs[i]
 
-        bounds = geom.bounds  # (minx, miny, maxx, maxy) = (lon_min, lat_min, lon_max, lat_max)
-        lon_min, lat_min, lon_max, lat_max = bounds
+        # Slice the pre-computed meshgrid to this building's bbox
+        sub_lons = grid_lons[r_min:r_max + 1, c_min:c_max + 1]
+        sub_lats = grid_lats[r_min:r_max + 1, c_min:c_max + 1]
 
-        # Grid cell indices for bounding box
-        r_min = int((lat_min - south) / lat_res)
-        r_max = int((lat_max - south) / lat_res)
-        c_min = int((lon_min - west) / lon_res)
-        c_max = int((lon_max - west) / lon_res)
+        # Single C-level call: test all pixel centers against this polygon
+        # shapely.contains broadcasts: scalar polygon vs array of points
+        pixel_pts = shapely.points(sub_lons.ravel(), sub_lats.ravel())
+        inside_mask = shapely.contains(geom, pixel_pts).reshape(sub_lons.shape)
 
-        r_min = max(0, r_min)
-        r_max = min(rows - 1, r_max)
-        c_min = max(0, c_min)
-        c_max = min(cols - 1, c_max)
+        values = ndsm_grid[r_min:r_max + 1, c_min:c_max + 1][inside_mask]
+        values = values[~np.isnan(values)]
 
-        if r_min > r_max or c_min > c_max:
-            continue
-
-        # Collect pixel values within the building footprint
-        values = []
-
-        if r_min == r_max and c_min == c_max:
-            # Single pixel — just take the value
-            values.append(ndsm_grid[r_min, c_min])
-        else:
-            # Check which pixel centers fall inside the polygon
-            for r in range(r_min, r_max + 1):
-                lat_center = south + (r + 0.5) * lat_res
-                for c in range(c_min, c_max + 1):
-                    lon_center = west + (c + 0.5) * lon_res
-                    if geom.contains(Point(lon_center, lat_center)):
-                        values.append(ndsm_grid[r, c])
-
-        if not values:
-            # No pixel center inside polygon — sample at centroid
-            centroid = geom.centroid
-            cr = int((centroid.y - south) / lat_res)
-            cc = int((centroid.x - west) / lon_res)
-            cr = max(0, min(rows - 1, cr))
-            cc = max(0, min(cols - 1, cc))
-            values.append(ndsm_grid[cr, cc])
+        # Fallback: centroid sample when no pixel center falls inside polygon
+        if len(values) == 0:
+            val = ndsm_grid[cr_cent[i], cc_cent[i]]
+            if np.isnan(val):
+                continue
+            values = np.array([val])
 
         n_sampled += 1
         val = float(np.percentile(values, percentile))
 
         if min_height <= val <= max_height:
-            heights.at[idx] = val
+            heights.iloc[geom_idx] = val
             n_valid += 1
 
-    logger.info(f"nDSM sampling: {n_sampled} buildings sampled, "
-                f"{n_valid} valid heights ({n_valid/max(n_sampled,1)*100:.1f}%)")
+    logger.info(
+        "nDSM sampling: %d buildings sampled, %d valid heights (%.1f%%)",
+        n_sampled, n_valid, n_valid / max(n_sampled, 1) * 100,
+    )
 
     return heights
