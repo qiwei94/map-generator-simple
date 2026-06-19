@@ -74,6 +74,7 @@ from _TEXTURE_STYLE_OF_DEEPSEEK.config import (
     LANDMARK_HEIGHT_BOOST_CAP_MM,
     LANDMARK_BUFFER_M,
     LANDMARK_EXCLUSION_BUFFER_M,
+    BUILDING_VERIFIED_HEIGHT_ONLY,
 )
 from _TEXTURE_STYLE_OF_DEEPSEEK.buildings import (
     _build_city_blocks,
@@ -337,6 +338,12 @@ def _extract_BL_vectorized(
 
         est_height = row.get("est_height", 0)
 
+        # Skip buildings with estimated (non-verified) heights
+        if BUILDING_VERIFIED_HEIGHT_ONLY:
+            h_source = row.get("height_source", "default")
+            if h_source != "overture":
+                continue
+
         # 4-category classification
         cat = (classify_landmark(
             row, area_m2=area, est_height_m=est_height,
@@ -371,8 +378,8 @@ def _extract_BL_vectorized(
             h_mm = _narrow_building_penalty(poly, h_mm,
                                             threshold=narrow_threshold,
                                             factor=narrow_penalty_factor)
-            # Category-specific height boost + 2D expansion
-            h_mm = min(h_mm * params["height_boost"], params["height_boost_cap_mm"])
+            # Category-specific additive height offset + 2D expansion
+            h_mm = h_mm + params["height_add_mm"]
             if params["buffer_m"] > 0:
                 poly = poly.buffer(params["buffer_m"], join_style=2)
                 if poly.is_empty:
@@ -491,6 +498,12 @@ def _extract_BL_legacy(
 
         est_height = row.get("est_height", 0)
 
+        # Skip buildings with estimated (non-verified) heights
+        if BUILDING_VERIFIED_HEIGHT_ONLY:
+            h_source = row.get("height_source", "default")
+            if h_source != "overture":
+                continue
+
         # 4-category classification
         cat = (classify_landmark(
             row, area_m2=area, est_height_m=est_height,
@@ -524,8 +537,8 @@ def _extract_BL_legacy(
             h_mm = _narrow_building_penalty(poly, h_mm,
                                             threshold=narrow_threshold,
                                             factor=narrow_penalty_factor)
-            # Category-specific height boost + 2D expansion
-            h_mm = min(h_mm * params["height_boost"], params["height_boost_cap_mm"])
+            # Category-specific additive height offset + 2D expansion
+            h_mm = h_mm + params["height_add_mm"]
             if params["buffer_m"] > 0:
                 poly = poly.buffer(params["buffer_m"], join_style=2)
                 if poly.is_empty:

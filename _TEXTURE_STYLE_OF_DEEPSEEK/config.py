@@ -160,30 +160,27 @@ from _TEXTURE_STYLE_OF_DEEPSEEK._landmark import LandmarkCategory
 
 LANDMARK_CATEGORY_PARAMS = {
     # Cat 1: Spiritual/Cultural Anchors (historic, religious)
+    # 加性偏移：保留建筑间相对高度差异
     LandmarkCategory.SPIRITUAL: {
-        "height_boost": 1.8,
-        "height_boost_cap_mm": 6.0,
+        "height_add_mm": 1.2,        # [TUNE] 最高偏移，文化地标最突出
         "buffer_m": 5.0,
         "exclusion_buffer_m": 12.0,
     },
     # Cat 2: Urban Machinery Hubs (stadiums, stations, hospitals)
     LandmarkCategory.URBAN_HUB: {
-        "height_boost": 1.3,
-        "height_boost_cap_mm": 5.5,
+        "height_add_mm": 0.8,        # [TUNE] 大型公共建筑
         "buffer_m": 8.0,
         "exclusion_buffer_m": 15.0,
     },
     # Cat 3: Visual Rulers (geometric outliers by height/area)
     LandmarkCategory.GEOMETRIC: {
-        "height_boost": 1.5,
-        "height_boost_cap_mm": 5.5,
+        "height_add_mm": 0.8,        # [TUNE] 高度/面积异常建筑
         "buffer_m": 5.0,
         "exclusion_buffer_m": 10.0,
     },
     # Cat 4: Semantic Matches (name regex)
     LandmarkCategory.SEMANTIC: {
-        "height_boost": 1.5,
-        "height_boost_cap_mm": 5.5,
+        "height_add_mm": 0.6,        # [TUNE] 命名建筑
         "buffer_m": 5.0,
         "exclusion_buffer_m": 8.0,
     },
@@ -211,9 +208,11 @@ LANDMARK_EXCLUSION_BUFFER_M = 8.0       # fallback for empty categories list
 # ---------------------------------------------------------------------------
 # Overture Maps 高度注入开关
 # ---------------------------------------------------------------------------
-OVERTURE_ENABLED = False                # [TOGGLE] 设为 True 启用 Overture AI 高度注入
+OVERTURE_ENABLED = True                 # [TOGGLE] 启用 Overture AI 高度注入
 OVERTURE_CACHE_DIR = "data/height_cache"  # 离线 Parquet 缓存目录
 OVERTURE_AUTO_DOWNLOAD = False          # 缓存未命中时是否自动下载
+
+BUILDING_VERIFIED_HEIGHT_ONLY = True    # [TOGGLE] True=只保留有真实高度的建筑(osm_height/osm_levels/overture)，跳过默认10m推测
 
 # Building hotspot 相关
 BUILDING_V2_HOTSPOT_RELAX = 10.0                 # [TUNE] top X% 热点 block 内放宽 landmark 阈值

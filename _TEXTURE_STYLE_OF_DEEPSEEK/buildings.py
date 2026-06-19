@@ -35,6 +35,7 @@ from _TEXTURE_STYLE_OF_DEEPSEEK.config import (
     BUILDING_HEIGHT_MAX_MM,
     BUILDING_HEIGHT_OSM_MIN_M,
     BUILDING_HEIGHT_OSM_MAX_M,
+    BUILDING_DEFAULT_HEIGHT_M,
     Z_BUILDING_EMBED_MM,
     BUILDING_SIMPLIFY_TOL_M,
     BUILDING_MIN_AREA,
@@ -84,16 +85,20 @@ ROAD_TIERS = {
 
 
 def _compress_height(est_height_m: float, area_m2: float) -> float:
-    """压缩真实建筑高度到 model mm 范围 (BUILDING_HEIGHT_MIN_MM..MAX_MM)。
+    """压缩建筑高度到 model mm 范围 (BUILDING_HEIGHT_MIN_MM..MAX_MM)。
+
+    当高度为默认回退值(10m)时，改用面积估算以区分大小建筑，
+    避免小棚子和大楼获得同样高度导致"细长棍"效果。
 
     Uses log compression: common heights (8-60m) get more model space,
     while extreme heights (100m+) are compressed together.
-
-    log(5)=1.61, log(30)=3.40, log(60)=4.09, log(150)=5.01
-    The 5-60m range takes ~73% of the log span → ~73% of model space.
     """
     import math
-    effective = est_height_m if est_height_m > 0 else estimate_building_height_from_area(area_m2)
+    # 默认回退值 → 用面积估算，区分大小建筑
+    if est_height_m == BUILDING_DEFAULT_HEIGHT_M or est_height_m <= 0:
+        effective = estimate_building_height_from_area(area_m2)
+    else:
+        effective = est_height_m
     h_min = BUILDING_HEIGHT_OSM_MIN_M
     h_max = BUILDING_HEIGHT_OSM_MAX_M
     m_min = BUILDING_HEIGHT_MIN_MM

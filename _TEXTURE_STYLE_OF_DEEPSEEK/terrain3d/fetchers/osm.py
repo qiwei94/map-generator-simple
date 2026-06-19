@@ -35,6 +35,10 @@ import os
 import time
 from typing import Callable, Dict, Optional, Set, Tuple
 
+# Project root (3 levels up from this file)
+_project_root = os.path.dirname(os.path.dirname(os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__)))))
+
 import geopandas as gpd
 import pandas as pd
 import shapely
@@ -588,15 +592,20 @@ def fetch_buildings(
 
         # Overture Maps height enrichment (priority 4, between nDSM and default)
         overture_heights = None
-        from _TEXTURE_STYLE_OF_DEEPSEEK.config import OVERTURE_ENABLED
+        from _TEXTURE_STYLE_OF_DEEPSEEK.config import OVERTURE_ENABLED, OVERTURE_CACHE_DIR
         if OVERTURE_ENABLED:
             try:
                 from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.height_enrichment import (
                     load_overture_heights,
                 )
                 bbox_wgs84 = (south, west, north, east)
+                # Resolve cache_dir relative to project root
+                _ov_cache = OVERTURE_CACHE_DIR
+                if not os.path.isabs(_ov_cache):
+                    _ov_cache = os.path.join(_project_root, _ov_cache)
                 overture_heights, overture_names = load_overture_heights(
-                    result, bbox_wgs84=bbox_wgs84)
+                    result, bbox_wgs84=bbox_wgs84,
+                    cache_dir=_ov_cache)
                 if overture_heights is not None:
                     # Also enrich OSM names with Overture names (for landmark detection)
                     if overture_names is not None and "name" in result.columns:
@@ -813,6 +822,9 @@ def _estimate_building_heights(gdf: gpd.GeoDataFrame,
         4. Overture Maps AI-estimated height (if provided)
         5. BUILDING_DEFAULT_HEIGHT_M fallback
 
+    Also sets gdf["height_source"] column to track provenance:
+        'osm_height', 'osm_levels', 'ndsm', 'overture', 'default'
+
     Args:
         gdf: Building GeoDataFrame.
         ndsm_heights: Optional Series of nDSM-derived heights (NaN = unavailable).
@@ -828,6 +840,7 @@ def _estimate_building_heights(gdf: gpd.GeoDataFrame,
 
     MAX_HEIGHT_M = 800
     heights = pd.Series(BUILDING_DEFAULT_HEIGHT_M, index=gdf.index)
+    sources = pd.Series("default", index=gdf.index)
 
     if "height" in gdf.columns:
         parsed = pd.to_numeric(
@@ -836,6 +849,7 @@ def _estimate_building_heights(gdf: gpd.GeoDataFrame,
         )
         valid = parsed.notna() & (parsed > 0) & (parsed <= MAX_HEIGHT_M)
         heights[valid] = parsed[valid]
+        sources[valid] = "osm_height"
 
     if "building:levels" in gdf.columns:
         levels = pd.to_numeric(gdf["building:levels"], errors="coerce")
@@ -846,6 +860,7 @@ def _estimate_building_heights(gdf: gpd.GeoDataFrame,
         heights[valid_levels] = (
             levels[valid_levels] * BUILDING_LEVEL_HEIGHT_M
         ).clip(upper=MAX_HEIGHT_M)
+        sources[valid_levels] = "osm_levels"
 
     # Priority 3: nDSM — fill buildings still at default
     if ndsm_heights is not None:
@@ -853,6 +868,7 @@ def _estimate_building_heights(gdf: gpd.GeoDataFrame,
         valid_ndsm = ndsm_heights.notna() & (ndsm_heights > 0)
         use_ndsm = at_default & valid_ndsm
         heights[use_ndsm] = ndsm_heights[use_ndsm]
+        sources[use_ndsm] = "ndsm"
 
     # Priority 4: Overture Maps — fill buildings still at default
     if overture_heights is not None:
@@ -860,5 +876,9 @@ def _estimate_building_heights(gdf: gpd.GeoDataFrame,
         valid_ov = overture_heights.notna() & (overture_heights > 0) & (overture_heights <= MAX_HEIGHT_M)
         use_ov = at_default & valid_ov
         heights[use_ov] = overture_heights[use_ov]
+        sources[use_ov] = "overture"
+
+    # Track provenance in the GeoDataFrame
+    gdf["height_source"] = sources
 
     return heights

@@ -39,20 +39,38 @@ def _find_overture_cache(
 ) -> Optional[str]:
     """Find a cached Overture parquet file that covers the given bbox.
 
-    Uses a simple filename convention: {name}.parquet
-    For production, would check cache_manifest.json for bbox coverage.
+    Matches by parsing overture_{lat:.2f}_{lon:.2f}.parquet filenames
+    and checking if the center coordinates fall within the query bbox.
+    Falls back to any .parquet file if no named match found.
 
     Returns path to parquet file, or None if no cache found.
     """
     if not os.path.isdir(cache_dir):
         return None
 
-    # Strategy: find any parquet file in the cache dir
-    # (For single-city use, there's typically one file per region)
-    for fname in sorted(os.listdir(cache_dir)):
+    south, west, north, east = bbox_wgs84
+    all_parquets = sorted(os.listdir(cache_dir))
+
+    # Prefer files matching the bbox by coordinates in filename
+    for fname in all_parquets:
+        if fname.startswith("overture_") and fname.endswith(".parquet"):
+            parts = fname.replace("overture_", "").replace(".parquet", "").split("_")
+            if len(parts) >= 2:
+                try:
+                    lat = float(parts[0])
+                    lon = float(parts[1])
+                    if south <= lat <= north and west <= lon <= east:
+                        path = os.path.join(cache_dir, fname)
+                        logger.info(f"Overture cache hit (bbox match): {fname}")
+                        return path
+                except ValueError:
+                    continue
+
+    # Fallback: pick first parquet (legacy naming like hangzhou_buildings.parquet)
+    for fname in all_parquets:
         if fname.endswith(".parquet"):
             path = os.path.join(cache_dir, fname)
-            logger.info(f"Overture cache hit: {path}")
+            logger.info(f"Overture cache fallback: {fname}")
             return path
 
     return None
@@ -156,7 +174,7 @@ def load_overture_heights(
         import geopandas as gpd
         overture_gdf = gpd.read_parquet(
             parquet_path,
-            columns=["geometry", "height", "names"],
+            columns=["geometry", "height", "num_floors", "names"],
         )
     except Exception as e:
         logger.warning(f"Failed to read Overture parquet: {e}")
@@ -170,8 +188,15 @@ def load_overture_heights(
 
     # Step 3: Extract height and name from Overture schema
     # Overture 'height' is a numeric column (meters)
-    # Overture 'names' is a struct with 'primary' sub-field
-    ov_heights = overture_gdf["height"] if "height" in overture_gdf.columns else pd.Series(np.nan, index=overture_gdf.index)
+    # Overture 'num_floors' → height = num_floors * 3.5 (fallback when height is null)
+    ov_heights_raw = overture_gdf["height"] if "height" in overture_gdf.columns else pd.Series(np.nan, index=overture_gdf.index)
+    ov_heights = ov_heights_raw.copy()
+    if "num_floors" in overture_gdf.columns:
+        ov_floors = overture_gdf["num_floors"]
+        has_floors = ov_floors.notna() & (ov_floors > 0)
+        no_height = ov_heights.isna() | (ov_heights <= 0)
+        fill = has_floors & no_height
+        ov_heights[fill] = ov_floors[fill] * 3.5
 
     # Extract names.primary from the names struct column
     ov_names = pd.Series(np.nan, index=overture_gdf.index)
@@ -220,7 +245,7 @@ def load_overture_heights(
 
     # Step 6: Align result to original osm_gdf index
     result_heights = pd.Series(np.nan, index=osm_gdf.index)
-    result_names = pd.Series(np.nan, index=osm_gdf.index)
+    result_names = pd.Series(np.nan, index=osm_gdf.index, dtype=object)
 
     common_idx = joined.index.intersection(osm_gdf.index)
     if len(common_idx) > 0:

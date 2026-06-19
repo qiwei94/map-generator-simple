@@ -310,7 +310,26 @@ class OsmiumCLIFetcher:
                             grid, s, w, n, e = ndsm_cache
                             ndsm_heights = sample_building_heights_from_ndsm(
                                 gdf, grid, s, w, n, e)
-                        gdf["est_height"] = _estimate_building_heights(gdf, ndsm_heights)
+                        # Overture enrichment
+                        overture_heights = None
+                        from _TEXTURE_STYLE_OF_DEEPSEEK.config import OVERTURE_ENABLED, OVERTURE_CACHE_DIR
+                        if OVERTURE_ENABLED:
+                            try:
+                                from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.height_enrichment import (
+                                    load_overture_heights,
+                                )
+                                _ov_cache = OVERTURE_CACHE_DIR
+                                if not os.path.isabs(_ov_cache):
+                                    _project_root = os.path.dirname(os.path.dirname(os.path.dirname(
+                                        os.path.dirname(os.path.abspath(__file__)))))
+                                    _ov_cache = os.path.join(_project_root, _ov_cache)
+                                overture_heights, _ = load_overture_heights(
+                                    gdf, bbox_wgs84=(south, west, north, east),
+                                    cache_dir=_ov_cache)
+                            except Exception:
+                                pass
+                        gdf["est_height"] = _estimate_building_heights(
+                            gdf, ndsm_heights, overture_heights)
                     return gdf
 
             result = self._run_osmium_pipeline(
@@ -338,7 +357,26 @@ class OsmiumCLIFetcher:
                         ndsm_heights = sample_building_heights_from_ndsm(
                             gdf, grid, s, w, n, e
                         )
-                    gdf["est_height"] = _estimate_building_heights(gdf, ndsm_heights)
+                    # Overture enrichment
+                    overture_heights = None
+                    from _TEXTURE_STYLE_OF_DEEPSEEK.config import OVERTURE_ENABLED, OVERTURE_CACHE_DIR
+                    if OVERTURE_ENABLED:
+                        try:
+                            from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.height_enrichment import (
+                                load_overture_heights,
+                            )
+                            _ov_cache = OVERTURE_CACHE_DIR
+                            if not os.path.isabs(_ov_cache):
+                                _project_root = os.path.dirname(os.path.dirname(os.path.dirname(
+                                    os.path.dirname(os.path.abspath(__file__)))))
+                                _ov_cache = os.path.join(_project_root, _ov_cache)
+                            overture_heights, _ = load_overture_heights(
+                                gdf, bbox_wgs84=(south, west, north, east),
+                                cache_dir=_ov_cache)
+                        except Exception:
+                            pass
+                    gdf["est_height"] = _estimate_building_heights(
+                        gdf, ndsm_heights, overture_heights)
 
                 return gdf
         except Exception as e:
