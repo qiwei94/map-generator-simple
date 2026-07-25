@@ -26,3 +26,7 @@ manifold3d>=3.4.0
 
 # Data validation & settings management — strict type checking for city profiles
 pydantic>=2.0.0
+
+# VLM aesthetic review (optional — aesthetic loop degrades to pure metrics without it)
+openai>=1.0.0
+python-dotenv>=1.0.0

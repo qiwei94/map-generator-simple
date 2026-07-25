@@ -61,9 +61,12 @@ class AestheticLoop:
         if self.use_vlm:
             vlm = vlm_score(bundle, self.harness.preset.reference_images,
                             self.harness.preset.name)
-            if vlm is not None:
+            if vlm is not None and not vlm.get("human_review", False):
                 score = round((1 - VLM_BLEND_WEIGHT) * score
                               + VLM_BLEND_WEIGHT * vlm["overall"], 3)
+            elif vlm is not None and vlm.get("human_review"):
+                print(f"  [vlm] human_review 标记，该轮纯指标分={score:.3f}"
+                      f"，VLM 分={vlm['overall']} 仅记录不混合")
 
         return score, bundle, result, vlm
 
