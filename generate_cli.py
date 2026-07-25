@@ -17,6 +17,7 @@
 
 import argparse
 import hashlib
+import json
 import os
 import sys
 import time
@@ -44,6 +45,7 @@ from _TEXTURE_STYLE_OF_DEEPSEEK._layer_preprocess import preprocess_layers
 from _TEXTURE_STYLE_OF_DEEPSEEK._pipeline_cache import PipelineCache
 from _TEXTURE_STYLE_OF_DEEPSEEK._process_lock import acquire_lock
 from _TEXTURE_STYLE_OF_DEEPSEEK.exporter import export_deepseek_3mf, split_terrain_mesh
+from _TEXTURE_STYLE_OF_DEEPSEEK import config as _cfg
 from _TEXTURE_STYLE_OF_DEEPSEEK.config import compute_scale, WATERWAY_WIDTHS, TERRAIN_GRID, get_area_class, BUILDING_V2_HOTSPOT_RELAX
 
 # ---------------------------------------------------------------------------
@@ -131,6 +133,14 @@ def parse_args():
         '--debug-obj', action='store_true', default=False,
         help='逐个导出每个 mesh 为独立 OBJ 文件（用于 debug）'
     )
+    parser.add_argument(
+        '--aesthetic-config', type=str, default=None, metavar='PATH',
+        help='美学闭环 best_config.json 路径（默认自动探测 output/aesthetic/<city>/best_config.json）'
+    )
+    parser.add_argument(
+        '--no-aesthetic', action='store_true', default=False,
+        help='禁用美学闭环学成参数注入，使用 config 默认值'
+    )
 
     args = parser.parse_args()
 
@@ -159,6 +169,51 @@ def parse_args():
         parser.error("--bbox 格式: south,west,north,east (逗号分隔的4个浮点数)")
 
     return args
+
+
+def load_aesthetic_config(cli_args, city_name):
+    """加载美学闭环学成参数（output/aesthetic/<city>/best_config.json）。
+
+    Returns:
+        (aes_params dict | None, preprocess_overrides dict)
+        aes_params 为 None 时表示未找到/已禁用，管线用 config 默认值。
+    """
+    if cli_args.no_aesthetic:
+        print("  [aesthetic] disabled via --no-aesthetic")
+        return None, {}
+    path = cli_args.aesthetic_config or os.path.join(
+        _project_root, "output", "aesthetic", city_name, "best_config.json")
+    if not os.path.exists(path):
+        print(f"  [aesthetic] no best_config found ({path}), using config defaults")
+        return None, {}
+    with open(path, "r", encoding="utf-8") as f:
+        aes = json.load(f)
+    print(f"  [aesthetic] loaded best_config: {path}")
+    print(f"  [aesthetic] learned_at={aes.get('learned_at')} "
+          f"score={aes.get('best_score')} bo_mode={aes.get('bo_mode')}")
+
+    # 猴补丁（与 aesthetic/rerun_harness.run_round 注入面一致；
+    # buildings/_extract_BL 已函数级 import，运行期改 _cfg 生效）
+    if "building_height_mm_max" in aes:
+        _cfg.BUILDING_HEIGHT_MAX_MM = float(aes["building_height_mm_max"])
+    if "building_simplify_tol_m" in aes:
+        _cfg.BUILDING_SIMPLIFY_TOL_M = float(aes["building_simplify_tol_m"])
+
+    # preprocess_layers 显式 override（road_width_multiplier 仅影响 2D 渲染，不注入 3D）
+    overrides = {}
+    if "building_v2_road_tier" in aes:
+        overrides["road_tier_override"] = int(aes["building_v2_road_tier"])
+    if "building_density_threshold" in aes:
+        overrides["density_threshold_override"] = float(aes["building_density_threshold"])
+    if "building_count_threshold" in aes:
+        overrides["count_threshold_override"] = int(aes["building_count_threshold"])
+    if "building_print_limit_m2" in aes:
+        overrides["print_limit_m2_override"] = float(aes["building_print_limit_m2"])
+    if "aggregate_simplify_m" in aes:
+        overrides["aggregate_simplify_m_override"] = float(aes["aggregate_simplify_m"])
+    if "bo_mode" in aes:
+        overrides["bo_mode_override"] = str(aes["bo_mode"])
+    return aes, overrides
 
 
 def main():
@@ -197,6 +252,10 @@ def main():
     if cli_args.no_cache:
         print("[CACHE] Disabled via --no-cache")
 
+    # 美学闭环学成参数注入（含 _cfg 猴补丁，必须在 preprocess/建筑 mesh 之前）
+    print("\n[Stage 0b] Aesthetic learned config...")
+    _aes_config, _aes_overrides = load_aesthetic_config(cli_args, CITY_NAME)
+
     # =====================================================================
     # Stage 0: 检查 CLI 工具可用性
     # =====================================================================
@@ -221,6 +280,17 @@ def main():
     # --merge-layers CLI flag 强制启用; 否则由密度自动检测决定
     if not cli_args.merge_layers:
         MERGE_BLOCK_LAYERS = _density_info['should_filter']
+    # 美学学成 bo_mode 需要 _compute_BO（MERGE 模式会跳过）且基于全量建筑学成，
+    # 故覆盖密度自动判定强制三层模式；显式 --merge-layers 仍优先（但 bo_mode 失效）
+    if _aes_config is not None and "bo_mode" in _aes_config:
+        if cli_args.merge_layers:
+            print(f"  [aesthetic] WARNING: --merge-layers 下 _compute_BO 被跳过，"
+                  f"bo_mode={_aes_config['bo_mode']} 不会生效")
+        elif MERGE_BLOCK_LAYERS:
+            MERGE_BLOCK_LAYERS = False
+            _bldg_tag = 'building'
+            print(f"  [aesthetic] 覆盖密度判定: 全量 building + 三层模式"
+                  f"（bo_mode={_aes_config['bo_mode']} 需要 _compute_BO）")
     if MERGE_BLOCK_LAYERS:
         print(f"  高密度城市: building_landmarks + MERGE 两层模式")
     else:
@@ -569,6 +639,10 @@ def main():
         'merge_mode': MERGE_BLOCK_LAYERS,
         'narrow_threshold': cli_args.narrow_threshold,
         'narrow_penalty': cli_args.narrow_penalty,
+        # 美学注入参数进缓存键（含猴补丁值），否则新旧几何互相污染
+        'aesthetic': sorted(_aes_overrides.items()),
+        'height_max_mm': float(getattr(_cfg, 'BUILDING_HEIGHT_MAX_MM', 0.0)),
+        'simplify_tol_m': float(getattr(_cfg, 'BUILDING_SIMPLIFY_TOL_M', 0.0)),
     }
 
     def _compute_preprocess():
@@ -589,6 +663,7 @@ def main():
             utm_crs=utm_crs,
             origin=origin,
             merge_mode=MERGE_BLOCK_LAYERS,
+            **_aes_overrides,
         )
 
     layers = _pipeline_cache.get_or_compute(
