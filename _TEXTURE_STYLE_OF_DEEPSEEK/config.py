@@ -154,6 +154,16 @@ BUILDING_V2_BLOCK_FILL_CONVEX = True
 BUILDING_SIMPLIFY_TOL_M = 25.0   # [TUNE] 大楼 footprint 简化 (D-P)
 
 # ---------------------------------------------------------------------------
+# Brick texture defaults  [TUNE] 手绘砖石风格几何变换参数
+# ---------------------------------------------------------------------------
+BRICK_CORNER_R_M = 8.0           # [TUNE] 圆角半径 (m)
+BRICK_ROT_DEG = 10.0             # [TUNE] 随机旋转幅度 (degrees)
+BRICK_SHIFT_M = 8.0              # [TUNE] 随机平移幅度 (m)
+BRICK_PERLIN_AMP = 4.0           # [TUNE] Perlin 噪声振幅 (m); auto-param range 2.0-8.0
+BRICK_PERLIN_FREQ = 0.15         # [TUNE] Perlin 噪声频率
+BRICK_RESAMPLE_M = 12.0          # [TUNE] 边界重采样间距 (m)
+
+# ---------------------------------------------------------------------------
 # 地标增强: Kevin Lynch 4-category classification
 # ---------------------------------------------------------------------------
 from _TEXTURE_STYLE_OF_DEEPSEEK._landmark import LandmarkCategory

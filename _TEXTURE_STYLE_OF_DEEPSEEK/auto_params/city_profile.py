@@ -196,9 +196,15 @@ def _detect_building_metrics(
     density = n_buildings / max(area_km2, 0.01)
     avg_area = float(building_polys.geometry.area.mean())
 
-    # Height tag coverage: buildings with explicit height or levels tag
+    # Height coverage: 优先看富化后的 est_height（与 preprocess 的
+    # assess_height_data_quality 口径一致）；无 est_height 时回退原始 OSM tag。
     height_coverage = 0.0
-    if "height" in building_polys.columns:
+    if "est_height" in building_polys.columns:
+        from _TEXTURE_STYLE_OF_DEEPSEEK.config import BUILDING_DEFAULT_HEIGHT_M
+        est = building_polys["est_height"]
+        has_real = est.notna() & (est != BUILDING_DEFAULT_HEIGHT_M) & (est > 0)
+        height_coverage = float(has_real.sum() / n_buildings)
+    elif "height" in building_polys.columns:
         has_height = building_polys["height"].notna() & (
             building_polys["height"] != ""
         )

@@ -114,7 +114,11 @@ def parse_args():
     )
     parser.add_argument(
         '--ai-review', action='store_true', default=False,
-        help='启用 AI 视觉评审（需要 ANTHROPIC_API_KEY）'
+        help='启用 AI 视觉评审（需要 ANTHROPIC_API_KEY + --png）'
+    )
+    parser.add_argument(
+        '--art-direction', action='store_true', default=False,
+        help='启用 AI 艺术指导（Layer 2，为新城市生成风格策略）'
     )
     parser.add_argument(
         '--png', action='store_true', default=False,
@@ -418,6 +422,7 @@ def main():
     # =====================================================================
     # Stage 3e: Auto-parameter detection (optional)
     # =====================================================================
+    auto_resolved = None  # will be set if --auto-params
     if cli_args.auto_params:
         print(f"\n[Stage 3e] Auto-parameter detection...")
         t3e = time.time()
@@ -425,6 +430,8 @@ def main():
         from _TEXTURE_STYLE_OF_DEEPSEEK.auto_params import (
             detect_city_profile, resolve_params, save_decision_report,
         )
+        from _TEXTURE_STYLE_OF_DEEPSEEK.auto_params.ai_art_direction import ai_art_direction
+        from _TEXTURE_STYLE_OF_DEEPSEEK.auto_params.preference_store import PreferenceStore
         from _TEXTURE_STYLE_OF_DEEPSEEK import config as _cfg
 
         bbox_local_area_m2 = width_m * height_m
@@ -437,13 +444,47 @@ def main():
             vegetation_gdf=vegetation_gdf,
             bbox_local_area_m2=bbox_local_area_m2,
         )
-        auto_resolved = resolve_params(profile)
+
+        # Layer 2: AI art direction (optional, --art-direction flag)
+        ai_overrides = {}
+        if cli_args.art_direction:
+            # Pass reference PNGs from output dir if they exist
+            _ref_pngs = []
+            _ref_dir = os.path.join(OUTPUT_DIR, "..", "reference")
+            if os.path.isdir(_ref_dir):
+                _ref_pngs = [os.path.join(_ref_dir, f)
+                             for f in os.listdir(_ref_dir) if f.endswith(".png")]
+            art = ai_art_direction(profile, CITY_NAME,
+                                   reference_pngs=_ref_pngs or None)
+            if art and art.get("param_overrides"):
+                ai_overrides = art["param_overrides"]
+                print(f"  AI art direction: emphasis={art.get('emphasis', [])}, "
+                      f"style=\"{art.get('style_notes', '')}\"")
+                print(f"  AI param_overrides: {ai_overrides}")
+
+        # Layer 3: Preference bias (if enough history)
+        pref_store = PreferenceStore(
+            log_path=os.path.join(OUTPUT_DIR, "..", "preference_log.jsonl"))
+        pref_bias = pref_store.extract_bias(min_records=10)
+        if pref_bias:
+            print(f"  Preference bias ({pref_store.count} records): {pref_bias}")
+
+        # Merge overrides: user CLI > AI art > preference bias
+        merged_overrides = {}
+        merged_overrides.update(pref_bias)     # lowest priority
+        merged_overrides.update(ai_overrides)  # AI art direction
+        # (explicit CLI overrides would go here if we add --param flags)
+
+        auto_resolved = resolve_params(profile, user_overrides=merged_overrides or None)
         save_decision_report(profile, auto_resolved, OUTPUT_DIR, CITY_NAME)
 
-        # Apply resolved params to config (runtime monkey-patch)
+        # Apply resolved params to config (runtime monkey-patch for downstream modules)
         _cfg.Z_GAMMA = auto_resolved.z_gamma
         _cfg.TERRAIN_THICKNESS_MM = auto_resolved.terrain_thickness_mm
         _cfg.ELEVATION_SMOOTHING_SIGMA = auto_resolved.elevation_smoothing_sigma
+        # Also patch terrain3d.config (elevation.py reads from there)
+        from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d import config as _t3d_cfg
+        _t3d_cfg.ELEVATION_SMOOTHING_SIGMA = auto_resolved.elevation_smoothing_sigma
         _cfg.BUILDING_V2_DENSITY_THRESHOLD = auto_resolved.building_density_threshold
         _cfg.BUILDING_V2_COUNT_THRESHOLD = auto_resolved.building_count_threshold
         _cfg.BUILDING_PRINT_LIMIT_M2 = auto_resolved.building_print_limit_m2
@@ -451,6 +492,11 @@ def main():
         _cfg.BUILDING_V2_HOTSPOT_RELAX = auto_resolved.building_v2_hotspot_relax
         _cfg.ROAD_WIDTH_MULTIPLIER = auto_resolved.road_width_multiplier
         _cfg.VEGETATION_MIN_AREA_M2 = auto_resolved.vegetation_min_area_m2
+        _cfg.BUILDING_SIMPLIFY_TOL_M = auto_resolved.building_simplify_tol_m
+        _cfg.BUILDING_V2_LANDMARK_TOP_PERCENT = auto_resolved.building_v2_landmark_top_percent
+        _cfg.WATER_MIN_AREA_M2 = auto_resolved.water_min_area_m2
+        _cfg.BRICK_PERLIN_AMP = auto_resolved.brick_perlin_amp
+        _cfg.BRICK_CORNER_R_M = auto_resolved.brick_corner_r_m
         if auto_resolved.road_filter_tier is not None:
             _cfg.ROAD_FILTER["large"] = auto_resolved.road_filter_tier
 
@@ -459,7 +505,8 @@ def main():
               f"density={profile.building_density:.0f}/km²")
         print(f"  Key params: Z_GAMMA={auto_resolved.z_gamma}, "
               f"flat_mode={auto_resolved.flat_mode}, "
-              f"road_tier={auto_resolved.building_v2_road_tier}")
+              f"road_tier={auto_resolved.building_v2_road_tier}, "
+              f"brick_amp={auto_resolved.brick_perlin_amp}")
         print(f"  Time: {time.time() - t3e:.1f}s")
 
     # =====================================================================
@@ -491,6 +538,17 @@ def main():
     t45 = time.time()
 
     bbox_local = (bbox_x_min, bbox_y_min, bbox_x_max, bbox_y_max)
+
+    # Build override kwargs from auto_resolved (if available)
+    _preprocess_overrides = {}
+    if auto_resolved is not None:
+        _preprocess_overrides["road_tier_override"] = auto_resolved.building_v2_road_tier
+        _preprocess_overrides["density_threshold_override"] = auto_resolved.building_density_threshold
+        _preprocess_overrides["count_threshold_override"] = auto_resolved.building_count_threshold
+        _preprocess_overrides["print_limit_m2_override"] = auto_resolved.building_print_limit_m2
+        if auto_resolved.flat_mode:
+            _preprocess_overrides["height_mode_override"] = "flat"
+
     layers = preprocess_layers(
         buildings_gdf=buildings_gdf,
         roads_gdf=roads_gdf,
@@ -499,7 +557,9 @@ def main():
         bbox_local=bbox_local,
         scale=scale,
         enable_hotspot=True,
-        hotspot_relax=BUILDING_V2_HOTSPOT_RELAX,
+        hotspot_relax=(auto_resolved.building_v2_hotspot_relax
+                       if auto_resolved is not None
+                       else BUILDING_V2_HOTSPOT_RELAX),
         area_km2=area_km2,
         landuse_gdf=landuse_gdf,
         narrow_threshold=cli_args.narrow_threshold,
@@ -507,6 +567,7 @@ def main():
         bbox_wgs84=(south, west, north, east),
         utm_crs=utm_crs,
         origin=origin,
+        **_preprocess_overrides,
     )
     print(f"  {layers.summary()}")
     print(f"  Time: {time.time() - t45:.1f}s")
@@ -534,6 +595,60 @@ def main():
             landuse_gdf=landuse_gdf,
         )
         print(f"  Time: {time.time() - t46:.1f}s")
+
+    # =====================================================================
+    # Stage 4.7: AI vision review — advisory (optional, --ai-review + --png)
+    # NOTE: 评审结果记录到 trajectory，参数调整影响下游 builder（buildings v3
+    #       的 BRICK_* 为函数级 import 可生效），但不重渲 PNG（render_png
+    #       不消费这些参数，重渲是无效操作）。完整闭环需重跑 preprocess。
+    # =====================================================================
+    if cli_args.ai_review and cli_args.png and auto_resolved is not None:
+        print(f"\n[Stage 4.7] AI vision review (advisory)...")
+        t47 = time.time()
+        from _TEXTURE_STYLE_OF_DEEPSEEK.auto_params.ai_review import ai_review_png
+        png_path = os.path.join(OUTPUT_DIR, f"{CITY_NAME}_preview.png")
+        if os.path.exists(png_path):
+            adjusted_params, review_result = ai_review_png(
+                png_path, profile, auto_resolved,
+                city_name=CITY_NAME, max_rounds=3)
+            if review_result.overall > 0:
+                print(f"  AI score: {review_result.overall}/5")
+                print(f"  Issues: {review_result.issues}")
+                if adjusted_params is not auto_resolved:
+                    # Re-apply adjusted params (affects downstream builders
+                    # that use function-level imports, e.g. BRICK_* in v3)
+                    auto_resolved = adjusted_params
+                    _cfg.Z_GAMMA = auto_resolved.z_gamma
+                    _cfg.BRICK_PERLIN_AMP = auto_resolved.brick_perlin_amp
+                    _cfg.BRICK_CORNER_R_M = auto_resolved.brick_corner_r_m
+                    _cfg.ROAD_WIDTH_MULTIPLIER = auto_resolved.road_width_multiplier
+                    print(f"  Params adjusted by AI review (effective in downstream builders)")
+                    # Re-save decision report with adjusted params (P1-5)
+                    save_decision_report(profile, auto_resolved, OUTPUT_DIR,
+                                         CITY_NAME + "_ai_adjusted")
+
+                # Trajectory logging (P1-5: 逐轮记录参数/分数)
+                _trajectory_path = os.path.join(OUTPUT_DIR, "..", "trajectory.jsonl")
+                try:
+                    import json as _json
+                    _traj_record = {
+                        "city": CITY_NAME,
+                        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                        "score": review_result.overall,
+                        "issues": review_result.issues,
+                        "params": auto_resolved.to_dict(),
+                        "png_path": png_path,
+                    }
+                    with open(_trajectory_path, "a", encoding="utf-8") as _tf:
+                        _tf.write(_json.dumps(_traj_record, ensure_ascii=False) + "\n")
+                    print(f"  Trajectory logged: {_trajectory_path}")
+                except Exception as _te:
+                    print(f"  Trajectory log failed (non-fatal): {_te}")
+            else:
+                print(f"  AI review skipped (no API key or parse error)")
+        else:
+            print(f"  PNG not found, skipping AI review")
+        print(f"  Time: {time.time() - t47:.1f}s")
 
     # =====================================================================
     # Stage 5: Build buildings (v3 — preprocessed polygons)
@@ -757,6 +872,19 @@ def main():
     print(f"  Output: {output_path} ({file_size:.2f} MB)")
     print(f"  Total time: {total_time:.1f}s")
     print(f"{'=' * 70}\n")
+
+    # =====================================================================
+    # Post: Preference recording hint (auto-params mode)
+    # =====================================================================
+    if auto_resolved is not None and cli_args.png:
+        png_path_final = os.path.join(OUTPUT_DIR, f"{CITY_NAME}_preview.png")
+        print(f"  [preference] To record your judgment on this output:")
+        print(f"    python -c \"from _TEXTURE_STYLE_OF_DEEPSEEK.auto_params.preference_store import "
+              f"PreferenceStore, PreferenceRecord; "
+              f"s=PreferenceStore('output/preference_log.jsonl'); "
+              f"s.record(PreferenceRecord(city='{CITY_NAME}', "
+              f"params={auto_resolved.to_dict()}, "
+              f"png_path='{png_path_final}', verdict='accept'))\"")
 
 
 if __name__ == "__main__":

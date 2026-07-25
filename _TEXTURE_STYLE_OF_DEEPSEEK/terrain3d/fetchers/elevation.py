@@ -21,7 +21,7 @@ from scipy.ndimage import median_filter, gaussian_filter
 from scipy.interpolate import griddata
 from rich.progress import Progress, BarColumn, TextColumn, MofNCompleteColumn
 
-from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.config import CACHE_TTL_SECONDS, ELEVATION_SMOOTHING_SIGMA, select_cache_path
+from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.config import CACHE_TTL_SECONDS, select_cache_path
 from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.utils import cache as cache_mgr
 
 logger = logging.getLogger(__name__)
@@ -450,6 +450,9 @@ def fetch_elevation_grid(south: float, west: float, north: float, east: float,
         2D numpy array of elevation values in meters, shape (rows, cols).
         Rows go from south to north, cols from west to east.
     """
+    # Function-level import: allows runtime monkey-patch from auto-params
+    from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.config import ELEVATION_SMOOTHING_SIGMA
+
     if ttl_seconds is None:
         ttl_seconds = CACHE_TTL_SECONDS
 

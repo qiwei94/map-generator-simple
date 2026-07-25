@@ -31,8 +31,6 @@ from _TEXTURE_STYLE_OF_DEEPSEEK._landmark import (
     is_tag_landmark, compute_top_percent_threshold,
 )
 from _TEXTURE_STYLE_OF_DEEPSEEK.config import (
-    BUILDING_HEIGHT_MIN_MM,
-    BUILDING_HEIGHT_MAX_MM,
     BUILDING_HEIGHT_OSM_MIN_M,
     BUILDING_HEIGHT_OSM_MAX_M,
     BUILDING_DEFAULT_HEIGHT_M,
@@ -93,6 +91,10 @@ def _compress_height(est_height_m: float, area_m2: float) -> float:
     Uses log compression: common heights (8-60m) get more model space,
     while extreme heights (100m+) are compressed together.
     """
+    # Function-level import: allows runtime monkey-patch from auto-params
+    from _TEXTURE_STYLE_OF_DEEPSEEK.config import (
+        BUILDING_HEIGHT_MIN_MM, BUILDING_HEIGHT_MAX_MM,
+    )
     import math
     # 默认回退值 → 用面积估算，区分大小建筑
     if est_height_m == BUILDING_DEFAULT_HEIGHT_M or est_height_m <= 0:
@@ -611,6 +613,10 @@ def build_deepseek_buildings_v3(
         {"landmarks": Trimesh|None, "buildings": Trimesh|None}
     """
     from _TEXTURE_STYLE_OF_DEEPSEEK.config import BUILDING_AGGREGATE_HEIGHT_MM
+    from _TEXTURE_STYLE_OF_DEEPSEEK.config import (
+        BRICK_CORNER_R_M, BRICK_ROT_DEG, BRICK_SHIFT_M,
+        BRICK_PERLIN_AMP, BRICK_PERLIN_FREQ, BRICK_RESAMPLE_M,
+    )
 
     if brick_style and (BL_with_heights or BO_polys):
         from _TEXTURE_STYLE_OF_DEEPSEEK._brick_transform import brick_transform_batch
@@ -619,8 +625,10 @@ def build_deepseek_buildings_v3(
             t0 = time.time()
             bo_transformed = brick_transform_batch(
                 BO_polys,
-                corner_r_m=8.0, rot_deg=10.0, shift_m=8.0,
-                perlin_amp=4.0, perlin_freq=0.15, resample_m=12.0,
+                corner_r_m=BRICK_CORNER_R_M, rot_deg=BRICK_ROT_DEG,
+                shift_m=BRICK_SHIFT_M,
+                perlin_amp=BRICK_PERLIN_AMP, perlin_freq=BRICK_PERLIN_FREQ,
+                resample_m=BRICK_RESAMPLE_M,
                 noise_seed=2026)
             if clip_box:
                 bo_transformed = [p.intersection(clip_box) for p in bo_transformed]
@@ -634,8 +642,10 @@ def build_deepseek_buildings_v3(
             bl_heights = [h for _, h in BL_with_heights]
             bl_transformed = brick_transform_batch(
                 bl_polys,
-                corner_r_m=8.0, rot_deg=10.0, shift_m=8.0,
-                perlin_amp=4.0, perlin_freq=0.15, resample_m=12.0,
+                corner_r_m=BRICK_CORNER_R_M, rot_deg=BRICK_ROT_DEG,
+                shift_m=BRICK_SHIFT_M,
+                perlin_amp=BRICK_PERLIN_AMP, perlin_freq=BRICK_PERLIN_FREQ,
+                resample_m=BRICK_RESAMPLE_M,
                 noise_seed=2026 + 7777)
             if clip_box:
                 clipped_bl = []

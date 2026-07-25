@@ -43,9 +43,7 @@ from _TEXTURE_STYLE_OF_DEEPSEEK._landmark import (
 from _TEXTURE_STYLE_OF_DEEPSEEK.config import (
     INTERNAL_SPAN_MM,
     BUILDING_PRINT_LIMIT_M2,
-    BUILDING_SIMPLIFY_TOL_M,
     BUILDING_V2_USE_LANDMARK_TAGS,
-    BUILDING_V2_LANDMARK_TOP_PERCENT,
     BUILDING_V2_HOTSPOT_RELAX,
     BUILDING_V2_BLOCK_FILL_CONVEX,
     BUILDING_V2_MIN_BLOCK_COMPACTNESS,
@@ -251,6 +249,10 @@ def _extract_BL_vectorized(
     narrow_penalty_factor: float = 0.5,
 ) -> Tuple[List[Tuple[Polygon, float]], List[Polygon], List]:
     """Vectorized version of _extract_BL using geopandas batch operations."""
+    # Function-level import: allows runtime monkey-patch from auto-params
+    from _TEXTURE_STYLE_OF_DEEPSEEK.config import (
+        BUILDING_SIMPLIFY_TOL_M, BUILDING_V2_LANDMARK_TOP_PERCENT,
+    )
     if buildings_gdf is None or len(buildings_gdf) == 0:
         return [], [], []
 
@@ -413,6 +415,10 @@ def _extract_BL_legacy(
     narrow_penalty_factor: float = 0.5,
 ) -> Tuple[List[Tuple[Polygon, float]], List[Polygon], List]:
     """Legacy iterrows-based implementation of _extract_BL."""
+    # Function-level import: allows runtime monkey-patch from auto-params
+    from _TEXTURE_STYLE_OF_DEEPSEEK.config import (
+        BUILDING_SIMPLIFY_TOL_M, BUILDING_V2_LANDMARK_TOP_PERCENT,
+    )
     if buildings_gdf is None or len(buildings_gdf) == 0:
         return [], [], []
 
@@ -571,6 +577,12 @@ def _compute_BO(
     city_blocks: List[Polygon],
     BL_polys: List[Polygon],
     nozzle_real_m: float,
+    *,
+    density_threshold_override: Optional[float] = None,
+    count_threshold_override: Optional[int] = None,
+    print_limit_m2_override: Optional[float] = None,
+    aggregate_simplify_m_override: Optional[float] = None,
+    mode_override: Optional[str] = None,
 ) -> Tuple[List[Polygon], set]:
     """返回 (BO_polys, filled_block_ids)。
 
@@ -581,14 +593,20 @@ def _compute_BO(
     if not smalls or not city_blocks:
         return [], set()
 
+    eff_density = density_threshold_override if density_threshold_override is not None else BUILDING_V2_DENSITY_THRESHOLD
+    eff_count = count_threshold_override if count_threshold_override is not None else BUILDING_V2_COUNT_THRESHOLD
+    eff_print_limit = print_limit_m2_override if print_limit_m2_override is not None else BUILDING_PRINT_LIMIT_M2
+    eff_simplify = aggregate_simplify_m_override if aggregate_simplify_m_override is not None else 60.0
+    eff_mode = mode_override if mode_override is not None else BUILDING_V2_MODE
+
     blocks = _aggregate_in_blocks(
         smalls, city_blocks,
-        mode=BUILDING_V2_MODE,
-        print_limit_m2=BUILDING_PRINT_LIMIT_M2,
-        simplify_m=60.0,
+        mode=eff_mode,
+        print_limit_m2=eff_print_limit,
+        simplify_m=eff_simplify,
         bldg_buffer_m=20.0,
-        density_threshold=BUILDING_V2_DENSITY_THRESHOLD,
-        count_threshold=BUILDING_V2_COUNT_THRESHOLD,
+        density_threshold=eff_density,
+        count_threshold=eff_count,
         min_block_compactness=BUILDING_V2_MIN_BLOCK_COMPACTNESS,
         block_fill_convex=BUILDING_V2_BLOCK_FILL_CONVEX,
         landmark_polys=BL_polys,
@@ -1176,6 +1194,14 @@ def preprocess_layers(
     utm_crs=None,
     origin: Optional[Tuple[float, float]] = None,
     merge_mode: bool = False,
+    # --- auto-param overrides (None = use config defaults) ---
+    road_tier_override: Optional[int] = None,
+    density_threshold_override: Optional[float] = None,
+    count_threshold_override: Optional[int] = None,
+    print_limit_m2_override: Optional[float] = None,
+    height_mode_override: Optional[str] = None,
+    aggregate_simplify_m_override: Optional[float] = None,
+    bo_mode_override: Optional[str] = None,
 ) -> LayerPolygons:
     """主入口。把 raw OSM gdf 转成 6 类 polygon + roads_lines。
 
@@ -1207,18 +1233,21 @@ def preprocess_layers(
 
     # ---- Step 1b: height data quality assessment ----
     height_quality = assess_height_data_quality(buildings_gdf)
-    height_mode = height_quality["mode"]
+    height_mode = height_mode_override if height_mode_override else height_quality["mode"]
     print(f"[preprocess] height_quality: coverage={height_quality['coverage']:.1%}, "
-          f"median_tagged={height_quality['median_tagged_m']:.1f}m → mode={height_mode}")
+          f"median_tagged={height_quality['median_tagged_m']:.1f}m → mode={height_mode}"
+          f"{' (override)' if height_mode_override else ''}")
 
     # ---- Step 2: city blocks ----
     t2 = time.time()
+    effective_road_tier = road_tier_override if road_tier_override is not None else 5
     wgdf = water_gdf if water_gdf is not None and len(water_gdf) > 0 else None
     if roads_gdf is not None and len(roads_gdf) > 0:
-        city_blocks = _build_city_blocks(roads_gdf, wgdf, road_tier=5, bbox_local=bbox_local)
+        city_blocks = _build_city_blocks(roads_gdf, wgdf, road_tier=effective_road_tier, bbox_local=bbox_local)
     else:
         city_blocks = []
-    print(f"[preprocess] city_blocks: {len(city_blocks)} after {time.time() - t2:.1f}s")
+    print(f"[preprocess] city_blocks: {len(city_blocks)} (road_tier={effective_road_tier}) "
+          f"after {time.time() - t2:.1f}s")
 
     # ---- Step 3: BL ----
     t3 = time.time()
@@ -1238,7 +1267,12 @@ def preprocess_layers(
               f"block_base covers building blocks)")
     else:
         BO_polys, BO_filled_ids = _compute_BO(
-            BO_input_smalls, city_blocks, BL_polys, nozzle_real_m)
+            BO_input_smalls, city_blocks, BL_polys, nozzle_real_m,
+            density_threshold_override=density_threshold_override,
+            count_threshold_override=count_threshold_override,
+            print_limit_m2_override=print_limit_m2_override,
+            aggregate_simplify_m_override=aggregate_simplify_m_override,
+            mode_override=bo_mode_override)
     print(f"[preprocess] _compute_BO: {time.time() - t4:.1f}s")
 
     # ---- Step 5: VL / VO ----

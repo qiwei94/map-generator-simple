@@ -19,8 +19,6 @@ from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.processors.mesh_repair import (
 
 from _TEXTURE_STYLE_OF_DEEPSEEK.config import (
     INTERNAL_SPAN_MM,
-    TERRAIN_THICKNESS_MM,
-    Z_GAMMA,
     Z_TERRAIN_BASE,
     TERRAIN_GRID,
     DECIMATION_TARGETS,
@@ -185,6 +183,9 @@ def build_deepseek_terrain(elevation_grid: np.ndarray,
 
     # Step 2: Scale XY from real meters to model mm
     mesh.vertices[:, :2] *= scale
+
+    # Function-level import: allows runtime monkey-patch from auto-params
+    from _TEXTURE_STYLE_OF_DEEPSEEK.config import Z_GAMMA, TERRAIN_THICKNESS_MM
 
     # Step 3: Map surface Z to model mm (0..TERRAIN_THICKNESS_MM + Z_TERRAIN_BASE)
     z_surface = mesh.vertices[:, 2]

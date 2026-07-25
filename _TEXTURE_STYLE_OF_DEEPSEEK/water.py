@@ -27,7 +27,6 @@ from _TEXTURE_STYLE_OF_DEEPSEEK._geom_utils import (
 from _TEXTURE_STYLE_OF_DEEPSEEK.config import (
     WATER_HEIGHT_MODEL_MM,
     WATER_BASE_THICKNESS_MM,
-    WATER_MIN_AREA_M2,
     WATER_MAX_EDGE_M,
     Z_WATER_BASE_MM,
     Z_TERRAIN_BASE,
@@ -84,6 +83,9 @@ def build_deepseek_water(gdf: gpd.GeoDataFrame,
     """
     if gdf is None or len(gdf) == 0:
         return None
+
+    # Function-level import: allows runtime monkey-patch from auto-params
+    from _TEXTURE_STYLE_OF_DEEPSEEK.config import WATER_MIN_AREA_M2
 
     # Convert config mm thickness to model meters (the Manifold space)
     base_thickness_m = WATER_BASE_THICKNESS_MM / scale if scale > 0 else 0.0

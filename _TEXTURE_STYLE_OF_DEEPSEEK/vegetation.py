@@ -18,7 +18,6 @@ from _TEXTURE_STYLE_OF_DEEPSEEK._geom_utils import shapely_poly_to_crosssection
 from _TEXTURE_STYLE_OF_DEEPSEEK.config import (
     VEGETATION_Z_OFFSET_MM,
     VEGETATION_THICKNESS_MM,
-    VEGETATION_MIN_AREA_M2,
     VEGETATION_SIMPLIFY_TOL_M,
 )
 
@@ -65,6 +64,9 @@ def build_deepseek_vegetation(gdf: gpd.GeoDataFrame,
     """
     if gdf is None or len(gdf) == 0:
         return None
+
+    # Function-level import: allows runtime monkey-patch from auto-params
+    from _TEXTURE_STYLE_OF_DEEPSEEK.config import VEGETATION_MIN_AREA_M2
 
     parts: list[manifold3d.Manifold] = []
     n_processed = 0

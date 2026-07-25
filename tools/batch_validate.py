@@ -80,16 +80,58 @@ def validate_city(name: str, profile: CityProfile) -> dict:
     report = explain_decisions(profile, params)
     report["city"] = name
 
-    # Sanity checks
+    # Sanity checks (Spec §4.5 runtime warnings)
     warnings = []
+
+    # Z_GAMMA comfort zone
     if params.z_gamma < 0.30 or params.z_gamma > 0.65:
         warnings.append(f"z_gamma={params.z_gamma} outside comfort zone [0.30, 0.65]")
+
+    # Density threshold extremes
     if params.building_density_threshold > 0.02:
-        warnings.append(f"density_threshold={params.building_density_threshold} very high")
+        warnings.append(f"density_threshold={params.building_density_threshold} very high — risk of empty blocks")
+    if params.building_density_threshold < 0.001:
+        warnings.append(f"density_threshold={params.building_density_threshold} very low — risk of over-dense")
+
+    # Road tier vs road density mismatch
     if params.building_v2_road_tier < 3 and profile.road_density_km_per_km2 > 10:
-        warnings.append(f"road_tier={params.building_v2_road_tier} low for dense roads")
+        warnings.append(f"road_tier={params.building_v2_road_tier} low for dense roads "
+                       f"({profile.road_density_km_per_km2:.0f}km/km²) — fragmentation risk")
+
+    # Flat mode + high buildings mismatch
+    if params.flat_mode and profile.height_tag_coverage > 0.5:
+        warnings.append(f"flat_mode=True but height_coverage={profile.height_tag_coverage:.0%} — wasting data")
+
+    # Vegetation min area too small (GEOS hang risk)
+    if params.vegetation_min_area_m2 < 2000 and profile.area_km2 > 100:
+        warnings.append(f"vegetation_min_area={params.vegetation_min_area_m2}m² too small for "
+                       f"{profile.area_km2:.0f}km² — GEOS timeout risk")
+
+    # Water ratio high but min_area not adjusted
+    if profile.water_ratio > 0.3 and params.water_min_area_m2 < 50000:
+        warnings.append(f"water_ratio={profile.water_ratio:.2f} high but water_min_area="
+                       f"{params.water_min_area_m2} — fragment risk")
+
+    # Terrain thickness vs elevation
+    if profile.elevation_range_m > 500 and params.terrain_thickness_mm < 5.0:
+        warnings.append(f"elevation_range={profile.elevation_range_m}m but thickness="
+                       f"{params.terrain_thickness_mm}mm — punch-through risk")
+
+    # Print limit vs building size mismatch
+    if profile.avg_building_area_m2 > 500 and params.building_print_limit_m2 > 2000:
+        warnings.append(f"avg_building_area={profile.avg_building_area_m2}m² (CBD) but "
+                       f"print_limit={params.building_print_limit_m2} — too many aggregated")
+
+    # OSM quality poor warning
+    if profile.osm_quality == "poor":
+        warnings.append(f"osm_quality=poor — output may have gaps, consider manual review")
+
+    # Road width extreme
+    if params.road_width_multiplier > 7.0:
+        warnings.append(f"road_width_multiplier={params.road_width_multiplier} very high — roads may overlap")
 
     report["warnings"] = warnings
+    report["resolved_params"] = params.to_dict()
     return report
 
 
@@ -125,11 +167,11 @@ def main():
         style = result["style_selected"]
         n_warn = len(result["warnings"])
         total_warnings += n_warn
-        status = "✓" if n_warn == 0 else f"⚠ {n_warn} warning(s)"
+        status = "OK" if n_warn == 0 else f"WARN {n_warn} warning(s)"
 
         print(f"  {name:12s} → style={style:14s} {status}")
         for w in result["warnings"]:
-            print(f"    ⚠ {w}")
+            print(f"    ! {w}")
 
     print("=" * 70)
     print(f"Total: {len(cities)} cities, {total_warnings} warnings")

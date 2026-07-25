@@ -39,6 +39,9 @@ class ResolvedParams:
     building_v2_road_tier: int = 5
     building_v2_hotspot_relax: float = 10.0
     building_v2_landmark_top_percent: float = 1.0
+    # 高度动态范围（天际线城市需要更大 headroom 才能"错落有致"）
+    building_height_mm_min: float = 2.8
+    building_height_mm_max: float = 4.0
 
     # Roads
     road_width_multiplier: float = 5.0
@@ -245,6 +248,16 @@ def _resolve_buildings(
         reasons["building_print_limit_m2"] = (
             f"avg_area={avg_area:.0f}m² (normal) → limit=2500"
         )
+
+    # Skyline headroom: 高度数据可靠 + 密集城市 → 拉大高度动态范围
+    if not params.flat_mode and height_cov >= 0.30 and density > 500:
+        params.building_height_mm_max = 8.0
+        reasons["building_height_mm_max"] = (
+            f"coverage={height_cov:.2f}≥0.30 & density={density:.0f}/km2>500 "
+            f"→ height_max=8.0mm (skyline headroom)"
+        )
+    else:
+        reasons["building_height_mm_max"] = "default 4.0mm (subdued, landscape-safe)"
 
 
 def _resolve_roads(

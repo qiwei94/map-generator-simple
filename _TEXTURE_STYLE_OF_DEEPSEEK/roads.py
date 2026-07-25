@@ -36,7 +36,6 @@ from _TEXTURE_STYLE_OF_DEEPSEEK.bridge_filter import filter_bridges_only as filt
 from _TEXTURE_STYLE_OF_DEEPSEEK.config import (
     ROAD_THICKNESS_MM,
     Z_ROAD_ABOVE_TERRAIN_MM,
-    ROAD_WIDTH_MULTIPLIER,
     ROAD_WIDTHS,
     ROAD_FILTER,
     ROAD_MIN_LINE_LENGTH_M,
@@ -52,6 +51,8 @@ def _buffer_lines(gdf: gpd.GeoDataFrame, highway_filter) -> List[Polygon]:
     单条线失败（shapely 2.x 偶现 'Component rings have coordinate sequences,
     but the polygon does not'）时跳过该条，不让整批挂掉。
     """
+    # Function-level import: allows runtime monkey-patch from auto-params
+    from _TEXTURE_STYLE_OF_DEEPSEEK.config import ROAD_WIDTH_MULTIPLIER
     polys: List[Polygon] = []
     n_skip_filter = 0
     n_skip_short = 0
@@ -235,6 +236,8 @@ def build_deepseek_roads_v3(
     RL_THICKNESS = Z_ROAD_ABOVE_TERRAIN_MM + ROAD_BRIDGE_EXTRA_MM
 
     # Step 1: Buffer all lines
+    # Function-level import: allows runtime monkey-patch from auto-params
+    from _TEXTURE_STYLE_OF_DEEPSEEK.config import ROAD_WIDTH_MULTIPLIER
     t1 = time.time()
     all_polys: List[Tuple[Polygon, str, bool]] = []  # (poly, highway, is_bridge)
     n_skip_short = 0

@@ -32,7 +32,7 @@ class TestSaveDecisionReport:
             path = save_decision_report(profile, params, tmpdir, "test_city")
 
             assert os.path.exists(path)
-            with open(path) as f:
+            with open(path, encoding="utf-8") as f:
                 data = json.load(f)
 
             assert data["city"] == "test_city"
