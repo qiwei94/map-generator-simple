@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#14161c">
+<title>旅程回忆</title>
+<link rel="stylesheet" href="style.css?v=25">
+<link rel="stylesheet" href="vendor/leaflet/leaflet.css">
+<!-- 本地自托管，无 CDN 依赖 -->
+<script type="module" src="vendor/model-viewer.min.js"
+        onerror="window.__mvFallback && window.__mvFallback()"></script>
+<script src="vendor/leaflet/leaflet.js" defer></script>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark">◆</span>
+    <div>
+      <h1>旅程回忆</h1>
+      <p class="sub">照片 → 轨迹 → 浮雕 → 独一无二的回忆实体</p>
+    </div>
+  </div>
+</header>
+
+<main id="main">
+
+  <!-- ══ Step 1 · 选位置 ══ -->
+  <section class="card step" id="step1">
+    <h2 class="section-title"><span class="step-num">1</span>选位置</h2>
+
+    <!-- Tab 切换：搜索 / 照片 -->
+    <div class="s1-tabs" id="s1Tabs">
+      <button class="s1-tab active" data-tab="photo">📷 照片定位</button>
+      <button class="s1-tab" data-tab="search">🔍 搜索地名</button>
+    </div>
+
+    <!-- 搜索面板 -->
+    <div class="s1-panel" id="s1Search" hidden>
+      <div class="lm-search">
+        <input type="text" id="lmInput" class="text-input" maxlength="40"
+               placeholder="西湖 / 拙政园 / 埃菲尔铁塔 / 浙大紫金港…"
+               autocomplete="off">
+        <div class="lm-results" id="lmResults" hidden></div>
+      </div>
+    </div>
+
+    <!-- 照片面板 -->
+    <div class="s1-panel" id="s1Photo">
+      <div class="privacy-note">🔒 照片仅用于读取 GPS 坐标标记地点，不会以任何形式存储或上传至第三方服务器。解析完成后立即从内存中丢弃。</div>
+      <div class="photo-row">
+        <label class="btn btn-ghost btn-file">📷 选择照片
+          <input type="file" id="photoInput" accept="image/*" multiple hidden>
+        </label>
+        <span class="hint" id="photoHint">1 张定位地点，多张自动生成旅程轨迹（需 GPS 原图，微信传图会抹掉 GPS）</span>
+      </div>
+      <div class="journey-summary" id="journeySummary" hidden></div>
+      <div class="gap-card" id="gapCard" hidden>
+        <div class="gap-head">
+          <span class="gap-q" id="gapQuestion"></span>
+          <span class="gap-count" id="gapCount"></span>
+        </div>
+        <div class="gap-thumbs" id="gapThumbs"></div>
+        <div class="gap-row">
+          <input type="text" id="gapInput" class="text-input" maxlength="40"
+                 placeholder="回个地名就行，比如：灵隐寺" autocomplete="off">
+          <button class="btn btn-ghost" id="gapSkip">跳过</button>
+        </div>
+        <div class="lm-results gap-results" id="gapResults" hidden></div>
+      </div>
+    </div>
+
+    <!-- 预设城市（折叠） -->
+    <details class="preset-details">
+      <summary class="preset-summary">从热门城市开始</summary>
+      <div class="preset-filter">
+        <select id="cityGroup" class="group-select">
+          <option value="">全部</option>
+        </select>
+        <input type="text" id="cityFilter" class="text-input city-filter-input"
+               placeholder="筛选城市…" autocomplete="off">
+      </div>
+      <nav class="city-tabs" id="cityTabs"><!-- 城市 chips 注入 --></nav>
+    </details>
+  </section>
+
+  <!-- ══ Step 2 · 定取景 ══ -->
+  <section class="card step" id="step2">
+    <h2 class="section-title"><span class="step-num">2</span>定取景
+      <span class="hint">金色框即成品范围，始终居中</span></h2>
+    <div id="leafletMap" class="leaflet-map"></div>
+    <div class="custom-row tier-row">
+      <span class="tier-label">取景范围</span>
+      <div class="seg tier-seg" id="tierSeg">
+        <button data-km="5">5 km</button>
+        <button data-km="10" class="active">10 km</button>
+        <button data-km="15">15 km</button>
+      </div>
+      <span class="hint" id="tierHint">金色框即成品范围</span>
+    </div>
+    <div class="custom-row">
+      <input type="text" id="areaName" class="text-input" maxlength="24"
+             placeholder="给这段旅途起个名字吧">
+      <button class="btn btn-primary" id="btnConfirmArea">✓ 确定，看风格
+        <small>约 1 分钟出 4 种风格图</small></button>
+    </div>
+    <div class="style-hint" id="customHint">目前可生成范围：已拉取的区域（共 80 个可用）</div>
+  </section>
+
+  <!-- ══ Step 3 · 挑风格（确定取景后生成）══ -->
+  <section class="card step" id="step3">
+    <div class="section-head">
+      <h2 class="section-title"><span class="step-num">3</span>挑风格
+        <span class="hint" id="galleryHint">先在上一步点“确定，看风格”</span></h2>
+      <div class="seg" id="renderToggle">
+        <button data-kind="topdown" class="active">平面图</button>
+        <button data-kind="height">高度图</button>
+      </div>
+    </div>
+    <div class="gallery" id="galleryGrid"></div>
+    <div class="style-hint" id="styleHint"></div>
+    <div class="chips" id="profileChips"></div>
+  </section>
+
+  <!-- ══ Step 4 · 预览（倒数第二步）══ -->
+  <section class="card step" id="step4">
+    <h2 class="section-title"><span class="step-num">4</span>预览
+      <span class="hint" id="glbInfo">确认构图与风格，满意后再出打印文件</span></h2>
+    <div class="actions">
+      <button class="btn btn-primary" id="btnDraft">⚡ 生成预览
+        <small>约 1–2 分钟（2D 图 + 3D 模型）</small></button>
+    </div>
+    <div class="preview-2d" id="preview2d" hidden>
+      <figure class="p2-item" id="p2Topdown" hidden>
+        <img id="imgTopdown" alt="旅程纪念平面图" loading="lazy">
+        <figcaption>旅程纪念平面图</figcaption>
+      </figure>
+      <figure class="p2-item" id="p2Diag" hidden>
+        <img id="imgDiag" alt="轨迹标注图" loading="lazy">
+        <figcaption>轨迹与标注 · 含图层统计</figcaption>
+      </figure>
+    </div>
+    <div class="viewer-wrap" id="viewerWrap">
+      <div class="viewer-empty" id="viewerEmpty">点上方按钮生成预览</div>
+    </div>
+  </section>
+
+  <!-- ══ Step 5 · 打印文件 ══ -->
+  <section class="card step" id="step5">
+    <h2 class="section-title"><span class="step-num">5</span>打印文件
+      <span class="hint">预览满意后再生成，避免白等</span></h2>
+    <div class="actions">
+      <button class="btn btn-primary" id="btnFull">🖨 生成打印模型 3MF
+        <small>约 3–5 分钟</small></button>
+    </div>
+    <div class="downloads" id="downloads"></div>
+  </section>
+
+  <!-- 任务面板（固定在底部，两步共用） -->
+  <section class="card job-card" id="jobPanel" hidden>
+    <div class="job-head">
+      <span class="pill" id="jobStatus">运行中</span>
+      <span class="mono" id="jobElapsed">0s</span>
+    </div>
+    <pre class="job-log" id="jobLog"></pre>
+  </section>
+</main>
+
+<!-- 灯箱 -->
+<div class="lightbox" id="lightbox" hidden>
+  <img id="lightboxImg" alt="风格大图">
+  <button class="lightbox-close" id="lightboxClose">✕</button>
+  <div class="lightbox-cap" id="lightboxCap"></div>
+</div>
+
+<footer class="foot">旅程回忆 · 数据源 OSM / Copernicus DEM / Nominatim</footer>
+
+<script src="app.js?v=27"></script>
+</body>
+</html>

@@ -30,3 +30,13 @@ pydantic>=2.0.0
 # VLM aesthetic review (optional — aesthetic loop degrades to pure metrics without it)
 openai>=1.0.0
 python-dotenv>=1.0.0
+
+# ── Web 前端服务（webapp/：旅程回忆 Studio）──
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
+python-multipart>=0.0.9      # 照片上传
+Pillow>=10.0.0               # EXIF GPS / 时间提取
+
+# ── 测试 ──
+pytest>=7.0.0
+psutil>=5.9.0                # 资源占用基准测试

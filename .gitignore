@@ -35,7 +35,16 @@ Thumbs.db
 
 # Downloads / binary assets
 *.dmg
-data/
+
+# Data: 排除大体积缓存（height_cache ~135MB），保留配置/景点目录/地名表（开箱即用）
+data/height_cache/
+
+# 临时验证截图（浏览器 e2e 验证产物）
+verification_*.png
+
+# vendor 只保留页面引用的压缩产物，排除 source map 与未压缩源码
+webapp/static/vendor/**/*-src*
+webapp/static/vendor/**/*.map
 
 # Rebuild specs (generated)
 rebuild/

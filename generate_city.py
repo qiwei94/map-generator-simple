@@ -12,6 +12,7 @@
 """
 
 import argparse
+import json
 import os
 import sys
 import time
@@ -113,6 +114,10 @@ def parse_args():
         help='启用自动参数系统（检测城市特征 → 自适应参数）'
     )
     parser.add_argument(
+        '--params-json', type=str, default=None, metavar='PATH',
+        help='JSON 参数覆盖文件（画廊风格参数，最高优先级；自动启用 --auto-params）'
+    )
+    parser.add_argument(
         '--ai-review', action='store_true', default=False,
         help='启用 AI 视觉评审（需要 ANTHROPIC_API_KEY + --png）'
     )
@@ -122,7 +127,19 @@ def parse_args():
     )
     parser.add_argument(
         '--png', action='store_true', default=False,
-        help='同时渲染 PNG 预览图（brick 风格 top-down 2D）'
+        help='同时渲染 PNG 预览图（pipeline 诊断图，带图例与统计）'
+    )
+    parser.add_argument(
+        '--review-png', action='store_true', default=False,
+        help='同时渲染画廊级俯视图（无文字、超采样，风格画廊同源）'
+    )
+    parser.add_argument(
+        '--draft', action='store_true', default=False,
+        help='Draft 模式：跳过 brick/boolean，快速导出 GLB 预览后退出'
+    )
+    parser.add_argument(
+        '--marker', action='append', default=None, metavar='LAT,LON',
+        help='在 draft GLB 中插红色大头针标注（可重复，如照片 GPS 点）'
     )
     parser.add_argument(
         '--debug-obj', action='store_true', default=False,
@@ -154,6 +171,15 @@ def parse_args():
         args.bbox_tuple = tuple(parts)
     except (ValueError, AttributeError):
         parser.error("--bbox 格式: south,west,north,east (逗号分隔的4个浮点数)")
+
+    # 解析 --marker 为 [(lat, lon), ...]
+    args.marker_points = []
+    for m in (args.marker or []):
+        try:
+            lat_s, lon_s = m.split(',')
+            args.marker_points.append((float(lat_s), float(lon_s)))
+        except ValueError:
+            parser.error(f"--marker 格式: lat,lon（收到: {m}）")
 
     return args
 
@@ -423,6 +449,13 @@ def main():
     # Stage 3e: Auto-parameter detection (optional)
     # =====================================================================
     auto_resolved = None  # will be set if --auto-params
+    style_overrides = {}  # from --params-json (画廊风格参数)
+    if cli_args.params_json:
+        with open(cli_args.params_json, 'r', encoding='utf-8') as f:
+            style_overrides = json.load(f)
+        if not cli_args.auto_params:
+            print("  [Stage 3e] --params-json 需基于规则引擎，自动启用 --auto-params")
+            cli_args.auto_params = True
     if cli_args.auto_params:
         print(f"\n[Stage 3e] Auto-parameter detection...")
         t3e = time.time()
@@ -473,7 +506,12 @@ def main():
         merged_overrides = {}
         merged_overrides.update(pref_bias)     # lowest priority
         merged_overrides.update(ai_overrides)  # AI art direction
-        # (explicit CLI overrides would go here if we add --param flags)
+        # Layer 4: 显式风格参数（--params-json，最高优先级；
+        #   bo_mode/aggregate_simplify_m 非 ResolvedParams 字段，
+        #   由 Stage 4.5 的 preprocess override 显式传参生效）
+        if style_overrides:
+            print(f"  Style overrides (--params-json): {style_overrides}")
+            merged_overrides.update(style_overrides)
 
         auto_resolved = resolve_params(profile, user_overrides=merged_overrides or None)
         save_decision_report(profile, auto_resolved, OUTPUT_DIR, CITY_NAME)
@@ -497,6 +535,9 @@ def main():
         _cfg.WATER_MIN_AREA_M2 = auto_resolved.water_min_area_m2
         _cfg.BRICK_PERLIN_AMP = auto_resolved.brick_perlin_amp
         _cfg.BRICK_CORNER_R_M = auto_resolved.brick_corner_r_m
+        # 建筑高度动态范围（_compress_height 函数级 import，补丁生效）
+        _cfg.BUILDING_HEIGHT_MAX_MM = auto_resolved.building_height_mm_max
+        _cfg.BUILDING_HEIGHT_MIN_MM = auto_resolved.building_height_mm_min
         if auto_resolved.road_filter_tier is not None:
             _cfg.ROAD_FILTER["large"] = auto_resolved.road_filter_tier
 
@@ -515,7 +556,11 @@ def main():
     print(f"\n[Stage 4] Building terrain mesh (obj_4: terrain + water hollow)...")
     t4 = time.time()
 
-    if water_gdf is not None and len(water_gdf) > 0:
+    if cli_args.draft:
+        # Draft 模式：跳过正式地形（GLB 用降采样 heightfield 自建）
+        print(f"  DRAFT mode: skipping full terrain build (GLB heightfield instead)")
+        terrain_solid = None
+    elif water_gdf is not None and len(water_gdf) > 0:
         # Skip Manifold boolean water hollowing — it destroys terrain surface
         # detail (527K→141K faces, radial artifacts, lake disappearance).
         # Water is represented as a separate mesh layer instead.
@@ -548,6 +593,12 @@ def main():
         _preprocess_overrides["print_limit_m2_override"] = auto_resolved.building_print_limit_m2
         if auto_resolved.flat_mode:
             _preprocess_overrides["height_mode_override"] = "flat"
+    # 风格参数中的 config 级参数（模块顶层 import 吃不到补丁，必须显式传参）
+    if "bo_mode" in style_overrides:
+        _preprocess_overrides["bo_mode_override"] = str(style_overrides["bo_mode"])
+    if "aggregate_simplify_m" in style_overrides:
+        _preprocess_overrides["aggregate_simplify_m_override"] = float(
+            style_overrides["aggregate_simplify_m"])
 
     layers = preprocess_layers(
         buildings_gdf=buildings_gdf,
@@ -595,6 +646,61 @@ def main():
             landuse_gdf=landuse_gdf,
         )
         print(f"  Time: {time.time() - t46:.1f}s")
+
+    # =====================================================================
+    # Stage 4.65: 画廊级漂亮俯视图（--review-png）
+    # 与 Stage 4.6 的诊断图不同：无文字标注、超采样抗锯齿、带山体阴影，
+    # 就是风格画廊用的那张图（aesthetic/review_render.py）。
+    # =====================================================================
+    if getattr(cli_args, "review_png", False):
+        print(f"\n[Stage 4.65] Rendering gallery-grade preview...")
+        t465 = time.time()
+        try:
+            from aesthetic.review_render import render_review_bundle
+            _rw = (auto_resolved.road_width_multiplier
+                   if auto_resolved is not None else 1.0)
+            bundle = render_review_bundle(
+                layers, {"bbox_local": bbox_local}, _rw,
+                OUTPUT_DIR, CITY_NAME)
+            print(f"  topdown: {bundle.get('topdown')}")
+            print(f"  Time: {time.time() - t465:.1f}s")
+        except Exception as e:
+            print(f"  WARNING: gallery preview failed: {type(e).__name__}: {e}")
+
+    # =====================================================================
+    # Stage 4.8: Draft GLB 快速预览（--draft：导出后提前退出）
+    # =====================================================================
+    if cli_args.draft:
+        print(f"\n[Stage 4.8] Exporting draft GLB preview...")
+        t48 = time.time()
+        from _TEXTURE_STYLE_OF_DEEPSEEK.render_glb import render_glb_preview
+        glb_path = os.path.join(OUTPUT_DIR, f"{CITY_NAME}_draft.glb")
+        # --marker: lat/lon → 本地米（与图层同一 UTM 投影 + origin 平移）
+        marker_local = []
+        if cli_args.marker_points:
+            from pyproj import Transformer
+            _tf = Transformer.from_crs("EPSG:4326", utm_crs, always_xy=True)
+            for _lat, _lon in cli_args.marker_points:
+                _mx, _my = _tf.transform(_lon, _lat)
+                marker_local.append((_mx - origin[0], _my - origin[1]))
+        render_glb_preview(
+            layers,
+            {"bbox_local": bbox_local, "scale": scale,
+             "bbox_wgs84": (south, west, north, east),
+             "utm_crs": utm_crs, "origin": origin},
+            glb_path,
+            elevation_grid=elevation_grid,
+            markers=marker_local or None,
+            water_gdf=water_gdf,
+        )
+        glb_size = os.path.getsize(glb_path) / (1024 * 1024)
+        total_time = time.time() - t_start
+        print(f"\n{'=' * 70}")
+        print(f"  DRAFT Summary — {CITY_NAME}")
+        print(f"  Output: {glb_path} ({glb_size:.2f} MB)")
+        print(f"  Total time: {total_time:.1f}s (draft; full 3MF skipped)")
+        print(f"{'=' * 70}\n")
+        return
 
     # =====================================================================
     # Stage 4.7: AI vision review — advisory (optional, --ai-review + --png)

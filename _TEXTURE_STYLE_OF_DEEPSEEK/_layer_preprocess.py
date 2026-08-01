@@ -13,6 +13,8 @@
 
 from __future__ import annotations
 
+import math
+
 import time
 from dataclasses import dataclass, field
 from typing import List, Tuple, Dict, Optional, Set
@@ -72,7 +74,6 @@ from _TEXTURE_STYLE_OF_DEEPSEEK.config import (
     LANDMARK_HEIGHT_BOOST_CAP_MM,
     LANDMARK_BUFFER_M,
     LANDMARK_EXCLUSION_BUFFER_M,
-    BUILDING_VERIFIED_HEIGHT_ONLY,
 )
 from _TEXTURE_STYLE_OF_DEEPSEEK.buildings import (
     _build_city_blocks,
@@ -258,6 +259,14 @@ def _extract_BL_vectorized(
 
     use_landmark_tags = BUILDING_V2_USE_LANDMARK_TAGS
 
+    # ---- 动态高度覆盖率：替代写死的 BUILDING_VERIFIED_HEIGHT_ONLY ----
+    if "height_source" in buildings_gdf.columns:
+        _n_verified = (buildings_gdf["height_source"] == "overture").sum()
+        _height_coverage = _n_verified / max(len(buildings_gdf), 1)
+    else:
+        _height_coverage = 0.0
+    print(f"  _extract_BL_vectorized: height_coverage={_height_coverage:.1%}")
+
     # ---- Step 1: Vectorized explode + simplify + filter ----
     gdf = buildings_gdf[buildings_gdf.geometry.notnull()].copy()
     gdf = gdf[gdf.geometry.type.isin(['Polygon', 'MultiPolygon'])]
@@ -340,8 +349,9 @@ def _extract_BL_vectorized(
 
         est_height = row.get("est_height", 0)
 
-        # Skip buildings with estimated (non-verified) heights
-        if BUILDING_VERIFIED_HEIGHT_ONLY:
+        # Dynamic height coverage: only skip non-verified when data is rich
+        # (replaces hardcoded BUILDING_VERIFIED_HEIGHT_ONLY=True)
+        if _height_coverage >= 0.30:
             h_source = row.get("height_source", "default")
             if h_source != "overture":
                 continue
@@ -476,7 +486,13 @@ def _extract_BL_legacy(
             hotspot_relax,
         )
 
-    # Build STRtree for hotspot matching
+    # ---- 动态高度覆盖率：替代写死的 BUILDING_VERIFIED_HEIGHT_ONLY ----
+    if "height_source" in buildings_gdf.columns:
+        _n_verified = (buildings_gdf["height_source"] == "overture").sum()
+        _height_coverage = _n_verified / max(len(buildings_gdf), 1)
+    else:
+        _height_coverage = 0.0
+    print(f"  _extract_BL_scalar: height_coverage={_height_coverage:.1%}")
     htree: Optional[STRtree] = None
     if hotspot_blocks:
         hot_polys = [city_blocks[i] for i in hotspot_blocks]
@@ -504,8 +520,9 @@ def _extract_BL_legacy(
 
         est_height = row.get("est_height", 0)
 
-        # Skip buildings with estimated (non-verified) heights
-        if BUILDING_VERIFIED_HEIGHT_ONLY:
+        # Dynamic height coverage: only skip non-verified when data is rich
+        # (replaces hardcoded BUILDING_VERIFIED_HEIGHT_ONLY=True)
+        if _height_coverage >= 0.30:
             h_source = row.get("height_source", "default")
             if h_source != "overture":
                 continue
@@ -722,7 +739,28 @@ def _extract_WL_WO(
                 continue
             lines = geom.geoms if isinstance(geom, MultiLineString) else [geom]
             waterway_type = row.get("waterway", "river")
-            half_width = WATERWAY_HALF_WIDTH.get(waterway_type, 10.0)
+            # 宽度解析：OSM width 标签 > 自适应回退（不查硬编码表）
+            osm_width = row.get("width", None)
+            if osm_width is not None:
+                try:
+                    if not (isinstance(osm_width, float) and math.isnan(osm_width)):
+                        parsed_w = float(osm_width)
+                        if 0 < parsed_w < 5000:
+                            half_width = parsed_w / 2.0
+                        else:
+                            half_width = 30.0  # 无效标签回退
+                    else:
+                        half_width = 30.0
+                except (TypeError, ValueError):
+                    half_width = 30.0
+            else:
+                # 无标签：按类型给保守默认值（不查 WATERWAY_HALF_WIDTH）
+                conservative_defaults = {
+                    "river": 30.0, "riverbank": 100.0,
+                    "canal": 15.0, "stream": 6.0,
+                    "drain": 3.0, "ditch": 2.0,
+                }
+                half_width = conservative_defaults.get(waterway_type, 15.0)
             buffer_width = max(half_width, min_buffer)
             for line in lines:
                 if line.length < 10.0:

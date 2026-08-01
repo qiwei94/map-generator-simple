@@ -1,0 +1,728 @@
+{
+ "version": 1,
+ "note": "PBF 地理覆盖表：bbox=[south,west,north,east]，由 osmium header 提取。本地缺失的区域可从 remote 按需 scp 拉取。",
+ "remote_host": "root@8.136.0.235",
+ "remote_dir": "/root/map-cache/pbf_cache",
+ "regions": {
+  "andalucia": {
+   "file": "andalucia-latest.osm.pbf",
+   "bbox": [
+    35.7064,
+    -7.5538,
+    38.7335,
+    -1.3321
+   ]
+  },
+  "argentina": {
+   "file": "argentina-latest.osm.pbf",
+   "bbox": [
+    -55.683,
+    -73.6145,
+    -21.7258,
+    -53.6353
+   ]
+  },
+  "austria": {
+   "file": "austria-latest.osm.pbf",
+   "bbox": [
+    46.3698,
+    9.5268,
+    49.024,
+    17.1641
+   ]
+  },
+  "bayern": {
+   "file": "bayern-latest.osm.pbf",
+   "bbox": [
+    47.2284,
+    8.9752,
+    50.5662,
+    14.0903
+   ]
+  },
+  "beijing": {
+   "file": "beijing-latest.osm.pbf",
+   "bbox": [
+    39.4408,
+    115.4155,
+    41.0638,
+    117.5095
+   ]
+  },
+  "belgium": {
+   "file": "belgium-latest.osm.pbf",
+   "bbox": [
+    49.4949,
+    2.3407,
+    51.5984,
+    6.4103
+   ]
+  },
+  "berlin": {
+   "file": "berlin-latest.osm.pbf",
+   "bbox": [
+    52.3345,
+    13.0828,
+    52.6783,
+    13.7622
+   ]
+  },
+  "british-columbia": {
+   "file": "british-columbia-latest.osm.pbf",
+   "bbox": [
+    45.385,
+    -142.8716,
+    60.0068,
+    -114.049
+   ]
+  },
+  "california": {
+   "file": "california-latest.osm.pbf",
+   "bbox": [
+    32.4817,
+    -125.8935,
+    42.0162,
+    -114.1291
+   ]
+  },
+  "cataluna": {
+   "file": "cataluna-latest.osm.pbf",
+   "bbox": [
+    40.2124,
+    0.1564,
+    42.9243,
+    4.1748
+   ]
+  },
+  "centro": {
+   "file": "centro-latest.osm.pbf",
+   "bbox": [
+    40.2144,
+    8.6133,
+    44.4797,
+    14.981
+   ]
+  },
+  "chongqing": {
+   "file": "chongqing-latest.osm.pbf",
+   "bbox": [
+    28.1513,
+    105.283,
+    32.2064,
+    110.2004
+   ]
+  },
+  "croatia": {
+   "file": "croatia-latest.osm.pbf",
+   "bbox": [
+    42.1648,
+    13.0892,
+    46.5576,
+    19.46
+   ]
+  },
+  "czech-republic": {
+   "file": "czech-republic-latest.osm.pbf",
+   "bbox": [
+    48.5429,
+    12.0848,
+    51.0643,
+    18.8632
+   ]
+  },
+  "denmark": {
+   "file": "denmark-latest.osm.pbf",
+   "bbox": [
+    54.4406,
+    7.7011,
+    58.0624,
+    15.6545
+   ]
+  },
+  "district-of-columbia": {
+   "file": "district-of-columbia-latest.osm.pbf",
+   "bbox": [
+    38.791,
+    -77.1201,
+    38.996,
+    -76.9091
+   ]
+  },
+  "egypt": {
+   "file": "egypt-latest.osm.pbf",
+   "bbox": [
+    21.9838,
+    24.6263,
+    32.5252,
+    37.1626
+   ]
+  },
+  "finland": {
+   "file": "finland-latest.osm.pbf",
+   "bbox": [
+    59.2878,
+    19.0243,
+    70.0996,
+    31.6159
+   ]
+  },
+  "florida": {
+   "file": "florida-latest.osm.pbf",
+   "bbox": [
+    23.6831,
+    -88.7037,
+    31.0031,
+    -77.7236
+   ]
+  },
+  "fujian": {
+   "file": "fujian-latest.osm.pbf",
+   "bbox": [
+    22.9672,
+    115.8409,
+    28.3224,
+    121.6277
+   ]
+  },
+  "gcc-states": {
+   "file": "gcc-states-latest.osm.pbf",
+   "bbox": [
+    15.2475,
+    34.4349,
+    32.1965,
+    60.9475
+   ]
+  },
+  "great-britain": {
+   "file": "great-britain-latest.osm.pbf",
+   "bbox": [
+    49.523,
+    -15.3368,
+    61.9286,
+    2.5137
+   ]
+  },
+  "greece": {
+   "file": "greece-latest.osm.pbf",
+   "bbox": [
+    34.5911,
+    18.9706,
+    41.7495,
+    29.6568
+   ]
+  },
+  "guangdong": {
+   "file": "guangdong-latest.osm.pbf",
+   "bbox": [
+    20.0585,
+    109.3565,
+    25.5243,
+    118.7924
+   ]
+  },
+  "guangxi": {
+   "file": "guangxi-latest.osm.pbf",
+   "bbox": [
+    20.6898,
+    104.4419,
+    26.3965,
+    112.0654
+   ]
+  },
+  "hawaii": {
+   "file": "hawaii-latest.osm.pbf",
+   "bbox": [
+    10.8358,
+    -179.8483,
+    29.0962,
+    -137.5228
+   ]
+  },
+  "heilongjiang": {
+   "file": "heilongjiang-latest.osm.pbf",
+   "bbox": [
+    43.4108,
+    121.15,
+    54.4701,
+    137.1533
+   ]
+  },
+  "hokkaido": {
+   "file": "hokkaido-latest.osm.pbf",
+   "bbox": [
+    41.151,
+    137.9346,
+    46.0403,
+    146.2476
+   ]
+  },
+  "hong-kong": {
+   "file": "hong-kong-latest.osm.pbf",
+   "bbox": [
+    22.1304,
+    113.813,
+    22.569,
+    114.506
+   ]
+  },
+  "hubei": {
+   "file": "hubei-latest.osm.pbf",
+   "bbox": [
+    29.0301,
+    108.3597,
+    33.2734,
+    116.1361
+   ]
+  },
+  "hunan": {
+   "file": "hunan-latest.osm.pbf",
+   "bbox": [
+    24.6327,
+    108.7792,
+    30.138,
+    114.2585
+   ]
+  },
+  "hungary": {
+   "file": "hungary-latest.osm.pbf",
+   "bbox": [
+    45.7321,
+    16.1084,
+    48.5892,
+    22.9065
+   ]
+  },
+  "iceland": {
+   "file": "iceland-latest.osm.pbf",
+   "bbox": [
+    62.8455,
+    -25.7408,
+    67.5008,
+    -12.4171
+   ]
+  },
+  "ile-de-france": {
+   "file": "ile-de-france-latest.osm.pbf",
+   "bbox": [
+    48.1192,
+    1.4451,
+    49.2427,
+    3.5604
+   ]
+  },
+  "illinois": {
+   "file": "illinois-latest.osm.pbf",
+   "bbox": [
+    36.9673,
+    -91.5161,
+    42.5094,
+    -87.4926
+   ]
+  },
+  "indonesia": {
+   "file": "indonesia-latest.osm.pbf",
+   "bbox": [
+    -11.6066,
+    92.7648,
+    6.9993,
+    141.0217
+   ]
+  },
+  "ireland-and-northern-ireland": {
+   "file": "ireland-and-northern-ireland-latest.osm.pbf",
+   "bbox": [
+    47.9605,
+    -16.3082,
+    56.8655,
+    -5.0593
+   ]
+  },
+  "jiangsu": {
+   "file": "jiangsu-latest.osm.pbf",
+   "bbox": [
+    30.759,
+    116.3538,
+    35.5551,
+    122.9453
+   ]
+  },
+  "kansai": {
+   "file": "kansai-latest.osm.pbf",
+   "bbox": [
+    33.079,
+    133.9644,
+    36.4582,
+    137.6573
+   ]
+  },
+  "kanto": {
+   "file": "kanto-latest.osm.pbf",
+   "bbox": [
+    18.6251,
+    134.0452,
+    37.1599,
+    155.6058
+   ]
+  },
+  "kyushu": {
+   "file": "kyushu-latest.osm.pbf",
+   "bbox": [
+    20.7259,
+    122.2344,
+    35.0972,
+    132.8044
+   ]
+  },
+  "madrid": {
+   "file": "madrid-latest.osm.pbf",
+   "bbox": [
+    39.8812,
+    -4.5895,
+    41.1686,
+    -3.0504
+   ]
+  },
+  "malaysia-singapore-brunei": {
+   "file": "malaysia-singapore-brunei-latest.osm.pbf",
+   "bbox": [
+    0.8308,
+    99.2561,
+    7.7368,
+    119.6683
+   ]
+  },
+  "massachusetts": {
+   "file": "massachusetts-latest.osm.pbf",
+   "bbox": [
+    40.8257,
+    -73.511,
+    42.8877,
+    -68.7195
+   ]
+  },
+  "mexico": {
+   "file": "mexico-latest.osm.pbf",
+   "bbox": [
+    9.0798,
+    -132.4952,
+    32.7207,
+    -81.6053
+   ]
+  },
+  "morocco": {
+   "file": "morocco-latest.osm.pbf",
+   "bbox": [
+    20.4037,
+    -18.1835,
+    36.162,
+    -0.9936
+   ]
+  },
+  "netherlands": {
+   "file": "netherlands-latest.osm.pbf",
+   "bbox": [
+    50.7475,
+    2.9361,
+    54.0179,
+    7.2305
+   ]
+  },
+  "nevada": {
+   "file": "nevada-latest.osm.pbf",
+   "bbox": [
+    35.0005,
+    -120.0074,
+    42.0039,
+    -114.0379
+   ]
+  },
+  "new-south-wales": {
+   "file": "new-south-wales-latest.osm.pbf",
+   "bbox": [
+    -37.7598,
+    140.9948,
+    -28.139,
+    160.0747
+   ]
+  },
+  "new-york": {
+   "file": "new-york-latest.osm.pbf",
+   "bbox": [
+    40.4392,
+    -79.824,
+    45.0713,
+    -71.6608
+   ]
+  },
+  "new-zealand": {
+   "file": "new-zealand-latest.osm.pbf",
+   "bbox": [
+    -56.7527,
+    -179.989,
+    -28.488,
+    179.9999
+   ]
+  },
+  "nord-est": {
+   "file": "nord-est-latest.osm.pbf",
+   "bbox": [
+    43.7298,
+    9.1955,
+    47.311,
+    14.826
+   ]
+  },
+  "nord-ovest": {
+   "file": "nord-ovest-latest.osm.pbf",
+   "bbox": [
+    43.4393,
+    5.5347,
+    47.0601,
+    11.4334
+   ]
+  },
+  "northern-zone": {
+   "file": "northern-zone-latest.osm.pbf",
+   "bbox": [
+    23.0469,
+    69.1699,
+    36.1379,
+    80.1675
+   ]
+  },
+  "norway": {
+   "file": "norway-latest.osm.pbf",
+   "bbox": [
+    57.5532,
+    -11.368,
+    81.052,
+    35.5271
+   ]
+  },
+  "peru": {
+   "file": "peru-latest.osm.pbf",
+   "bbox": [
+    -20.3055,
+    -86.0251,
+    0.06,
+    -68.5544
+   ]
+  },
+  "philippines": {
+   "file": "philippines-latest.osm.pbf",
+   "bbox": [
+    4.3827,
+    112.1661,
+    21.5302,
+    127.0742
+   ]
+  },
+  "poland": {
+   "file": "poland-latest.osm.pbf",
+   "bbox": [
+    48.9864,
+    13.9902,
+    55.2283,
+    24.161
+   ]
+  },
+  "portugal": {
+   "file": "portugal-latest.osm.pbf",
+   "bbox": [
+    29.2514,
+    -33.6165,
+    42.1639,
+    -6.1795
+   ]
+  },
+  "provence-alpes-cote-d-azur": {
+   "file": "provence-alpes-cote-d-azur-latest.osm.pbf",
+   "bbox": [
+    42.3154,
+    4.1447,
+    45.1289,
+    7.8877
+   ]
+  },
+  "rhone-alpes": {
+   "file": "rhone-alpes-latest.osm.pbf",
+   "bbox": [
+    44.1127,
+    3.6861,
+    46.573,
+    7.2773
+   ]
+  },
+  "shaanxi": {
+   "file": "shaanxi-latest.osm.pbf",
+   "bbox": [
+    31.695,
+    105.4801,
+    39.589,
+    111.2479
+   ]
+  },
+  "shanghai": {
+   "file": "shanghai-latest.osm.pbf",
+   "bbox": [
+    30.6391,
+    120.847,
+    31.8846,
+    123.679
+   ]
+  },
+  "sichuan": {
+   "file": "sichuan-latest.osm.pbf",
+   "bbox": [
+    26.046,
+    97.3128,
+    34.3315,
+    108.5508
+   ]
+  },
+  "south-africa": {
+   "file": "south-africa-latest.osm.pbf",
+   "bbox": [
+    -48.465,
+    14.3733,
+    -21.7754,
+    40.2702
+   ]
+  },
+  "south-korea": {
+   "file": "south-korea-latest.osm.pbf",
+   "bbox": [
+    32.3608,
+    124.3188,
+    38.6497,
+    132.3386
+   ]
+  },
+  "sudeste": {
+   "file": "sudeste-latest.osm.pbf",
+   "bbox": [
+    -25.4993,
+    -53.1189,
+    -14.2244,
+    -28.192
+   ]
+  },
+  "sweden": {
+   "file": "sweden-latest.osm.pbf",
+   "bbox": [
+    55.0265,
+    10.5414,
+    69.0664,
+    24.2247
+   ]
+  },
+  "switzerland": {
+   "file": "switzerland-latest.osm.pbf",
+   "bbox": [
+    45.8164,
+    5.9544,
+    47.8113,
+    10.4958
+   ]
+  },
+  "taiwan": {
+   "file": "taiwan-latest.osm.pbf",
+   "bbox": [
+    20.728,
+    118.1036,
+    26.603,
+    122.9312
+   ]
+  },
+  "thailand": {
+   "file": "thailand-latest.osm.pbf",
+   "bbox": [
+    5.5979,
+    97.1356,
+    20.4688,
+    105.6392
+   ]
+  },
+  "tibet": {
+   "file": "tibet-latest.osm.pbf",
+   "bbox": [
+    26.5282,
+    77.8323,
+    36.53,
+    99.1255
+   ]
+  },
+  "turkey": {
+   "file": "turkey-latest.osm.pbf",
+   "bbox": [
+    35.717,
+    25.524,
+    43.0748,
+    44.8599
+   ]
+  },
+  "victoria": {
+   "file": "victoria-latest.osm.pbf",
+   "bbox": [
+    -39.2322,
+    140.9574,
+    -33.9793,
+    150.4683
+   ]
+  },
+  "vietnam": {
+   "file": "vietnam-latest.osm.pbf",
+   "bbox": [
+    7.3822,
+    102.0959,
+    23.4021,
+    114.6423
+   ]
+  },
+  "washington": {
+   "file": "washington-latest.osm.pbf",
+   "bbox": [
+    45.5388,
+    -126.7423,
+    49.0071,
+    -116.9115
+   ]
+  },
+  "western-australia": {
+   "file": "western-australia-latest.osm.pbf",
+   "bbox": [
+    -41.1643,
+    109.9281,
+    -12.8312,
+    130.32
+   ]
+  },
+  "western-zone": {
+   "file": "western-zone-latest.osm.pbf",
+   "bbox": [
+    14.3708,
+    67.3022,
+    25.4466,
+    80.9136
+   ]
+  },
+  "yunnan": {
+   "file": "yunnan-latest.osm.pbf",
+   "bbox": [
+    19.012,
+    95.1423,
+    29.2352,
+    106.215
+   ]
+  },
+  "zhejiang": {
+   "file": "zhejiang-latest.osm.pbf",
+   "bbox": [
+    26.6916,
+    118.0206,
+    31.1908,
+    123.8379
+   ]
+  }
+ }
+}
