@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+from __future__ import annotations
 """城市浮雕工坊 Web 服务。
 
 轻量 FastAPI 后端，不 import 重管线（geopandas/trimesh），只做三件事：
