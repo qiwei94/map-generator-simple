@@ -55,6 +55,21 @@ getSession._cache = null;
 
 /** 从持久化状态恢复页面（页面加载时调用） */
 async function restoreSession() {
+  // 检查 URL ?s=xxx（跨设备恢复）
+  const urlParams = new URLSearchParams(window.location.search);
+  const cloudSid = urlParams.get("s");
+  if (cloudSid && cloudSid.length <= 64 && /^[a-zA-Z0-9]+$/.test(cloudSid)) {
+    try {
+      const r = await fetch(`/api/session/${cloudSid}`);
+      if (r.ok) {
+        const cloudData = await r.json();
+        // 云端数据覆盖本地
+        saveSession(cloudData);
+        getSession._cache = cloudData;
+      }
+    } catch (_) {}
+  }
+
   const s = getSession();
   if (!s.lastCity && !s.target) return;  // 全新用户，无需恢复
 
@@ -120,7 +135,7 @@ async function restoreSession() {
 
 /** 关键操作后自动保存（在 selectCity / confirmArea / pollJob done 等地方调用） */
 function persistState() {
-  saveSession({
+  const patch = {
     target: state.target,
     selectedStyle: state.selectedStyle,
     areaName: ($("areaName") || {}).value || "",
@@ -131,7 +146,15 @@ function persistState() {
       lat: c.lat, lon: c.lon, name: c.name, count: c.count,
       dwell_minutes: c.dwell_minutes, manual: c.manual,
     })) : null,
-  });
+  };
+  saveSession(patch);
+  // 同步到云端（跨设备恢复）
+  const s = getSession();
+  fetch("/api/session/save", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id: s.id, data: { ...s, ...patch } }),
+  }).catch(() => {});  // 静默失败，不阻断用户操作
 }
 
 /* ---------------- 数据加载 ---------------- */
@@ -1336,6 +1359,29 @@ function closeLightbox() {
 }
 
 /* ---------------- 事件绑定与启动 ---------------- */
+
+/** 复制“我的链接”到剪贴板（跨设备恢复用） */
+function copyMyLink() {
+  const s = getSession();
+  const url = `${location.origin}${location.pathname}?s=${s.id}`;
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(url).then(() => {
+      alert("链接已复制！\n在任何设备打开这个链接即可恢复当前状态。\n\n" + url);
+    });
+  } else {
+    // fallback
+    const ta = document.createElement("textarea");
+    ta.value = url;
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand("copy");
+    document.body.removeChild(ta);
+    alert("链接已复制！\n\n" + url);
+  }
+  // 确保云端有最新状态
+  persistState();
+}
+window.copyMyLink = copyMyLink;  // 暴露给 onclick
 
 window.__mvFallback = () => { window.__mvFailed = true; };
 

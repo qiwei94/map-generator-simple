@@ -1163,6 +1163,45 @@ def worker_finish(req: WorkerFinish):
     return {"ok": True, "status": job["status"]}
 
 
+# ---------------------------------------------------------------------------
+# 会话持久化（跨设备恢复，无需登录）
+# ---------------------------------------------------------------------------
+SESSION_DIR = ROOT / "data" / "sessions"
+SESSION_DIR.mkdir(parents=True, exist_ok=True)
+
+
+class SessionSave(BaseModel):
+    id: str
+    data: dict
+
+
+@app.post("/api/session/save")
+def api_session_save(req: SessionSave):
+    """保存会话状态到云端（跨设备恢复用）。"""
+    sid = req.id.strip()
+    if not sid or len(sid) > 64 or not sid.isalnum():
+        raise HTTPException(400, "非法 session id")
+    path = SESSION_DIR / f"{sid}.json"
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(req.data, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, path)
+    return {"ok": True}
+
+
+@app.get("/api/session/{sid}")
+def api_session_get(sid: str):
+    """读取会话状态。"""
+    if not sid.isalnum() or len(sid) > 64:
+        raise HTTPException(400, "非法 session id")
+    path = SESSION_DIR / f"{sid}.json"
+    if not path.exists():
+        raise HTTPException(404, "会话不存在")
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        raise HTTPException(500, "会话文件损坏")
+
+
 # 产物与前端静态托管（放在 API 路由之后）
 app.mount("/files", StaticFiles(directory=str(OUTPUT_DIR)), name="files")
 app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="static")
