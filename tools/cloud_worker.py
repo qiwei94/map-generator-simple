@@ -36,9 +36,14 @@ def sha256_file(path: Path) -> str:
 
 
 def run_task(spec: dict, dry_run: bool = False) -> tuple[bool, str, list[Path]]:
-    """执行 spec.cmd，返回 (ok, error_msg, produced_files)。"""
-    cmd = spec["cmd"]
-    cwd = spec.get("cwd", str(_ROOT))
+    """执行 spec.cmd，返回 (ok, error_msg, produced_files)。
+
+    注意：spec["cwd"] 是云端路径，本机 worker 必须用自己的 _ROOT。
+    """
+    cmd = list(spec["cmd"])  # copy，避免修改原 spec
+    # cmd[0] 是云端的 sys.executable，替换为本机 Python
+    cmd[0] = sys.executable
+    cwd = str(_ROOT)  # 始终用本机项目根，不用云端路径
     env = os.environ.copy()
     env.update(spec.get("env_extra", {}))
 

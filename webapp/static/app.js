@@ -1027,6 +1027,13 @@ async function pollJob() {
     const log = $("jobLog");
     log.textContent = j.log_tail;
     log.scrollTop = log.scrollHeight;
+    // pending = 排队等 worker 拉取；running = 正在计算
+    if (j.status === "pending") {
+      $("jobStatus").textContent = "⏳ 排队中，等待计算节点接单…";
+      $("jobStatus").className = "pill";
+      setTimeout(pollJob, 3000);
+      return;
+    }
     if (j.status === "running") { setTimeout(pollJob, 2500); return; }
     $("jobStatus").textContent = j.status === "done" ? "✓ 完成" : "✕ 失败";
     $("jobStatus").className = "pill " + j.status;

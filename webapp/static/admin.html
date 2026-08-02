@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>旅程回忆 · 管理后台</title>
+<style>
+:root { --bg: #0f1117; --card: #1a1d27; --border: #2a2d3a; --text: #e0e0e0; --dim: #888; --accent: #e0a458; --green: #4caf50; --red: #e23d3d; --blue: #5b9bd5; }
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: var(--bg); color: var(--text); font: 14px/1.6 -apple-system, sans-serif; padding: 16px; }
+h1 { font-size: 18px; margin-bottom: 12px; }
+h1 span { color: var(--accent); }
+.stats { display: flex; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
+.stat { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 10px 16px; min-width: 100px; }
+.stat .num { font-size: 24px; font-weight: 700; }
+.stat .label { font-size: 11px; color: var(--dim); }
+table { width: 100%; border-collapse: collapse; background: var(--card); border-radius: 8px; overflow: hidden; }
+th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid var(--border); font-size: 13px; }
+th { background: #22252f; color: var(--dim); font-weight: 500; }
+.status { padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+.status.pending { background: rgba(91,155,213,.15); color: var(--blue); }
+.status.running { background: rgba(224,164,88,.15); color: var(--accent); }
+.status.done { background: rgba(76,175,80,.15); color: var(--green); }
+.status.failed { background: rgba(226,61,61,.15); color: var(--red); }
+.log-btn { background: none; border: 1px solid var(--border); color: var(--dim); padding: 2px 8px; border-radius: 4px; cursor: pointer; font-size: 11px; }
+.log-btn:hover { border-color: var(--accent); color: var(--accent); }
+.log-pre { background: #111; color: #aaa; padding: 8px; border-radius: 4px; font-size: 11px; max-height: 200px; overflow: auto; white-space: pre-wrap; margin-top: 4px; display: none; }
+.refresh { float: right; background: var(--accent); color: #1a1408; border: 0; padding: 6px 14px; border-radius: 6px; cursor: pointer; font-weight: 600; }
+.auto { font-size: 11px; color: var(--dim); margin-left: 8px; }
+</style>
+</head>
+<body>
+<h1><span>◆</span> 旅程回忆 · 管理后台 <button class="refresh" onclick="load()">刷新</button><span class="auto" id="autoLabel">自动刷新 5s</span></h1>
+<div class="stats" id="stats"></div>
+<table>
+<thead><tr><th>ID</th><th>城市</th><th>模式</th><th>风格</th><th>状态</th><th>耗时</th><th>提交时间</th><th>日志</th></tr></thead>
+<tbody id="tbody"></tbody>
+</table>
+<script>
+let autoTimer = null;
+async function load() {
+  try {
+    const r = await fetch("/api/jobs");
+    const jobs = r.ok ? (await r.json()).jobs : [];
+    // stats
+    const counts = { pending: 0, running: 0, done: 0, failed: 0 };
+    jobs.forEach(j => counts[j.status] = (counts[j.status] || 0) + 1);
+    document.getElementById("stats").innerHTML =
+      `<div class="stat"><div class="num">${jobs.length}</div><div class="label">总任务</div></div>` +
+      `<div class="stat"><div class="num" style="color:var(--blue)">${counts.pending}</div><div class="label">排队中</div></div>` +
+      `<div class="stat"><div class="num" style="color:var(--accent)">${counts.running}</div><div class="label">计算中</div></div>` +
+      `<div class="stat"><div class="num" style="color:var(--green)">${counts.done}</div><div class="label">已完成</div></div>` +
+      `<div class="stat"><div class="num" style="color:var(--red)">${counts.failed}</div><div class="label">失败</div></div>`;
+    // table
+    const tb = document.getElementById("tbody");
+    tb.innerHTML = jobs.map(j => {
+      const t = new Date((Date.now() - j.elapsed_s * 1000)).toLocaleTimeString("zh-CN", {hour:"2-digit",minute:"2-digit",second:"2-digit"});
+      const logId = "log_" + j.id;
+      return `<tr>
+        <td><code>${j.id}</code></td>
+        <td>${j.city_title || j.city}</td>
+        <td>${j.mode}</td>
+        <td>${j.style || "-"}</td>
+        <td><span class="status ${j.status}">${j.status}</span></td>
+        <td>${j.elapsed_s}s</td>
+        <td>${t}</td>
+        <td><button class="log-btn" onclick="toggleLog('${logId}')">查看</button>
+            <pre class="log-pre" id="${logId}">${escHtml(j.log_tail || "(无日志)")}</pre></td>
+      </tr>`;
+    }).join("");
+  } catch (e) {
+    document.getElementById("tbody").innerHTML = `<tr><td colspan="8" style="color:var(--red)">加载失败: ${e.message}</td></tr>`;
+  }
+}
+function toggleLog(id) {
+  const el = document.getElementById(id);
+  el.style.display = el.style.display === "block" ? "none" : "block";
+}
+function escHtml(s) { return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+load();
+autoTimer = setInterval(load, 5000);
+</script>
+</body>
+</html>
