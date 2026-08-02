@@ -15,6 +15,125 @@ const state = {
   cityTextFilter: "",    // 文字筛选
 };
 
+/* ---------------- 会话持久化（localStorage）---------------- */
+// 用户关掉页面再回来，自动恢复上次状态，不浪费已渲染的产物。
+// 不存照片原图（隐私），只存 GPS 坐标 + 文件名 + city slug。
+
+const SESSION_KEY = "jr_session";
+
+function getSession() {
+  try {
+    const raw = localStorage.getItem(SESSION_KEY);
+    if (raw) return JSON.parse(raw);
+  } catch (_) {}
+  // 首次访问：生成匿名 session
+  const session = {
+    id: crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36),
+    createdAt: Date.now(),
+    // 持久化字段
+    target: null,          // {kind, city, title, prototype}
+    selectedStyle: null,
+    areaName: "",
+    photoPoints: [],       // [{lat, lon, name}] 照片 GPS 坐标（不含原图）
+    journeyClusters: null, // [{lat, lon, name, count}]
+    lastCity: null,        // 最近一次生成/查看的 city slug
+    lastBbox: null,        // 最近取景框
+  };
+  saveSession(session);
+  return session;
+}
+
+function saveSession(patch) {
+  try {
+    const s = getSession._cache || getSession();
+    if (patch) Object.assign(s, patch);
+    localStorage.setItem(SESSION_KEY, JSON.stringify(s));
+    getSession._cache = s;
+  } catch (_) {}
+}
+getSession._cache = null;
+
+/** 从持久化状态恢复页面（页面加载时调用） */
+async function restoreSession() {
+  const s = getSession();
+  if (!s.lastCity && !s.target) return;  // 全新用户，无需恢复
+
+  // 恢复 target
+  if (s.target) {
+    state.target = s.target;
+  }
+  if (s.selectedStyle) {
+    state.selectedStyle = s.selectedStyle;
+  }
+  if (s.areaName) {
+    const el = $("areaName");
+    if (el && !el.value) el.value = s.areaName;
+  }
+
+  // 恢复地图位置
+  if (s.lastBbox) {
+    initMap();
+    const b = s.lastBbox;
+    map.state.map.fitBounds([[b[0], b[1]], [b[2], b[3]]], { padding: [16, 16] });
+    setTierNear(kmFromBbox(b));
+    syncSize();
+    setTimeout(updateRect, 200);
+  }
+
+  // 恢复照片标记点
+  if (s.photoPoints && s.photoPoints.length) {
+    initMap();
+    for (const p of s.photoPoints) {
+      L.marker([p.lat, p.lon]).addTo(map.state.map)
+        .bindPopup(`📷 ${p.name || "照片位置"}`);
+    }
+  }
+
+  // 恢复旅程轨迹
+  if (s.journeyClusters && s.journeyClusters.length) {
+    initMap();
+    map.journey = { clusters: s.journeyClusters, layerGroup: null };
+    redrawJourney();
+  }
+
+  // 恢复产物展示
+  if (s.lastCity) {
+    try {
+      const r = await fetchJSON(`/api/artifacts/${s.lastCity}`);
+      lastArtifacts = r.artifacts;
+      renderViewer();
+      renderDownloads();
+    } catch (_) {}
+    // 恢复画廊
+    try {
+      state.gallery = await fetchJSON(`/api/gallery/${s.lastCity}`);
+      renderStep3();
+    } catch (_) {}
+  }
+
+  // 提示用户
+  const hint = $("photoHint");
+  if (hint && s.lastCity) {
+    hint.textContent = `已恢复上次会话（${s.lastCity}），产物仍在云端 ✓`;
+  }
+}
+
+/** 关键操作后自动保存（在 selectCity / confirmArea / pollJob done 等地方调用） */
+function persistState() {
+  saveSession({
+    target: state.target,
+    selectedStyle: state.selectedStyle,
+    areaName: ($("areaName") || {}).value || "",
+    lastCity: state.target.city || (lastArtifacts ? state.jobSlug : null),
+    lastBbox: map.state.map ? currentBbox() : null,
+    photoPoints: map.photoPoint ? [{ lat: map.photoPoint[0], lon: map.photoPoint[1], name: "" }] : [],
+    journeyClusters: map.journey ? map.journey.clusters.map(c => ({
+      lat: c.lat, lon: c.lon, name: c.name, count: c.count,
+      dwell_minutes: c.dwell_minutes, manual: c.manual,
+    })) : null,
+  });
+}
+
 /* ---------------- 数据加载 ---------------- */
 
 async function fetchJSON(url, opts) {
@@ -152,6 +271,7 @@ async function selectCity(name) {
   renderStep3();
   renderViewer();
   renderDownloads();
+  persistState();
 }
 
 /* ---------------- 地图与取景 ---------------- */
@@ -486,6 +606,7 @@ $("photoInput").onchange = async () => {
         `已定位 ${r.lat.toFixed(5)}, ${r.lon.toFixed(5)}` +
         (r.pbf ? "，该区域有本地数据 ✓" : "，⚠ 该区域暂无本地 OSM 数据");
       renderStep3();
+      persistState();
     } catch (err) {
       clearPhotoPoint();
       $("photoHint").textContent = "✕ " + err.message;
@@ -568,6 +689,7 @@ function renderJourney(r, total) {
   $("photoHint").textContent = "轨迹已上图，生成时带编号针 + 金色轨迹线";
   renderStep3();
   startGapFlow(r.gaps || []);
+  persistState();
 }
 
 /* ---------------- Step 1：缺口追问（只问照片里没有的）---------------- */
@@ -1069,7 +1191,7 @@ async function pollJob() {
       }
       return;
     }
-    if (j.status === "done") await refreshArtifacts(city);
+    if (j.status === "done") { await refreshArtifacts(city); persistState(); }
   } catch (err) {
     $("jobStatus").textContent = "轮询中断: " + err.message;
     state.job = null;
@@ -1223,9 +1345,10 @@ $("lightbox").onclick = closeLightbox;
 $("lightboxClose").onclick = closeLightbox;
 
 syncSize();
-window.addEventListener("load", () => {
+window.addEventListener("load", async () => {
   initMap();
   lmSearch("", false);   // 预取目录缓存，不弹下拉
+  await restoreSession();  // 恢复上次会话
 });
 
 loadCities().catch((e) => {
