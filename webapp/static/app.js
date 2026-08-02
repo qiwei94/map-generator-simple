@@ -477,14 +477,14 @@ async function lmSearch(q, show = true) {
   if (show) renderLmResults(items);
 }
 
-const SRC_LABEL = { amap: "高德", nominatim: "OSM", catalog: "" };
+const SRC_LABEL = { amap: "高德", nominatim: "", catalog: "" };
 
-/** 数据三态徽标：本地就绪不标、可拉取标蓝、无数据标红 */
+/** 数据三态徽标：对用户只展示友好文案，不暴露内部区域名 */
 function stateBadge(it) {
   if (it.data_state === "fetchable") {
-    return `<span class="lm-badge fetch">需下载 ${it.region}</span>`;
+    return '<span class="lm-badge fetch">即将开放</span>';
   }
-  if (it.data_state === "none") return '<span class="lm-badge">无数据</span>';
+  if (it.data_state === "none") return '<span class="lm-badge">即将开放</span>';
   return "";
 }
 
@@ -543,13 +543,9 @@ function selectPlace(lm) {
       `已定位：${lm.name}${lm.city ? "（" + lm.city + "）" : ""}，可微调取景`;
   } else if (lm.data_state === "fetchable") {
     state.pendingFetch = lm.fetch;
-    hint.innerHTML =
-      `${lm.name}：需先下载 <b>${lm.fetch}</b> 区域数据`
-      + ` <button class="btn-inline" id="btnFetchPbf">↓ 下载数据</button>`;
-    const b = $("btnFetchPbf");
-    if (b) b.onclick = () => fetchPbf(lm.fetch);
+    hint.textContent = `${lm.name}：数据正在准备中，敬请期待`;
   } else {
-    hint.textContent = `${lm.name}：不在数据覆盖范围内（共 80 个区域）`;
+    hint.textContent = `${lm.name}：该区域即将开放，敬请期待`;
   }
   renderStep3();
   renderViewer();
@@ -627,7 +623,7 @@ $("photoInput").onchange = async () => {
         .bindPopup("📷 照片拍摄点").openPopup();
       $("photoHint").textContent =
         `已定位 ${r.lat.toFixed(5)}, ${r.lon.toFixed(5)}` +
-        (r.pbf ? "，该区域有本地数据 ✓" : "，⚠ 该区域暂无本地 OSM 数据");
+        (r.pbf ? "，该区域可生成 ✓" : "，该区域即将开放");
       renderStep3();
       persistState();
     } catch (err) {
@@ -706,7 +702,7 @@ function renderJourney(r, total) {
   const named = clusters.filter((c) => c.name).map((c) => c.name);
   if (named.length) html += `<br>${named.join(" → ")}`;
   if (r.suggest_split) html += "<br>⚠ 跨度较大，建议按天缩小取景框逐段生成";
-  if (!r.pbf) html += "<br>⚠ 该区域暂无本地 OSM 数据";
+  if (!r.pbf) html += "<br>⚠ 该区域即将开放，敬请期待";
   $("journeySummary").innerHTML = html;
   $("journeySummary").hidden = false;
   $("photoHint").textContent = "轨迹已上图，生成时带编号针 + 金色轨迹线";

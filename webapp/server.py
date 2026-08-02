@@ -802,9 +802,9 @@ def api_styles(req: StylesRequest):
         raise HTTPException(400, "bbox 南北/东西颠倒")
     st = _pbf_status(bbox)
     if st["state"] == "fetchable":
-        raise HTTPException(409, f"需先下载 {st['fetch']} 区域数据")
+        raise HTTPException(409, "该区域数据正在准备中，敬请期待")
     if st["state"] == "none":
-        raise HTTPException(422, "该区域不在数据覆盖范围内")
+        raise HTTPException(422, "该区域即将开放，敬请期待")
 
     slug = req.slug.strip() if req.slug.strip() else _custom_slug(bbox)
     if _city_running(slug):
@@ -914,10 +914,9 @@ def api_generate(req: GenerateRequest):
             raise HTTPException(400, "区域太大（建议单边不超过约 40km）")
         st = _pbf_status(bbox)
         if st["state"] == "fetchable":
-            raise HTTPException(409, f"需先拉取 {st['fetch']} 区域数据"
-                                     f"（点『下载数据』或调 /api/fetch-pbf）")
+            raise HTTPException(409, "该区域数据正在准备中，敬请期待")
         if st["state"] == "none":
-            raise HTTPException(422, "该区域不在数据覆盖范围内（共 80 个区域）")
+            raise HTTPException(422, "该区域即将开放，敬请期待")
         pbf = st["pbf"]
         city = _custom_slug(bbox)
         city_title = req.area.name.strip() or "自定义区域"
@@ -943,9 +942,9 @@ def api_generate(req: GenerateRequest):
         s, w, n, e = bbox
         st = _pbf_status(bbox)
         if st["state"] == "fetchable":
-            raise HTTPException(409, f"需先拉取 {st['fetch']} 区域数据")
+            raise HTTPException(409, "该区域数据正在准备中，敬请期待")
         if st["state"] == "none":
-            raise HTTPException(422, "该区域不在数据覆盖范围内")
+            raise HTTPException(422, "该区域即将开放，敬请期待")
         pbf = st["pbf"]
         city = req.city
         city_title = lm_info["title"]
