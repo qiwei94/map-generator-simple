@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <meta name="theme-color" content="#14161c">
 <title>旅程回忆</title>
-<link rel="stylesheet" href="style.css?v=25">
+<link rel="stylesheet" href="style.css?v=32">
 <link rel="stylesheet" href="vendor/leaflet/leaflet.css">
 <!-- 本地自托管，无 CDN 依赖 -->
 <script type="module" src="vendor/model-viewer.min.js"
@@ -105,6 +105,10 @@
       <button class="btn btn-primary" id="btnConfirmArea">✓ 确定，看风格
         <small>约 1 分钟出 4 种风格图</small></button>
     </div>
+    <div class="lock-row" id="lockRow" hidden>
+      <span>🔒 取景已锁定（风格图基于此框生成）</span>
+      <button class="btn-inline" id="btnUnlock">重新取景</button>
+    </div>
     <div class="style-hint" id="customHint">目前可生成范围：已拉取的区域（共 80 个可用）</div>
   </section>
 
@@ -176,6 +180,6 @@
 
 <footer class="foot">旅程回忆 · 把走过的路，凝固成独一无二的实体 · <a href="#" onclick="copyMyLink();return false" style="color:var(--accent)">🔗 复制我的链接</a> · <a href="#" onclick="localStorage.removeItem('jr_session');location.href=location.pathname;return false" style="color:var(--ink-dim)">重新开始</a></footer>
 
-<script src="app.js?v=31"></script>
+<script src="app.js?v=32"></script>
 </body>
 </html>

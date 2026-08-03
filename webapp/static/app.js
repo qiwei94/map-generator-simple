@@ -13,6 +13,7 @@ const state = {
   target: { kind: "area", city: null, title: "自定义区域" },
   cityGroupFilter: "",   // 国家分组筛选
   cityTextFilter: "",    // 文字筛选
+  viewLocked: false,     // 确定取景后锁定，避免风格图与取景不匹配
 };
 
 /* ---------------- 会话持久化（localStorage）---------------- */
@@ -286,6 +287,7 @@ async function selectCity(name) {
   setTimeout(updateRect, 120);
   $("customHint").textContent =
     `已选预设城市：${c.title}（取景框已对齐官方范围，可自行微调）`;
+  unlockView();
 
   if (c.has_gallery) {
     try { state.gallery = await fetchJSON(`/api/gallery/${name}`); }
@@ -406,6 +408,36 @@ function invalidateStyles() {
   renderViewer();
 }
 
+/** 锁定取景：确定看风格后调用，禁止拖图/改挡位 */
+function lockView() {
+  state.viewLocked = true;
+  if (map.state.map) {
+    map.state.map.dragging.disable();
+    map.state.map.scrollWheelZoom.disable();
+    map.state.map.doubleClickZoom.disable();
+    map.state.map.touchZoom.disable();
+    $("leafletMap").classList.add("locked");
+  }
+  $("tierSeg").querySelectorAll("button").forEach((b) => (b.disabled = true));
+  $("lockRow").hidden = false;
+}
+
+/** 解锁取景：用户点“重新取景”，同时清除已生成的风格图 */
+function unlockView() {
+  state.viewLocked = false;
+  if (map.state.map) {
+    map.state.map.dragging.enable();
+    map.state.map.scrollWheelZoom.enable();
+    map.state.map.doubleClickZoom.enable();
+    map.state.map.touchZoom.enable();
+    $("leafletMap").classList.remove("locked");
+  }
+  $("tierSeg").querySelectorAll("button").forEach((b) => (b.disabled = false));
+  $("lockRow").hidden = true;
+  invalidateStyles();   // 框要变了，旧风格图作废
+}
+$("btnUnlock").onclick = unlockView;
+
 async function confirmArea() {
   if (!map.state.map) { initMap(); return; }
   // 切新区域 → 2D 图回初始状态（不放旧图/坏图）
@@ -442,6 +474,7 @@ async function confirmArea() {
     $("jobStatus").textContent = "生成 4 种风格的平面图中";
     $("jobStatus").className = "pill";
     $("galleryHint").textContent = "正在生成…约 1 分钟";
+    lockView();   // 任务已开始，锁定取景框
     pollJob();
   } catch (err) {
     btn.disabled = false;
@@ -535,6 +568,7 @@ function selectPlace(lm) {
   syncSize();
   map.state.map.fitBounds([[b[0], b[1]], [b[2], b[3]]], { padding: [16, 16] });
   setTimeout(updateRect, 120);
+  unlockView();
   // 数据三态：本地就绪 / 可拉取（给按钮）/ 不在覆盖范围
   const hint = $("customHint");
   state.pendingFetch = null;
