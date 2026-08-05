@@ -21,17 +21,18 @@ const state = {
 // 不存照片原图（隐私），只存 GPS 坐标 + 文件名 + city slug。
 
 const SESSION_KEY = "jr_session";
+let _sessionCache = null;   // 模块级缓存，避免递归
 
 function getSession() {
+  if (_sessionCache) return _sessionCache;
   try {
     const raw = localStorage.getItem(SESSION_KEY);
-    if (raw) return JSON.parse(raw);
+    if (raw) { _sessionCache = JSON.parse(raw); return _sessionCache; }
   } catch (_) {}
-  // 首次访问：生成匿名 session
-  const session = {
-    id: crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36),
+  // 首次访问：生成匿名 session（id 去连字符，服务端校验 isalnum）
+  _sessionCache = {
+    id: (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2)).replace(/-/g, ""),
     createdAt: Date.now(),
-    // 持久化字段
     target: null,          // {kind, city, title, prototype}
     selectedStyle: null,
     areaName: "",
@@ -40,19 +41,19 @@ function getSession() {
     lastCity: null,        // 最近一次生成/查看的 city slug
     lastBbox: null,        // 最近取景框
   };
-  saveSession(session);
-  return session;
+  _writeSession();
+  return _sessionCache;
+}
+
+function _writeSession() {
+  try { localStorage.setItem(SESSION_KEY, JSON.stringify(_sessionCache)); } catch (_) {}
 }
 
 function saveSession(patch) {
-  try {
-    const s = getSession._cache || getSession();
-    if (patch) Object.assign(s, patch);
-    localStorage.setItem(SESSION_KEY, JSON.stringify(s));
-    getSession._cache = s;
-  } catch (_) {}
+  const s = getSession();
+  if (patch) Object.assign(s, patch);
+  _writeSession();
 }
-getSession._cache = null;
 
 /** 从持久化状态恢复页面（页面加载时调用） */
 async function restoreSession() {
@@ -65,8 +66,8 @@ async function restoreSession() {
       if (r.ok) {
         const cloudData = await r.json();
         // 云端数据覆盖本地
-        saveSession(cloudData);
-        getSession._cache = cloudData;
+        _sessionCache = cloudData;
+        _writeSession();
       }
     } catch (_) {}
   }
