@@ -1158,6 +1158,7 @@ async function startJob(mode) {
     $("jobStatus").textContent =
       (mode === "draft" ? "生成 3D 预览中" : "生成打印模型中") + styleLabel + extra;
     $("jobStatus").className = "pill";
+    showJobToken(resp.job_id);
     setBusy(true);
     pollJob();
   } catch (err) {
@@ -1252,6 +1253,54 @@ async function pollJob() {
     setBusy(false);
   }
 }
+
+/* ---------------- 任务令牌：展示 + 找回 ---------------- */
+
+/** 从令牌或完整链接中提取 job_id */
+function parseJobToken(input) {
+  const s = (input || "").trim();
+  const m = s.match(/[?&]job=([a-zA-Z0-9]+)/);
+  if (m) return m[1];
+  if (/^[a-zA-Z0-9]{6,16}$/.test(s)) return s;   // 纯令牌
+  return null;
+}
+
+/** 生成任务后展示令牌 + 复制链接 */
+function showJobToken(job_id) {
+  $("jobTokenRow").hidden = false;
+  $("jobToken").textContent = job_id;
+  $("btnCopyJob").onclick = () => {
+    const url = `${location.origin}${location.pathname}?job=${job_id}`;
+    const done = () => { $("btnCopyJob").textContent = "已复制✓";
+      setTimeout(() => { $("btnCopyJob").textContent = "复制链接"; }, 1500); };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(url).then(done);
+    } else { done(); }
+  };
+}
+
+/** 用令牌/链接找回任务：查状态，完成则加载产物 */
+async function lookupJob(input) {
+  const id = parseJobToken(input);
+  if (!id) { alert("令牌格式不对，请输入 6-16 位字母数字或完整链接"); return; }
+  try {
+    const j = await fetchJSON(`/api/jobs/${id}`);
+    state.job = { id, mode: j.mode, city: j.city, slug: j.city };
+    $("jobPanel").hidden = false;
+    showJobToken(id);
+    $("jobStatus").textContent = "查询中…";
+    $("jobStatus").className = "pill";
+    setBusy(true);
+    pollJob();
+  } catch (err) {
+    alert("找不到该任务: " + err.message);
+  }
+}
+
+$("btnJobLookup").onclick = () => lookupJob($("jobLookup").value);
+$("jobLookup").onkeydown = (e) => {
+  if (e.key === "Enter") lookupJob($("jobLookup").value);
+};
 
 let lastArtifacts = null;
 
@@ -1426,6 +1475,9 @@ window.addEventListener("load", async () => {
   initMap();
   lmSearch("", false);   // 预取目录缓存，不弹下拉
   await restoreSession();  // 恢复上次会话
+  // 任务链接 ?job=xxx → 自动找回该任务
+  const jobParam = new URLSearchParams(window.location.search).get("job");
+  if (jobParam) { $("jobLookup").value = jobParam; lookupJob(jobParam); }
 });
 
 loadCities().catch((e) => {

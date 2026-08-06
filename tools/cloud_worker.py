@@ -46,6 +46,14 @@ def run_task(spec: dict, dry_run: bool = False) -> tuple[bool, str, list[Path]]:
     cwd = str(_ROOT)  # 始终用本机项目根，不用云端路径
     env = os.environ.copy()
     env.update(spec.get("env_extra", {}))
+    # spec 的 PATH 是服务端的，会覆盖本机 PATH，冲掉 pyosmium shim。
+    # 强制把「python3→python3.9」shim 和本机 python bin 加回最前，
+    # 让 tools/osmium 的 shebang(#!/usr/bin/env python3) 跑在带 pyosmium 的环境。
+    _pybin = os.path.dirname(sys.executable)
+    _shim = "/opt/pyshim"
+    env["PATH"] = os.pathsep.join(
+        [p for p in (_shim, _pybin) if os.path.isdir(p)]
+        + [env.get("PATH", "")])
 
     if dry_run:
         # dry-run：不真跑管线，生成一个假产物验证回路
@@ -61,8 +69,12 @@ def run_task(spec: dict, dry_run: bool = False) -> tuple[bool, str, list[Path]]:
 
     print(f"  [worker] 执行: {' '.join(cmd[:4])}...")
     t0 = time.time()
-    proc = subprocess.run(cmd, cwd=cwd, env=env,
-                          capture_output=True, text=True, timeout=600)
+    try:
+        proc = subprocess.run(cmd, cwd=cwd, env=env,
+                              capture_output=True, text=True, timeout=1800)
+    except subprocess.TimeoutExpired:
+        print(f"  [worker] 超时 (>1800s)")
+        return False, "计算超时（>1800s），区域可能过大", []
     wall = time.time() - t0
     if proc.returncode != 0:
         err = (proc.stderr or proc.stdout or "")[-500:]
