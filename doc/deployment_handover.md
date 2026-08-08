@@ -36,8 +36,9 @@
 - **NFS 客户端**：`/root/map-cache` 以 ro 挂载自 `172.16.164.53:/root/map-cache`。
 - 项目：`/root/map-generator-simple`；`pbf_cache` 软链 → `/root/map-cache/pbf_cache`。
 - systemd：
-  - `studio.service`：all-in-one 本地模式，`STUDIO_PORT=80`，`MAP_GEN_CACHE_DIR=/root/map-cache`，PATH 含 `/opt/pyshim`。← 目标主入口
+  - `studio.service`：all-in-one 本地模式，`STUDIO_PORT=80`，`MAP_GEN_CACHE_DIR=/root/map-cache`，PATH 含 `/opt/pyshim`。← **当前主入口，已 active，公网 `http://118.31.184.240` 可访问（55 城市）**
   - `worker.service`：已 disable（本地模式不需要）。
+- 已从 A 补齐系统库到 `/usr/lib64/`：`libssl.so.1.1`、`libcrypto.so.1.1`、`libffi.so.6.0.2`（python3.9 依赖，B 原本缺失）。
 
 ---
 
@@ -70,8 +71,8 @@ ssh -J root@8.136.0.235 root@172.16.164.54
 
 1. **B 磁盘 40G 装不下全部数据（PBF32G+DEM43G=75G）**。目前数据走 NFS（ro）。**DEM 走 NFS 随机读很慢**，draft 曾超时。→ 建议把 B 磁盘在线扩容到 ≥100G，然后 `rsync` PBF+DEM 到 B 本地盘，改 `MAP_GEN_CACHE_DIR` 与 `pbf_cache` 软链指向本地，速度才能上来。
 2. **styles 任务（gen_area_gallery）在 B 上有 aesthetic import 报错**，未修。draft 不受影响。需查 `aesthetic/loop.py` 缺什么依赖。
-3. B 的 `studio.service` 最后状态是 activating，需确认 `systemctl is-active studio` 且 `curl http://127.0.0.1:80/api/cities` 正常，并验证公网 `http://118.31.184.240` 可访问。
-4. 确认主入口后，可停掉 A 上的旧 studio（A 只留 NFS+数据）。
+3. ~~B 的 studio 状态 activating~~ 已解决：补 libssl/libcrypto 后 active，公网可访问。
+4. 主入口已切到 B（118.31.184.240）。A 上的旧 studio 可停，A 只留 NFS+数据。
 
 ## 六、常用运维命令（在 B 上）
 
