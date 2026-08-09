@@ -1201,9 +1201,8 @@ async function pollJob() {
   try {
     const j = await fetchJSON(`/api/jobs/${state.job.id}`);
     $("jobElapsed").textContent = fmtDuration(j.elapsed_s);
-    const log = $("jobLog");
-    log.textContent = j.log_tail;
-    log.scrollTop = log.scrollHeight;
+    // 运行日志不外露；只展示友好状态，失败时显示归类后的异常提示
+    const hint = $("jobHint");
     // pending = 排队等 worker 拉取；running = 正在计算
     if (j.status === "pending") {
       $("jobStatus").textContent = "⏳ 排队中，等待计算节点接单…";
@@ -1211,9 +1210,21 @@ async function pollJob() {
       setTimeout(pollJob, 3000);
       return;
     }
-    if (j.status === "running") { setTimeout(pollJob, 2500); return; }
-    $("jobStatus").textContent = j.status === "done" ? "✓ 完成" : "✕ 失败";
+    if (j.status === "running") {
+      $("jobStatus").textContent = "⏳ 正在生成，请耐心等待…";
+      $("jobStatus").className = "pill";
+      setTimeout(pollJob, 2500);
+      return;
+    }
+    const failed = j.status !== "done";
+    $("jobStatus").textContent = failed ? "✕ 失败" : "✓ 完成";
     $("jobStatus").className = "pill " + j.status;
+    if (failed) {
+      hint.textContent = j.error_msg || "生成失败，请稍后重试";
+      hint.hidden = false;
+    } else {
+      hint.hidden = true;
+    }
     const { city, mode, region, slug } = state.job;
     state.jobSlug = slug;
     state.job = null;
@@ -1242,7 +1253,7 @@ async function pollJob() {
           $("galleryHint").textContent = "风格图加载失败: " + err.message;
         }
       } else {
-        $("galleryHint").textContent = "风格图生成失败，请看下方日志";
+        $("galleryHint").textContent = j.error_msg || "风格图生成失败，请稍后重试";
       }
       return;
     }

@@ -183,12 +183,10 @@ body {
   background: #12141b; padding: 2px 8px; border-radius: 6px;
   color: var(--accent); font-family: Consolas, Menlo, monospace;
 }
-.job-log {
-  font-family: Consolas, Menlo, monospace;
-  font-size: 10.5px; line-height: 1.55;
-  color: #8fa08f;
-  max-height: 200px; overflow-y: auto;
-  white-space: pre-wrap; word-break: break-all;
+.job-hint {
+  font-size: 12.5px; line-height: 1.5;
+  color: #d98c8c;
+  margin: 6px 0 0;
 }
 
 /* 下载区 */

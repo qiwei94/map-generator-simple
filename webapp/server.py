@@ -172,19 +172,60 @@ class GenerateRequest(BaseModel):
     markers: list[list[float]] = []   # [[lat, lon], ...] 标注点（附近最高处染红）
 
 
-def _job_public(job: dict) -> dict:
-    """任务对外视图（去掉 proc 等内部字段）。"""
-    elapsed = (job.get("ended") or time.time()) - job["started"]
+# 面向用户的异常分类：内部日志不外露，失败时只返回其中一类
+# (code, 用户可读提示)
+ERROR_CATEGORIES = {
+    "oom":           "系统内存不足，请换更小的区域重试",
+    "timeout":       "计算超时，区域可能过大，请缩小范围重试",
+    "data_missing":  "该区域地图数据不足，请换个区域或先下载数据",
+    "network":       "网络异常，外部数据拉取失败，请稍后重试",
+    "render_failed": "渲染失败，请稍后重试或调整区域",
+}
+
+# 日志关键字 → 异常分类（顺序即优先级）
+_ERROR_PATTERNS = [
+    ("timeout", ("TimeoutExpired", "计算超时", "timeout")),
+    ("data_missing", ("Filtered PBF is empty", "no coverage", "数据不足",
+                      "未覆盖", "PBF not found", "找不到对应区域", "no {tag_type}")),
+    ("network", ("ConnectionError", "Max retries exceeded", "下载失败",
+                 "Download failed", "requests.exceptions", "ConnectTimeout")),
+    ("oom", ("MemoryError", "Cannot allocate memory", "内存不足", "Killed")),
+]
+
+
+def _classify_error_text(text: str, retcode: int | None = None) -> tuple:
+    """把子进程日志/错误文本归到几类用户可读异常。返回 (code, msg)。"""
+    if retcode == -9:  # SIGKILL，几乎必是 OOM killer
+        return "oom", ERROR_CATEGORIES["oom"]
+    for code, kws in _ERROR_PATTERNS:
+        for kw in kws:
+            if kw.lower() in (text or "").lower():
+                return code, ERROR_CATEGORIES[code]
+    return "render_failed", ERROR_CATEGORIES["render_failed"]
+
+
+def _classify_job_error(job: dict, retcode: int) -> tuple:
+    """读任务日志尾部做异常分类（日志本身不外露）。"""
     tail = ""
     try:
         with open(job["log_path"], "r", encoding="utf-8", errors="replace") as f:
             f.seek(0, os.SEEK_END)
             size = f.tell()
-            f.seek(max(0, size - 4000))
+            f.seek(max(0, size - 8000))
             tail = f.read()
     except OSError:
         pass
-    return {
+    return _classify_error_text(tail, retcode)
+
+
+def _job_public(job: dict, include_log: bool = False) -> dict:
+    """任务对外视图（去掉 proc 等内部字段）。
+
+    运行日志默认不外露；include_log=True 仅供管理页排障用。
+    失败时返回分类后的 error_code/error_msg，不返回原始日志。
+    """
+    elapsed = (job.get("ended") or time.time()) - job["started"]
+    out = {
         "id": job["id"],
         "city": job["city"],
         "city_title": job.get("city_title") or job["city"],
@@ -192,8 +233,24 @@ def _job_public(job: dict) -> dict:
         "style": job.get("style"),
         "status": job["status"],
         "elapsed_s": round(elapsed, 1),
-        "log_tail": tail,
     }
+    if job["status"] == "failed":
+        out["error_code"] = job.get("error_code", "render_failed")
+        out["error_msg"] = job.get("error_msg",
+                                   ERROR_CATEGORIES["render_failed"])
+    if include_log:
+        tail = ""
+        try:
+            with open(job["log_path"], "r", encoding="utf-8",
+                      errors="replace") as f:
+                f.seek(0, os.SEEK_END)
+                size = f.tell()
+                f.seek(max(0, size - 4000))
+                tail = f.read()
+        except OSError:
+            pass
+        out["log_tail"] = tail
+    return out
 
 
 def _watch_job(job: dict):
@@ -220,6 +277,8 @@ def _watch_job(job: dict):
     with JOBS_LOCK:
         job["ended"] = time.time()
         job["status"] = "done" if ok else "failed"
+        if not ok:
+            job["error_code"], job["error_msg"] = _classify_job_error(job, ret)
         _save_jobs()
 
 
@@ -1021,19 +1080,19 @@ def api_generate(req: GenerateRequest):
 
 
 @app.get("/api/jobs/{job_id}")
-def api_job(job_id: str):
+def api_job(job_id: str, include_log: bool = False):
     with JOBS_LOCK:
         job = JOBS.get(job_id)
     if job is None:
         raise HTTPException(404, "任务不存在")
-    return _job_public(job)
+    return _job_public(job, include_log=include_log)
 
 
 @app.get("/api/jobs")
-def api_jobs():
+def api_jobs(include_log: bool = False):
     with JOBS_LOCK:
         jobs = list(JOBS.values())
-    return {"jobs": [_job_public(j) for j in
+    return {"jobs": [_job_public(j, include_log=include_log) for j in
                      sorted(jobs, key=lambda j: j["started"], reverse=True)]}
 
 
@@ -1153,6 +1212,9 @@ def worker_finish(req: WorkerFinish):
         with JOBS_LOCK:
             job["status"] = "failed"
             job["ended"] = time.time()
+            # worker 回传的错误文本同样归类，不直接外露
+            job["error_code"], job["error_msg"] = _classify_error_text(
+                req.error)
             job["error"] = req.error
             _save_jobs()
         # 清理可能的 .part 残留
