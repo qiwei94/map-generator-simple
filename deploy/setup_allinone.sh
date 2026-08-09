@@ -25,6 +25,12 @@ StandardError=append:/var/log/studio.log
 [Install]
 WantedBy=multi-user.target
 EOF
+# 关键：把项目内 dem_cache / pbf_cache 软链到本地数据盘。
+# elevation 的离线瓦片只查 项目目录/dem_cache/srtm/Nxx/xxx.hgt；若项目里没有
+# 这个目录，它会去 AWS 下载 DEM 瓦片，该源在国内云被黑洞 -> 0% CPU 无限卡死。
+ln -sfn /root/map-cache/dem_cache /root/map-generator-simple/dem_cache
+ln -sfn /root/map-cache/pbf_cache /root/map-generator-simple/pbf_cache
+
 systemctl daemon-reload
 systemctl enable studio.service
 systemctl restart studio.service

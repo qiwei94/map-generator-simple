@@ -5,6 +5,32 @@
 
 ---
 
+## 一·〇、整体架构
+
+```
+                    公网 HTTP
+  用户手机/PC ─────────────────────────────▶  机器 B（计算主力 / all-in-one）
+  http://118.31.184.240                     ┌─────────────────────────────────┐
+                                            │ studio.service（FastAPI :80）       │
+                                            │  ├─ 静态页 webapp/static/（5步流程） │
+                                            │  └─ /api/generate → 子进程          │
+                                            │      generate_city.py（单线程）    │
+                                            │      draft≈1G内存 / full≈3.4~5.7G │
+                                            │ /root/map-cache（75G 本地数据）     │
+                                            │  ├─ pbf_cache/  80个PBF (32G)      │
+                                            │  └─ dem_cache/  SRTM瓦片 (43G)     │
+                                            └───────────────┬─────────────────┘
+                                                 内网 rsync（一次性全量，后续增量同步）
+                                            ┌───────────────┴─────────────────┐
+                                            │ 机器 A（纯数据仓库 / 备份）       │
+                                            │ 80个PBF + 43G DEM 完整副本；      │
+                                            │ 后续全球新数据先落 A，再 rsync 到 B │
+                                            │ NFS 导出仅作备用，生产不走 NFS      │
+                                            └─────────────────────────────────┘
+```
+
+数据流：用户选区域 → B 本地 PBF(osmium 裁剪) + 本地 DEM(SRTM 瓦片) → 管线生成 draft GLB / full 3MF → 前端轮询 `/api/jobs/{id}` 拿结果。全程无外网依赖（数据已本地化）。
+
 ## 一、产品与代码现状
 
 - 产品「旅程回忆 / Journey Relief Studio」：上传旅行照片 → 还原轨迹/停留点 → 选风格 → 生成可 3D 打印浮雕（draft GLB 预览 + full 3MF）。
@@ -19,26 +45,55 @@
 
 ---
 
+## 一·二、怎么用（使用指南）
+
+### 用户视角（产品使用）
+1. 手机/浏览器打开 **http://118.31.184.240**（无需安装，无需登录）。
+2. 五步流程：**选位置 → 定取景 → 挑风格 → 3D预览 → 打印文件**；也可上传旅行照片走旅程模式（自动还原轨迹/停留点）。
+3. draft 预览约 4.5 分钟（2 核算力上限）；生成后页面给出 **job 令牌 + 分享链接**（`?job=xxx`），换设备可凭令牌/链接找回任务；会话自动保存（`?s=xxx`）。
+
+### 运维视角（日常管理）
+```bash
+# 看服务 / 重启 / 看日志（在 B 上）
+systemctl status studio ; systemctl restart studio ; tail -f /var/log/studio.log
+# 看任务队列与结果
+ls /root/map-generator-simple/tmp/webapp_jobs/
+cat /root/map-generator-simple/tmp/webapp_jobs/_jobs.json
+# 机器健康（CPU/内存/磁盘）
+uptime ; free -h ; df -h /
+```
+
+### 新数据接入流程（全球扩容）
+1. 在 A 上下载新区域的 PBF/DEM 到 `/root/map-cache/`（A 有外网）。
+2. **走内网**同步到 B：`rsync -a /root/map-cache/ root@172.16.164.54:/root/map-cache/`。
+3. B 无需重启即可用（数据按路径查找）。
+
+### 资源画像（为什么 CPU 高、内存低）
+- 管线是 **CPU 密集、基本单线程**：跑任务时 2 核接近满载，所以 CPU 利用率高。
+- 内存峰值仅 draft≈1G / full≈3.4~5.7G，16G 内存大量闲置 → 内存利用率低是**正常的、符合预期**。
+- 结论：**瓶颈是核数不是内存**。优化方向：升核，或用空闲内存做热门区域预生成缓存；也可以考虑同时跑 2 个任务（内存够，但会互抢 CPU，吞吐提升有限）。
+
 ## 二、设备清单（重要）
 
-### 机器 A — 数据源 / 原 Web（2核 1.8G，磁盘大）
+### 机器 A — 纯数据仓库（2核 1.8G，磁盘大 ~233G）
 - 公网 `8.136.0.235`，私网 `172.16.164.53`
-- 内存仅 1.8G，**跑不动 full 管线**，定位为数据仓库。
+- 内存仅 1.8G，**跑不动 full 管线**，只做数据/存储，不参与计算。
 - 数据：`/root/map-cache/pbf_cache/`（80 个 PBF，约 32G）+ `/root/map-cache/dem_cache/`（约 43G）。
-- 项目：`/root/map-generator-simple`（git）。
-- **NFS 服务端**：`/etc/exports` 导出 `/root/map-cache` 给 `172.16.164.0/24(ro)`。
+- 注：A 的 `/data` 盘(99G)有 **I/O 错误不可写**，勿用；数据保持在系统盘 `/root/map-cache`。
+- **NFS 服务端**：`/etc/exports` 导出 `/root/map-cache` 给 `172.16.164.0/24(ro)`（仅作备份/备用，生产不走 NFS）。
 - 有外网（可 pip、可 git）。
 
-### 机器 B — 计算 / all-in-one（2核 16G，磁盘 40G 偏小）
+### 机器 B — 计算主力 / all-in-one（2核 16G，磁盘已扩到 120G）
 - 公网 `118.31.184.240`，私网 `172.16.164.54`
-- Python 环境：`/usr/local/python3.9/`（从 A 整体拷贝，含 numpy/shapely/geopandas/trimesh/fastapi/uvicorn/pyosmium 等全部依赖）。
-- `/opt/pyshim/python3` → 软链到 python3.9（让 `tools/osmium` 的 `#!/usr/bin/env python3` shebang 跑在带 pyosmium 的环境；`tools/osmium` 必须 `chmod +x`）。
-- **NFS 客户端**：`/root/map-cache` 以 ro 挂载自 `172.16.164.53:/root/map-cache`。
-- 项目：`/root/map-generator-simple`；`pbf_cache` 软链 → `/root/map-cache/pbf_cache`。
+- 磁盘已在线扩容到 120G（`growpart /dev/vda 3` + `resize2fs /dev/vda3`）。**全量 75G 数据已 rsync 到 B 本地盘**（走内网），不再走 NFS。
+- Python 环境：`/usr/local/python3.9/`（从 A 整体拷贝）。`/opt/pyshim/python3` → 软链到 python3.9；`tools/osmium` 必须 `chmod +x`。
+- 项目：`/root/map-generator-simple`。
+  - `pbf_cache` 软链 → `/root/map-cache/pbf_cache`（本地）
+  - **`dem_cache` 软链 → `/root/map-cache/dem_cache`（本地）** ← **极其关键，见已知问题#1**
 - systemd：
-  - `studio.service`：all-in-one 本地模式，`STUDIO_PORT=80`，`MAP_GEN_CACHE_DIR=/root/map-cache`，PATH 含 `/opt/pyshim`。← **当前主入口，已 active，公网 `http://118.31.184.240` 可访问（55 城市）**
+  - `studio.service`：all-in-one 本地模式，`STUDIO_PORT=80`，`MAP_GEN_CACHE_DIR=/root/map-cache`，PATH 含 `/opt/pyshim`。← **当前主入口 active，公网 `http://118.31.184.240` 可访问**
   - `worker.service`：已 disable（本地模式不需要）。
-- 已从 A 补齐系统库到 `/usr/lib64/`：`libssl.so.1.1`、`libcrypto.so.1.1`、`libffi.so.6.0.2`（python3.9 依赖，B 原本缺失）。
+- 系统库已补齐到 `/usr/lib64/`：`libssl.so.1.1`、`libcrypto.so.1.1`、`libffi.so.6.0.2`。
 
 ---
 
@@ -69,10 +124,11 @@ ssh -J root@8.136.0.235 root@172.16.164.54
 
 ## 五、待办 / 已知问题（接手先看这里）
 
-1. **B 磁盘 40G 装不下全部数据（PBF32G+DEM43G=75G）**。目前数据走 NFS（ro）。**DEM 走 NFS 随机读很慢**，draft 曾超时。→ 建议把 B 磁盘在线扩容到 ≥100G，然后 `rsync` PBF+DEM 到 B 本地盘，改 `MAP_GEN_CACHE_DIR` 与 `pbf_cache` 软链指向本地，速度才能上来。
-2. **styles 任务（gen_area_gallery）在 B 上有 aesthetic import 报错**，未修。draft 不受影响。需查 `aesthetic/loop.py` 缺什么依赖。
-3. ~~B 的 studio 状态 activating~~ 已解决：补 libssl/libcrypto 后 active，公网可访问。
-4. 主入口已切到 B（118.31.184.240）。A 上的旧 studio 可停，A 只留 NFS+数据。
+1. **【最重要】DEM 瓦片路径黑洞卡死**。elevation 的离线瓦片只查 `项目目录/dem_cache/srtm/Nxx/xxx.hgt`；若项目里没有 `dem_cache` 目录，会去 AWS（`elevation-tiles-prod.s3.amazonaws.com`）下载，该源在国内云被黑洞 → 进程 0% CPU 死等、任务无限卡死。**必须**保证 `ln -sfn /root/map-cache/dem_cache /root/map-generator-simple/dem_cache`（`setup_allinone.sh` 已含此步）。修好前 draft 曾 0% CPU 卡死；修后 draft 实测 267s 完成。
+2. **2 核 CPU 是性能上限**。draft 约 4.5 分钟、full 更久。非 bug，是算力。要更快：升级 B 核数，或对热门区域预生成/缓存。
+3. ~~styles aesthetic import 报错~~ 已修：`aesthetic/review_agent.py` 加 `from __future__ import annotations`（py3.9 PEP604）。
+4. 主入口已切到 B（118.31.184.240）。A 旧 studio 已停，A 只留 NFS+数据（备份）。
+5. **两台机器间一切传输走内网（私网 IP），勿走公网**（公网费钱且慢）。
 
 ## 六、常用运维命令（在 B 上）
 
