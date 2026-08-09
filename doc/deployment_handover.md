@@ -1,7 +1,7 @@
 # 部署与交接文档（Deployment & Handover）
 
 > 目标：让任何接手的 agent/人 能立刻理解现状、连上设备、继续干活。
-> 最后更新：2026-08-09。Git 分支：`v0.2-with-gemeni-advise`，remote: `origin https://github.com/qiwei94/map-generator-simple.git`
+> 最后更新：2026-08-10。Git 分支：`v0.2-with-gemeni-advise`，remote: `origin https://github.com/qiwei94/map-generator-simple.git`
 
 ---
 
@@ -41,7 +41,37 @@
 - 计算管线：`generate_city.py` + `_TEXTURE_STYLE_OF_DEEPSEEK/`（单线程，内存峰值：draft≈1G，full 甜区≈3.4G，full 西湖≈5.7G）。
 - 任务令牌：生成后前端显示 job 令牌 + 复制链接（`?job=xxx`），可找回任务（`/api/jobs/{id}` 持久化在 `tmp/webapp_jobs/_jobs.json`）。
 - 会话持久化：localStorage + 云端 `/api/session/{id}`（`?s=xxx` 跨设备恢复）。
-- 测试：`pytest tests/ -m "not slow"`（约 213 passed）。
+- 测试：`pytest tests/ -m "not slow"`（约 223 passed）。
+
+### 重叠区域缓存（snap-to-grid 量化，2026-08-10 上线）
+
+痛点：两个用户框选同一区域（如西湖 ~10km）但 bbox 稍有偏移 → 缓存 key 全不同 → 整条管线重算（~5-10 分钟）。
+
+机制：`_TEXTURE_STYLE_OF_DEEPSEEK/_tile_grid.py` 的 `snap_bbox` 把**取数框**量化到 0.05°（≈5.5km）绝对网格（south/west 向下取整、north/east 向上取整），**输出框**仍是用户精确 bbox（area_km2/scale/origin/最终裁剪全部按精确框，输出质量不变）。偏移 < 一个网格的请求量化后取数框相同，全链路命中：
+- 图层 GeoJSON：`tmp/osmium_{layer}_{snapbbox}.geojson`（空结果也缓存，避免水体空框重跑 105s 的 osmium smart extract）
+- 高程网格：量化框下缓存 key 自动稳定
+- preprocess 结果：`cache/pipeline/snap_{snapbbox}/`（在量化框坐标系计算，复用时平移+裁剪回精确框）
+- 缓存写入为原子写（tmp + `os.replace`），并发安全
+
+实测（B，西湖 ~10km，draft）：冷启动 ~640s → 偏移 ~550m 的第二请求 **~30s**。
+
+运维要点：
+- 逃生门：`generate_city.py --no-snap` 回退旧行为；`--no-cache` 关闭 preprocess 缓存。
+- 清理缓存：`tmp/osmium_*.geojson`、`cache/pipeline/`、`cache/grids/`（按需手动删，无自动过期）。
+- 跨 UTM 分区的框自动回退精确模式（snap 前后 UTM zone 不一致时）。
+
+### 热门区域预热（tools/prewarm_tiles.py）
+
+读 `cities.json` 热门取景框 → 按量化格去重 → 逐个跑 `generate_city.py --draft` 填满三层缓存。新城市上线 / PBF 数据更新后跑一次：
+
+```bash
+# 在 B 上（PATH 需含 tools/osmium）
+cd /root/map-generator-simple
+export PATH=/root/map-generator-simple/tools:$PATH
+/usr/local/python3.9/bin/python3.9 tools/prewarm_tiles.py --list      # 先看计划
+/usr/local/python3.9/bin/python3.9 tools/prewarm_tiles.py --only hangzhou_westlake
+/usr/local/python3.9/bin/python3.9 tools/prewarm_tiles.py             # 全量（2 核下每格约 5~10 分钟）
+```
 
 ---
 
@@ -125,7 +155,7 @@ ssh -J root@8.136.0.235 root@172.16.164.54
 ## 五、待办 / 已知问题（接手先看这里）
 
 1. **【最重要】DEM 瓦片路径黑洞卡死**。elevation 的离线瓦片只查 `项目目录/dem_cache/srtm/Nxx/xxx.hgt`；若项目里没有 `dem_cache` 目录，会去 AWS（`elevation-tiles-prod.s3.amazonaws.com`）下载，该源在国内云被黑洞 → 进程 0% CPU 死等、任务无限卡死。**必须**保证 `ln -sfn /root/map-cache/dem_cache /root/map-generator-simple/dem_cache`（`setup_allinone.sh` 已含此步）。修好前 draft 曾 0% CPU 卡死；修后 draft 实测 267s 完成。
-2. **2 核 CPU 是性能上限**。draft 约 4.5 分钟、full 更久。非 bug，是算力。要更快：升级 B 核数，或对热门区域预生成/缓存。
+2. **2 核 CPU 是性能上限**。draft 冷启动约 5~10 分钟、full 更久。非 bug，是算力。缓解：重叠区域量化缓存 + 热门区域预热（见「一、产品与代码现状」），命中后 draft ~30s；要更快：升级 B 核数。
 3. ~~styles aesthetic import 报错~~ 已修：`aesthetic/review_agent.py` 加 `from __future__ import annotations`（py3.9 PEP604）。
 4. 主入口已切到 B（118.31.184.240）。A 旧 studio 已停，A 只留 NFS+数据（备份）。
 5. **两台机器间一切传输走内网（私网 IP），勿走公网**（公网费钱且慢）。

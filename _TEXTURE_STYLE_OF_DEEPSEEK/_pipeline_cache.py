@@ -85,8 +85,11 @@ class PipelineCache:
         elapsed = time.time() - t0
 
         try:
-            with open(path, 'wb') as f:
+            # 原子写入：并发任务写同一 key 时不产生半截文件
+            tmp_path = path + f".tmp{os.getpid()}"
+            with open(tmp_path, 'wb') as f:
                 pickle.dump(result, f, protocol=pickle.HIGHEST_PROTOCOL)
+            os.replace(tmp_path, path)
             fsize = os.path.getsize(path) / 1024
             print(f"  [cache SAVE] {tag}: saved in {elapsed:.1f}s "
                   f"({fsize:.0f} KB, key={key})")

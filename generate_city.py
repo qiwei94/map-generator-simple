@@ -28,6 +28,8 @@ if hasattr(sys.stdout, 'reconfigure'):
 from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.processors.coords import bbox_to_utm, project_geodataframe
 from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.osmium_cli_fetcher import fetch_from_cli, get_cli_fetcher
 from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.elevation import fetch_elevation_grid
+from _TEXTURE_STYLE_OF_DEEPSEEK._tile_grid import snap_bbox as _snap_bbox
+from _TEXTURE_STYLE_OF_DEEPSEEK._pipeline_cache import PipelineCache
 from _TEXTURE_STYLE_OF_DEEPSEEK.terrain import build_deepseek_terrain
 from _TEXTURE_STYLE_OF_DEEPSEEK.object4_terrain_with_holes import build_terrain_with_water_holes_manifold
 from _TEXTURE_STYLE_OF_DEEPSEEK.buildings import build_deepseek_buildings, build_deepseek_buildings_v3
@@ -145,6 +147,14 @@ def parse_args():
         '--debug-obj', action='store_true', default=False,
         help='逐个导出每个 mesh 为独立 OBJ 文件（用于 debug）'
     )
+    parser.add_argument(
+        '--no-snap', action='store_true', default=False,
+        help='关闭取数框网格量化（回退精确 bbox 取数，不做跨请求缓存复用）'
+    )
+    parser.add_argument(
+        '--no-cache', action='store_true', default=False,
+        help='禁用 preprocess 阶段缓存（强制重算）'
+    )
 
     args = parser.parse_args()
 
@@ -182,6 +192,111 @@ def parse_args():
             parser.error(f"--marker 格式: lat,lon（收到: {m}）")
 
     return args
+
+
+# =====================================================================
+# 取数框量化（snap-to-grid）辅助：重叠区域跨请求复用缓存
+# =====================================================================
+
+def _grid_shape_for(south, west, north, east, resolution):
+    """与 fetch_elevation_grid 内部一致的 rows/cols 计算。"""
+    lat_range = north - south
+    lon_range = east - west
+    if lat_range >= lon_range:
+        return resolution, max(2, int(resolution * lon_range / lat_range))
+    return max(2, int(resolution * lat_range / lon_range)), resolution
+
+
+def _crop_grid_to_bbox(grid, snap_bbox, exact_bbox, target_shape):
+    """从量化框高程网格中双线性重采样出精确框子网格。
+
+    网格约定：row 0 = south，col 0 = west（与 fetch_elevation_grid 一致）。
+    """
+    from scipy.ndimage import map_coordinates
+    fs, fw, fn, fe = snap_bbox
+    south, west, north, east = exact_bbox
+    rows, cols = grid.shape
+    tr, tc = target_shape
+    r = np.linspace((south - fs) / (fn - fs) * (rows - 1),
+                    (north - fs) / (fn - fs) * (rows - 1), tr)
+    c = np.linspace((west - fw) / (fe - fw) * (cols - 1),
+                    (east - fw) / (fe - fw) * (cols - 1), tc)
+    rr, cc = np.meshgrid(r, c, indexing="ij")
+    out = map_coordinates(grid, [rr, cc], order=1, mode="nearest")
+    return out.astype(grid.dtype, copy=False)
+
+
+def _split_polygons(geom):
+    """展平 MultiPolygon/GeometryCollection 为 Polygon 列表（丢弃非面要素）。"""
+    if geom is None or geom.is_empty:
+        return []
+    if geom.geom_type == "Polygon":
+        return [geom]
+    if geom.geom_type in ("MultiPolygon", "GeometryCollection"):
+        return [g for g in geom.geoms
+                if g.geom_type == "Polygon" and not g.is_empty]
+    return []
+
+
+def _transform_layers_to_exact(layers, dx, dy, clip_box):
+    """把 snap 本地坐标系下的 LayerPolygons 平移 (dx, dy) 并裁剪到精确框。
+
+    缓存的 preprocess 结果是在量化框坐标系里算的；复用时平移到本次请求的
+    精确坐标系，再裁到精确 bbox，语义等价于原生按精确框计算。
+    """
+    from shapely.affinity import translate
+    from shapely.geometry import box as _box
+    clip = _box(*clip_box)
+
+    def _proc_poly(p):
+        return _split_polygons(translate(p, xoff=dx, yoff=dy).intersection(clip))
+
+    BL, BL_cat = [], []
+    cats = list(layers.BL_categories)
+    if len(cats) < len(layers.BL):  # 长度异常时补齐，避免 zip 静默丢弃
+        cats.extend([None] * (len(layers.BL) - len(cats)))
+    for (p, h), cat in zip(layers.BL, cats):
+        for q in _proc_poly(p):
+            BL.append((q, h))
+            BL_cat.append(cat)
+
+    def _proc_list(polys):
+        out = []
+        for p in polys:
+            out.extend(_proc_poly(p))
+        return out
+
+    bb, bb_cls = [], []
+    if layers.block_base_classes and len(layers.block_base_classes) == len(layers.block_base):
+        for p, cls in zip(layers.block_base, layers.block_base_classes):
+            for q in _proc_poly(p):
+                bb.append(q)
+                bb_cls.append(cls)
+    else:
+        bb = _proc_list(layers.block_base)
+        bb_cls = list(layers.block_base_classes)
+
+    roads = []
+    for line, tier, flag in layers.roads_lines:
+        seg = translate(line, xoff=dx, yoff=dy).intersection(clip)
+        if seg.is_empty:
+            continue
+        if seg.geom_type == "LineString":
+            roads.append((seg, tier, flag))
+        elif seg.geom_type == "MultiLineString":
+            roads.extend((g, tier, flag) for g in seg.geoms if not g.is_empty)
+
+    layers.BL = BL
+    layers.BL_categories = BL_cat
+    layers.BO = _proc_list(layers.BO)
+    layers.VL = _proc_list(layers.VL)
+    layers.VO = _proc_list(layers.VO)
+    layers.WL = _proc_list(layers.WL)
+    layers.WO = _proc_list(layers.WO)
+    layers.block_base = bb
+    layers.block_base_classes = bb_cls
+    layers.roads_lines = roads
+    return layers
 
 
 def main():
@@ -252,9 +367,26 @@ def main():
     bbox_x_max = utm_bbox[2] - origin[0]
     bbox_y_max = utm_bbox[3] - origin[1]
 
+    # 取数框量化（snap-to-grid）：取数用量化框（跨请求缓存复用），
+    # 输出度量与最终裁剪仍用用户精确框。--no-snap 回退旧行为。
+    snap_active = not cli_args.no_snap
+    if snap_active:
+        fs, fw, fn, fe = _snap_bbox(south, west, north, east)
+        snap_info = bbox_to_utm(fs, fw, fn, fe)
+        # 量化框跨 UTM 分区时平移近似失效，回退精确取数
+        if snap_info["utm_crs"].to_string() != utm_crs.to_string():
+            print(f"  Snap disabled: fetch bbox crosses UTM zone")
+            snap_active = False
+    if not snap_active:
+        fs, fw, fn, fe = south, west, north, east
+        snap_info = bbox
+
     print(f"  Area: {width_m:.0f}m × {height_m:.0f}m = {area_km2:.1f} km² ({area_class})")
     print(f"  Scale: {scale:.6f} mm/m")
     print(f"  Resolution: {resolution}x{resolution}")
+    if snap_active:
+        print(f"  Fetch bbox (snapped): ({fs:.4f}, {fw:.4f}) → ({fn:.4f}, {fe:.4f}) "
+              f"[snap={_snap_bbox.__defaults__[0]:.2f}°]")
     print(f"  Time: {time.time() - t1:.1f}s")
 
     # =====================================================================
@@ -266,10 +398,23 @@ def main():
     t1b = time.time()
 
     try:
-        elevation_grid = fetch_elevation_grid(
-            south, west, north, east, resolution,
+        # 按量化框取数（缓存 key 稳定，重叠请求命中）；分辨率按跨度比例
+        # 放大以保持采样密度，取回后重采样裁剪到精确框。
+        exact_span = max(north - south, east - west)
+        snap_span = max(fn - fs, fe - fw)
+        res_fetch = resolution if not snap_active else int(
+            (resolution - 1) * snap_span / exact_span) + 1
+        elevation_grid_snap = fetch_elevation_grid(
+            fs, fw, fn, fe, res_fetch,
             elevation_file=cli_args.elevation_file,
         )
+        if snap_active:
+            target_shape = _grid_shape_for(south, west, north, east, resolution)
+            elevation_grid = _crop_grid_to_bbox(
+                elevation_grid_snap, (fs, fw, fn, fe),
+                (south, west, north, east), target_shape)
+        else:
+            elevation_grid = elevation_grid_snap
         print(f"  Grid shape: {elevation_grid.shape}")
         print(f"  Elevation range: {elevation_grid.min():.1f}m to {elevation_grid.max():.1f}m")
         print(f"  Time: {time.time() - t1b:.1f}s")
@@ -277,6 +422,7 @@ def main():
         print(f"  WARNING: Elevation fetch failed: {e}")
         print(f"  Using flat terrain (0m elevation)")
         elevation_grid = np.zeros((resolution, resolution), dtype=np.float64)
+        elevation_grid_snap = elevation_grid
         print(f"  Time: {time.time() - t1b:.1f}s")
 
     # =====================================================================
@@ -308,7 +454,7 @@ def main():
 
     water_gdf = fetch_from_cli(
         tag_type='water',
-        south=south, west=west, north=north, east=east,
+        south=fs, west=fw, north=fn, east=fe,
         pbf_file=PBF_FILE
     )
 
@@ -357,7 +503,7 @@ def main():
 
     vegetation_gdf = fetch_from_cli(
         tag_type='vegetation',
-        south=south, west=west, north=north, east=east,
+        south=fs, west=fw, north=fn, east=fe,
         pbf_file=PBF_FILE
     )
 
@@ -385,7 +531,7 @@ def main():
 
     buildings_gdf = fetch_from_cli(
         tag_type='building',
-        south=south, west=west, north=north, east=east,
+        south=fs, west=fw, north=fn, east=fe,
         pbf_file=PBF_FILE
     )
 
@@ -411,7 +557,7 @@ def main():
 
     roads_gdf = fetch_from_cli(
         tag_type='road',
-        south=south, west=west, north=north, east=east,
+        south=fs, west=fw, north=fn, east=fe,
         pbf_file=PBF_FILE
     )
 
@@ -433,7 +579,7 @@ def main():
 
     landuse_gdf = fetch_from_cli(
         tag_type='landuse',
-        south=south, west=west, north=north, east=east,
+        south=fs, west=fw, north=fn, east=fe,
         pbf_file=PBF_FILE
     )
 
@@ -467,15 +613,19 @@ def main():
         from _TEXTURE_STYLE_OF_DEEPSEEK.auto_params.preference_store import PreferenceStore
         from _TEXTURE_STYLE_OF_DEEPSEEK import config as _cfg
 
-        bbox_local_area_m2 = width_m * height_m
+        # snap 模式下 profile 用量化框数据：同一网格内不同请求得到完全
+        # 一致的 auto 参数，保证 preprocess 缓存指纹稳定。
+        profile_area_km2 = snap_info["area_km2"] if snap_active else area_km2
+        profile_local_area_m2 = (snap_info["width_m"] * snap_info["height_m"]
+                                 if snap_active else width_m * height_m)
         profile = detect_city_profile(
-            bbox_area_km2=area_km2,
-            elevation_grid=elevation_grid,
+            bbox_area_km2=profile_area_km2,
+            elevation_grid=elevation_grid_snap,
             buildings_gdf=buildings_gdf,
             roads_gdf=roads_gdf,
             water_gdf=water_gdf,
             vegetation_gdf=vegetation_gdf,
-            bbox_local_area_m2=bbox_local_area_m2,
+            bbox_local_area_m2=profile_local_area_m2,
         )
 
         # Layer 2: AI art direction (optional, --art-direction flag)
@@ -600,26 +750,110 @@ def main():
         _preprocess_overrides["aggregate_simplify_m_override"] = float(
             style_overrides["aggregate_simplify_m"])
 
-    layers = preprocess_layers(
-        buildings_gdf=buildings_gdf,
-        roads_gdf=roads_gdf,
-        water_gdf=water_gdf,
-        vegetation_gdf=vegetation_gdf,
-        bbox_local=bbox_local,
-        scale=scale,
-        enable_hotspot=True,
-        hotspot_relax=(auto_resolved.building_v2_hotspot_relax
-                       if auto_resolved is not None
-                       else BUILDING_V2_HOTSPOT_RELAX),
-        area_km2=area_km2,
-        landuse_gdf=landuse_gdf,
-        narrow_threshold=cli_args.narrow_threshold,
-        narrow_penalty=cli_args.narrow_penalty,
-        bbox_wgs84=(south, west, north, east),
-        utm_crs=utm_crs,
-        origin=origin,
-        **_preprocess_overrides,
-    )
+    layers = None
+    if snap_active:
+        # ---- snap 模式：preprocess 在量化框坐标系计算，跨请求缓存复用 ----
+        # 命中后平移回本次精确坐标系并裁到精确 bbox。
+        from shapely.affinity import translate as _sh_translate
+        _snap_origin = snap_info["origin"]
+        _sxoff = origin[0] - _snap_origin[0]  # exact-local → snap-local
+        _syoff = origin[1] - _snap_origin[1]
+
+        def _gdf_to_snap(g):
+            if g is None or len(g) == 0:
+                return g
+            g2 = g.copy()
+            g2["geometry"] = g2["geometry"].apply(
+                lambda geom: _sh_translate(geom, xoff=_sxoff, yoff=_syoff))
+            return g2
+
+        _snap_utm_bbox = snap_info["utm_bbox"]
+        _snap_bbox_local = (_snap_utm_bbox[0] - _snap_origin[0],
+                            _snap_utm_bbox[1] - _snap_origin[1],
+                            _snap_utm_bbox[2] - _snap_origin[0],
+                            _snap_utm_bbox[3] - _snap_origin[1])
+        _scale_snap = compute_scale(snap_info["width_m"], snap_info["height_m"])
+        _hotspot_relax = (auto_resolved.building_v2_hotspot_relax
+                          if auto_resolved is not None
+                          else BUILDING_V2_HOTSPOT_RELAX)
+
+        _auto_fp = "none" if auto_resolved is None else json.dumps({
+            "road_tier": auto_resolved.building_v2_road_tier,
+            "density": auto_resolved.building_density_threshold,
+            "count": auto_resolved.building_count_threshold,
+            "print_limit": auto_resolved.building_print_limit_m2,
+            "flat": auto_resolved.flat_mode,
+            "hotspot_relax": auto_resolved.building_v2_hotspot_relax,
+        }, sort_keys=True)
+        _style_fp = json.dumps({
+            "bo_mode": style_overrides.get("bo_mode"),
+            "aggregate_simplify_m": style_overrides.get("aggregate_simplify_m"),
+        }, sort_keys=True)
+
+        _snap_cache = PipelineCache(
+            f"snap_{fs:.4f}_{fw:.4f}_{fn:.4f}_{fe:.4f}",
+            enabled=not cli_args.no_cache)
+
+        def _compute_layers_snap():
+            return preprocess_layers(
+                buildings_gdf=_gdf_to_snap(buildings_gdf),
+                roads_gdf=_gdf_to_snap(roads_gdf),
+                water_gdf=_gdf_to_snap(water_gdf),
+                vegetation_gdf=_gdf_to_snap(vegetation_gdf),
+                bbox_local=_snap_bbox_local,
+                scale=_scale_snap,
+                enable_hotspot=True,
+                hotspot_relax=_hotspot_relax,
+                area_km2=snap_info["area_km2"],
+                landuse_gdf=_gdf_to_snap(landuse_gdf),
+                narrow_threshold=cli_args.narrow_threshold,
+                narrow_penalty=cli_args.narrow_penalty,
+                bbox_wgs84=(fs, fw, fn, fe),
+                utm_crs=utm_crs,
+                origin=_snap_origin,
+                **_preprocess_overrides,
+            )
+
+        layers = _snap_cache.get_or_compute(
+            "preprocess_v1",
+            input_keys={
+                "snap_bbox": f"{fs:.4f},{fw:.4f},{fn:.4f},{fe:.4f}",
+                "auto": _auto_fp,
+                "style": _style_fp,
+                "narrow": f"{cli_args.narrow_threshold}/{cli_args.narrow_penalty}",
+                "veg": ENABLE_VEGETATION,
+                "block_base": ENABLE_BLOCK_BASE,
+                "merge": MERGE_BLOCK_LAYERS,
+            },
+            compute_fn=_compute_layers_snap,
+            label="preprocess(snap)",
+        )
+
+        # snap 坐标系 → 精确坐标系，并裁剪到用户精确 bbox
+        _dx = _snap_origin[0] - origin[0]
+        _dy = _snap_origin[1] - origin[1]
+        layers = _transform_layers_to_exact(layers, _dx, _dy, bbox_local)
+    else:
+        layers = preprocess_layers(
+            buildings_gdf=buildings_gdf,
+            roads_gdf=roads_gdf,
+            water_gdf=water_gdf,
+            vegetation_gdf=vegetation_gdf,
+            bbox_local=bbox_local,
+            scale=scale,
+            enable_hotspot=True,
+            hotspot_relax=(auto_resolved.building_v2_hotspot_relax
+                           if auto_resolved is not None
+                           else BUILDING_V2_HOTSPOT_RELAX),
+            area_km2=area_km2,
+            landuse_gdf=landuse_gdf,
+            narrow_threshold=cli_args.narrow_threshold,
+            narrow_penalty=cli_args.narrow_penalty,
+            bbox_wgs84=(south, west, north, east),
+            utm_crs=utm_crs,
+            origin=origin,
+            **_preprocess_overrides,
+        )
     print(f"  {layers.summary()}")
     print(f"  Time: {time.time() - t45:.1f}s")
 

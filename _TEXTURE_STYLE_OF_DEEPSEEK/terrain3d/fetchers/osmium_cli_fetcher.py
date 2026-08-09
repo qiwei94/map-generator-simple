@@ -291,6 +291,18 @@ class OsmiumCLIFetcher:
 
         try:
             # GeoJSON cache: if file already exists and is non-empty, reuse it
+            # 空结果（合法的空 FeatureCollection）同样命中缓存，避免重跑 osmium extract
+            if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                try:
+                    _cached_empty = gpd.read_file(output_path)
+                    _cache_readable = True
+                except Exception:
+                    _cached_empty = None
+                    _cache_readable = False
+                if _cache_readable and len(_cached_empty) == 0:
+                    print(f"  [CLI Pipeline] Using cached GeoJSON (empty result): {output_path}")
+                    return _cached_empty
+
             if os.path.exists(output_path) and os.path.getsize(output_path) > 100:
                 print(f"  [CLI Pipeline] Using cached GeoJSON: {output_path}")
                 gdf = gpd.read_file(output_path)
