@@ -90,14 +90,14 @@ class OsmiumCLIFetcher:
         # 检查 osmium 是否可用
         self.osmium_available = self._check_tool('osmium')
 
-        # 检查 ogr2ogr 是否可用（用于 relation 数据的 bbox 裁剪）
+        # 检查 ogr2ogr 是否可用（用于 relation 数据的 bbox 裁剪；
+        # 缺失时自动降级为 shapely 裁剪，见 _shapely_clip_geojson）
         self.ogr2ogr_available = self._check_tool('ogr2ogr')
 
         if not self.osmium_available:
             logger.warning("osmium CLI 未安装。安装: conda install -c conda-forge osmium-tool")
         if not self.ogr2ogr_available:
-            logger.warning("ogr2ogr 未安装。安装: conda install -c conda-forge gdal")
-            logger.warning("ogr2ogr 用于河流 relation 数据的 bbox 裁剪，缺失可能导致河流数据不完整")
+            logger.info("ogr2ogr 不可用，水体 bbox 裁剪将使用 shapely 实现（功能等价）")
 
     def _find_conda_env_path(self) -> Optional[str]:
         """查找 conda 环境路径"""
@@ -442,6 +442,56 @@ class OsmiumCLIFetcher:
                 output_path, temp_dir, base_name, flags
             )
 
+    def _shapely_clip_geojson(
+        self, raw_geojson: str, output_path: str,
+        south: float, west: float, north: float, east: float
+    ) -> bool:
+        """用 shapely 把 GeoJSON 硬裁剪到 bbox（ogr2ogr -clipsrc 的等价实现）。
+
+        逐个 feature 与 bbox 求交，丢弃空结果后写回 GeoJSON。
+        项目约定：坐标/bbox 裁剪统一用 shapely，不依赖 GDAL CLI。
+        """
+        import json
+        from shapely.geometry import box, shape, mapping
+
+        try:
+            with open(raw_geojson, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        except Exception as e:
+            logger.error(f"shapely 裁剪读取 GeoJSON 失败: {e}")
+            return False
+
+        clip_box = box(west, south, east, north)
+        feats = data.get('features', [])
+        clipped = []
+        for feat in feats:
+            geom = feat.get('geometry')
+            if not geom:
+                continue
+            try:
+                g = shape(geom)
+                if not g.is_valid:
+                    g = g.buffer(0)
+                c = g.intersection(clip_box)
+            except Exception:
+                continue
+            if c.is_empty:
+                continue
+            new_feat = dict(feat)
+            new_feat['geometry'] = mapping(c)
+            clipped.append(new_feat)
+
+        data['features'] = clipped
+        try:
+            with open(output_path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"shapely 裁剪写出 GeoJSON 失败: {e}")
+            return False
+
+        logger.info(f"shapely bbox 裁剪完成: {len(feats)} -> {len(clipped)} 个要素")
+        return True
+
     def _run_standard_pipeline(
         self, osmium_path, pbf_file, tag_type, south, west, north, east,
         output_path, temp_dir, base_name, flags
@@ -565,15 +615,23 @@ class OsmiumCLIFetcher:
             print(f"             - Filtered PBF: {filtered_pbf}")
             return False
 
-        # Step 4 (水体专用): ogr2ogr 做最终边界硬裁剪
-        # smart 模式会带出边界外的毛刺，需要 ogr2ogr 硬切
+        # Step 4 (水体专用): 边界硬裁剪（优先 ogr2ogr，缺失时降级 shapely）
+        # smart 模式会带出边界外的毛刺，需要硬切
         elapsed4 = 0
         if is_water:
             if not self.ogr2ogr_available:
-                logger.warning("ogr2ogr 不可用，跳过 bbox 硬裁剪，返回 smart 模式原始数据")
-                print(f"  [Step 4/{n_steps}] ogr2ogr not available, skipping bbox clip")
-                import shutil
-                shutil.copy2(raw_geojson, output_path)
+                print(f"  [Step 4/{n_steps}] bbox clip via shapely (ogr2ogr not installed)...")
+                t4 = time.time()
+                ok = self._shapely_clip_geojson(
+                    raw_geojson, output_path, south, west, north, east)
+                elapsed4 = time.time() - t4
+                if not ok:
+                    logger.warning("shapely 裁剪失败，返回 smart 模式原始数据")
+                    import shutil
+                    shutil.copy2(raw_geojson, output_path)
+                else:
+                    final_size = os.path.getsize(output_path) / 1024 if os.path.exists(output_path) else 0
+                    print(f"           Done in {elapsed4:.1f}s, output: {final_size:.1f} KB")
             else:
                 ogr2ogr_path = self._get_tool_path('ogr2ogr')
                 cmd4 = [
@@ -595,9 +653,12 @@ class OsmiumCLIFetcher:
                     stderr_msg = result4.stderr.decode('utf-8', errors='replace')
                     logger.error(f"ogr2ogr 裁剪失败: {stderr_msg}")
                     print(f"           FAILED: {stderr_msg}")
-                    import shutil
-                    shutil.copy2(raw_geojson, output_path)
-                    print(f"           Fallback: using unclipped data")
+                    # 降级：shapely 裁剪，再不行才用未裁剪数据
+                    if not self._shapely_clip_geojson(
+                            raw_geojson, output_path, south, west, north, east):
+                        import shutil
+                        shutil.copy2(raw_geojson, output_path)
+                        print(f"           Fallback: using unclipped data")
                 else:
                     final_size = os.path.getsize(output_path) / 1024 if os.path.exists(output_path) else 0
                     print(f"           Done in {elapsed4:.1f}s, output: {final_size:.1f} KB")
