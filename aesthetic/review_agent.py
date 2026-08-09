@@ -6,6 +6,7 @@
 
 endpoint / model 硬编码（非秘密）；唯一秘密 VLM_API_KEY 从 .env 读取。
 """
+from __future__ import annotations
 
 import base64
 import json
