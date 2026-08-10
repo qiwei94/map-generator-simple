@@ -25,7 +25,7 @@ from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.processors.coords import (
     bbox_to_utm, project_geodataframe,
 )
 from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.elevation import (
-    fetch_elevation_grid,
+    fetch_elevation_grid, fetch_elevation_grid_tiled,
 )
 from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.osm import (
     fetch_buildings, fetch_roads, fetch_water, fetch_vegetation,
@@ -95,10 +95,29 @@ class CityHarness:
                 gdfs[key] = project_geodataframe(g, utm_crs, origin,
                                                  clip_bbox=utm_bbox)
 
-        # ── elevation（自带 npy tile cache；失败回退平面，闭环不依赖地形）──
+        # ── elevation（瓦片级 npy 缓存，偏移请求可部分复用；失败回退平面）──
         try:
-            elevation_grid = fetch_elevation_grid(south, west, north, east,
-                                                  resolution)
+            tiled_grid = fetch_elevation_grid_tiled(
+                south, west, north, east, resolution)
+            # 瓦片拼接网格覆盖量化框；重采样回用户精确框
+            # （形状算法与 fetch_elevation_grid 内部一致）
+            from _TEXTURE_STYLE_OF_DEEPSEEK._tile_grid import snap_bbox
+            from scipy.ndimage import map_coordinates
+            fs, fw, fn, fe = snap_bbox(south, west, north, east)
+            lat_span, lon_span = north - south, east - west
+            if lat_span >= lon_span:
+                tr, tc = resolution, max(2, int(resolution * lon_span / lat_span))
+            else:
+                tr, tc = max(2, int(resolution * lat_span / lon_span)), resolution
+            rows, cols = tiled_grid.shape
+            r = np.linspace((south - fs) / (fn - fs) * (rows - 1),
+                            (north - fs) / (fn - fs) * (rows - 1), tr)
+            c = np.linspace((west - fw) / (fe - fw) * (cols - 1),
+                            (east - fw) / (fe - fw) * (cols - 1), tc)
+            rr, cc = np.meshgrid(r, c, indexing="ij")
+            elevation_grid = map_coordinates(
+                tiled_grid, [rr, cc], order=1,
+                mode="nearest").astype(tiled_grid.dtype, copy=False)
         except Exception as e:
             print(f"  [harness] elevation fetch failed ({e}); "
                   f"fallback to flat grid (profile relief=flat)")

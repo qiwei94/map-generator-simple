@@ -316,7 +316,9 @@ class OSMPipeline:
         logger.info("Step 1 [%s]: Raw PBF extraction via CLI...", self.feature_type)
 
         try:
-            gdf = self._cli_fetcher.fetch_features(
+            # 瓦片级缓存取数：返回覆盖量化网格框的要素（重叠请求共享
+            # 瓦片缓存），step3 再裁剪到用户精确 bbox。
+            gdf = self._cli_fetcher.fetch_tiled_features(
                 tag_type=self.feature_type,
                 south=south, west=west, north=north, east=east,
                 pbf_file=self.pbf_path,
