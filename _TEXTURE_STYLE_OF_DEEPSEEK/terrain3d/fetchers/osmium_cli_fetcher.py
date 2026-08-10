@@ -530,7 +530,48 @@ class OsmiumCLIFetcher:
                   f"split into tiles done\n")
             return self._enrich_building_heights(gdf, tag_type, fs, fw, fn, fe)
 
-        # 3) 混合：逐瓦片提取缺失瓦片（带 buffer 保证跨界要素完整）
+        # 3) 混合：提取缺失瓦片。
+        #    缺 ≥2 块时合并成一次提取再拆瓦片（relation-first 水体逐瓦片
+        #    提取每次都要全量扫 PBF，合并提取可省掉重复扫描）；
+        #    只缺 1 块时直接单瓦片提取（带 buffer 保证跨界要素完整）。
+        buf = self._TILE_BUFFER_DEG
+        if len(missing) >= 2:
+            us = min(tile_bbox(ix, iy, step)[0] for ix, iy, _ in missing) - buf
+            uw = min(tile_bbox(ix, iy, step)[1] for ix, iy, _ in missing) - buf
+            un = max(tile_bbox(ix, iy, step)[2] for ix, iy, _ in missing) + buf
+            ue = max(tile_bbox(ix, iy, step)[3] for ix, iy, _ in missing) + buf
+            print(f"  [Tile Cache] {tag_type}: {len(missing)} missing tiles, "
+                  f"merged extract ({us:.3f},{uw:.3f},{un:.3f},{ue:.3f})")
+            tmp_out = full_path + f".mrg{os.getpid()}"
+            try:
+                ok = self._run_osmium_pipeline(
+                    pbf_file, tag_type, us, uw, un, ue, tmp_out)
+                if ok:
+                    mgdf = gpd.read_file(tmp_out)
+                    # 按瓦片拆分缓存（仅覆盖缺失瓦片，不碰已有文件）；
+                    # 跨界要素由合并框完整提取，无需 buffer 重叠。
+                    from shapely.geometry import box
+                    for ix, iy, tp in missing:
+                        ts, tw, tn, te = tile_bbox(ix, iy, step)
+                        if len(mgdf) > 0:
+                            mask = mgdf.geometry.intersects(
+                                box(tw, ts, te, tn))
+                            part = mgdf[mask]
+                        else:
+                            part = mgdf
+                        self._atomic_write_gdf(part, tp)
+                        frames.append(part)
+                        print(f"  [Tile Cache] MISS->split {tag_type} tile "
+                              f"({ix},{iy}): {len(part)} features")
+            finally:
+                if os.path.exists(tmp_out):
+                    os.remove(tmp_out)
+            merged = pd.concat(frames, ignore_index=True) \
+                if len(frames) > 1 else frames[0]
+            merged = self._dedupe_features(merged)
+            print(f"  [Tile Cache] {tag_type}: {len(merged)} features merged\n")
+            return self._enrich_building_heights(merged, tag_type, fs, fw, fn, fe)
+
         for ix, iy, tp in missing:
             ts, tw, tn, te = tile_bbox(ix, iy, step)
             buf = self._TILE_BUFFER_DEG
