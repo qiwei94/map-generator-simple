@@ -16,6 +16,7 @@ import tempfile
 from typing import Dict, Optional
 
 import geopandas as gpd
+import pandas as pd
 
 logger = logging.getLogger(__name__)
 
@@ -309,39 +310,8 @@ class OsmiumCLIFetcher:
                 if len(gdf) > 0:
                     print(f"  [CLI Pipeline] Loaded {len(gdf)} features from cache\n")
                     # Buildings: ensure est_height column
-                    if tag_type in ('building', 'building_landmarks') and len(gdf) > 0:
-                        from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.osm import (
-                            _estimate_building_heights, get_ndsm_grid,
-                        )
-                        ndsm_heights = None
-                        ndsm_cache = get_ndsm_grid()
-                        if ndsm_cache is not None:
-                            from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.ndsm import (
-                                sample_building_heights_from_ndsm,
-                            )
-                            grid, s, w, n, e = ndsm_cache
-                            ndsm_heights = sample_building_heights_from_ndsm(
-                                gdf, grid, s, w, n, e)
-                        # Overture enrichment
-                        overture_heights = None
-                        from _TEXTURE_STYLE_OF_DEEPSEEK.config import OVERTURE_ENABLED, OVERTURE_CACHE_DIR
-                        if OVERTURE_ENABLED:
-                            try:
-                                from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.height_enrichment import (
-                                    load_overture_heights,
-                                )
-                                _ov_cache = OVERTURE_CACHE_DIR
-                                if not os.path.isabs(_ov_cache):
-                                    _project_root = os.path.dirname(os.path.dirname(os.path.dirname(
-                                        os.path.dirname(os.path.abspath(__file__)))))
-                                    _ov_cache = os.path.join(_project_root, _ov_cache)
-                                overture_heights, _ = load_overture_heights(
-                                    gdf, bbox_wgs84=(south, west, north, east),
-                                    cache_dir=_ov_cache)
-                            except Exception:
-                                pass
-                        gdf["est_height"] = _estimate_building_heights(
-                            gdf, ndsm_heights, overture_heights)
+                    gdf = self._enrich_building_heights(
+                        gdf, tag_type, south, west, north, east)
                     return gdf
 
             result = self._run_osmium_pipeline(
@@ -354,41 +324,8 @@ class OsmiumCLIFetcher:
                 print(f"  Output: {output_path}")
 
                 # Buildings: ensure est_height column matches osm.py fetch_buildings output
-                if tag_type in ('building', 'building_landmarks') and len(gdf) > 0:
-                    from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.osm import (
-                        _estimate_building_heights,
-                        get_ndsm_grid,
-                    )
-                    ndsm_heights = None
-                    ndsm_cache = get_ndsm_grid()
-                    if ndsm_cache is not None:
-                        from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.ndsm import (
-                            sample_building_heights_from_ndsm,
-                        )
-                        grid, s, w, n, e = ndsm_cache
-                        ndsm_heights = sample_building_heights_from_ndsm(
-                            gdf, grid, s, w, n, e
-                        )
-                    # Overture enrichment
-                    overture_heights = None
-                    from _TEXTURE_STYLE_OF_DEEPSEEK.config import OVERTURE_ENABLED, OVERTURE_CACHE_DIR
-                    if OVERTURE_ENABLED:
-                        try:
-                            from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.height_enrichment import (
-                                load_overture_heights,
-                            )
-                            _ov_cache = OVERTURE_CACHE_DIR
-                            if not os.path.isabs(_ov_cache):
-                                _project_root = os.path.dirname(os.path.dirname(os.path.dirname(
-                                    os.path.dirname(os.path.abspath(__file__)))))
-                                _ov_cache = os.path.join(_project_root, _ov_cache)
-                            overture_heights, _ = load_overture_heights(
-                                gdf, bbox_wgs84=(south, west, north, east),
-                                cache_dir=_ov_cache)
-                        except Exception:
-                            pass
-                    gdf["est_height"] = _estimate_building_heights(
-                        gdf, ndsm_heights, overture_heights)
+                gdf = self._enrich_building_heights(
+                    gdf, tag_type, south, west, north, east)
 
                 return gdf
         except Exception as e:
@@ -397,6 +334,224 @@ class OsmiumCLIFetcher:
 
         return gpd.GeoDataFrame()
     
+    # ==================================================================
+    # 建筑高度补全（与 osm.py fetch_buildings 输出对齐）
+    # ==================================================================
+
+    def _enrich_building_heights(self, gdf, tag_type, south, west, north, east):
+        """为建筑图层补 est_height 列（nDSM 采样 + Overture 增强）。"""
+        if tag_type not in ('building', 'building_landmarks') or len(gdf) == 0:
+            return gdf
+        from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.osm import (
+            _estimate_building_heights, get_ndsm_grid,
+        )
+        ndsm_heights = None
+        ndsm_cache = get_ndsm_grid()
+        if ndsm_cache is not None:
+            from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.ndsm import (
+                sample_building_heights_from_ndsm,
+            )
+            grid, s, w, n, e = ndsm_cache
+            ndsm_heights = sample_building_heights_from_ndsm(
+                gdf, grid, s, w, n, e)
+        overture_heights = None
+        from _TEXTURE_STYLE_OF_DEEPSEEK.config import OVERTURE_ENABLED, OVERTURE_CACHE_DIR
+        if OVERTURE_ENABLED:
+            try:
+                from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.height_enrichment import (
+                    load_overture_heights,
+                )
+                _ov_cache = OVERTURE_CACHE_DIR
+                if not os.path.isabs(_ov_cache):
+                    _project_root = os.path.dirname(os.path.dirname(os.path.dirname(
+                        os.path.dirname(os.path.abspath(__file__)))))
+                    _ov_cache = os.path.join(_project_root, _ov_cache)
+                overture_heights, _ = load_overture_heights(
+                    gdf, bbox_wgs84=(south, west, north, east),
+                    cache_dir=_ov_cache)
+            except Exception:
+                pass
+        gdf["est_height"] = _estimate_building_heights(
+            gdf, ndsm_heights, overture_heights)
+        return gdf
+
+    # ==================================================================
+    # 瓦片级缓存（Phase 2）：跨网格线偏移的部分复用
+    # ==================================================================
+
+    # 单瓦片提取外扩 buffer（度，≈200m）：保证跨界要素完整，
+    # 合并时靠 osm_type+osm_id 去重。
+    _TILE_BUFFER_DEG = 0.002
+
+    @staticmethod
+    def _try_read_geojson_cache(path):
+        """读 GeoJSON 缓存：合法（含空集合）返回 GeoDataFrame，损坏/不存在返回 None。"""
+        if not os.path.exists(path) or os.path.getsize(path) == 0:
+            return None
+        try:
+            return gpd.read_file(path)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _dedupe_features(gdf):
+        """瓦片合并后去重：优先 osm_type+osm_id，缺失时降级几何指纹。"""
+        if gdf is None or len(gdf) == 0:
+            return gdf
+        if 'osm_type' in gdf.columns and 'osm_id' in gdf.columns:
+            return gdf.drop_duplicates(
+                subset=['osm_type', 'osm_id']).reset_index(drop=True)
+        try:
+            fp = gdf.geometry.apply(
+                lambda g: (g.geom_type, round(g.centroid.x, 7),
+                           round(g.centroid.y, 7), round(g.area, 10)))
+            return gdf[~fp.duplicated()].reset_index(drop=True)
+        except Exception:
+            return gdf
+
+    def _tile_cache_path(self, tag_type, ix, iy):
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(
+            os.path.dirname(os.path.abspath(__file__)))))
+        d = os.path.join(project_root, 'cache', 'tiles', tag_type)
+        os.makedirs(d, exist_ok=True)
+        return os.path.join(d, f"{ix}_{iy}.geojson")
+
+    @staticmethod
+    def _atomic_write_gdf(gdf, path):
+        """原子写：tmp 文件 + os.replace，并发安全。"""
+        tmp_path = path + f".tmp{os.getpid()}"
+        gdf.to_file(tmp_path, driver='GeoJSON')
+        os.replace(tmp_path, path)
+
+    def _split_to_tiles(self, gdf, tag_type, ix0, iy0, ix1, iy1, step):
+        """全框取数结果拆入瓦片缓存（含空瓦片），供跨网格线请求复用。"""
+        from shapely.geometry import box
+        from _TEXTURE_STYLE_OF_DEEPSEEK._tile_grid import tile_bbox
+        for iy in range(iy0, iy1 + 1):
+            for ix in range(ix0, ix1 + 1):
+                ts, tw, tn, te = tile_bbox(ix, iy, step)
+                buf = self._TILE_BUFFER_DEG
+                if len(gdf) > 0:
+                    mask = gdf.geometry.intersects(
+                        box(tw - buf, ts - buf, te + buf, tn + buf))
+                    part = gdf[mask]
+                else:
+                    part = gdf
+                self._atomic_write_gdf(
+                    part, self._tile_cache_path(tag_type, ix, iy))
+
+    def fetch_tiled_features(self, tag_type, south, west, north, east,
+                             pbf_file=None, region=None, step=None):
+        """瓦片级缓存取数：跨网格线偏移的请求只重算新增瓦片。
+
+        策略：
+        - 全框缓存（tmp/osmium_{tag}_{snap}.geojson）命中 → 直接返回；
+        - 瓦片全缺 → 全框提取一次（单次全量 PBF 读，最快）+ 拆瓦片缓存；
+        - 部分瓦片缺失 → 只提取缺失瓦片（带 ~200m buffer），合并去重。
+        """
+        from _TEXTURE_STYLE_OF_DEEPSEEK._tile_grid import (
+            DEFAULT_TILE_STEP, snap_bbox, tile_range, tile_bbox)
+
+        if not self.osmium_available:
+            logger.error("osmium CLI 未安装，无法使用 CLI 方式")
+            return gpd.GeoDataFrame()
+        if pbf_file is None:
+            if region:
+                pbf_file = self._find_pbf_file(region)
+            else:
+                logger.error("必须指定 pbf_file 或 region")
+                return gpd.GeoDataFrame()
+        if pbf_file is None or not os.path.exists(pbf_file):
+            logger.error(f"PBF 文件不存在: {pbf_file}")
+            return gpd.GeoDataFrame()
+
+        step = step or DEFAULT_TILE_STEP
+        fs, fw, fn, fe = snap_bbox(south, west, north, east, step)
+
+        # 1) 全框缓存快路径（与 Phase 1 全框缓存兼容）
+        project_tmp = os.path.join(os.path.dirname(__file__), '..', '..', '..', 'tmp')
+        os.makedirs(project_tmp, exist_ok=True)
+        full_path = os.path.join(
+            project_tmp,
+            f"osmium_{tag_type}_{fs:.4f}_{fw:.4f}_{fn:.4f}_{fe:.4f}.geojson")
+        gdf = self._try_read_geojson_cache(full_path)
+        if gdf is not None:
+            print(f"  [CLI Pipeline] Using cached GeoJSON (full-frame): {full_path}")
+            if len(gdf) == 0:
+                print(f"  [CLI Pipeline] Cached empty result (0 features)\n")
+                return gdf
+            print(f"  [CLI Pipeline] Loaded {len(gdf)} features from cache\n")
+            return self._enrich_building_heights(gdf, tag_type, fs, fw, fn, fe)
+
+        # 2) 瓦片路径
+        ix0, iy0, ix1, iy1 = tile_range(fs, fw, fn, fe, step)
+        frames, missing = [], []
+        for iy in range(iy0, iy1 + 1):
+            for ix in range(ix0, ix1 + 1):
+                tp = self._tile_cache_path(tag_type, ix, iy)
+                tgdf = self._try_read_geojson_cache(tp)
+                if tgdf is not None:
+                    frames.append(tgdf)
+                    print(f"  [Tile Cache] HIT {tag_type} tile ({ix},{iy}): "
+                          f"{len(tgdf)} features")
+                else:
+                    missing.append((ix, iy, tp))
+
+        if frames and not missing:
+            merged = pd.concat(frames, ignore_index=True) \
+                if len(frames) > 1 else frames[0]
+            merged = self._dedupe_features(merged)
+            print(f"  [Tile Cache] {tag_type}: {len(merged)} features "
+                  f"from {len(frames)} tiles\n")
+            return self._enrich_building_heights(merged, tag_type, fs, fw, fn, fe)
+
+        if not frames:
+            # 全冷：全框提取只读一次全量 PBF，比逐瓦片提取快；
+            # 完成后拆入瓦片缓存，供跨网格线请求复用。
+            print(f"  [Tile Cache] {tag_type}: cold frame, full-frame extract "
+                  f"then split into {len(missing)} tiles")
+            tmp_out = full_path + f".tmp{os.getpid()}"
+            try:
+                ok = self._run_osmium_pipeline(
+                    pbf_file, tag_type, fs, fw, fn, fe, tmp_out)
+                if ok:
+                    os.replace(tmp_out, full_path)
+                elif os.path.exists(tmp_out):
+                    os.remove(tmp_out)
+            except Exception:
+                if os.path.exists(tmp_out):
+                    os.remove(tmp_out)
+                raise
+            if not ok:
+                return gpd.GeoDataFrame()
+            gdf = gpd.read_file(full_path)
+            self._split_to_tiles(gdf, tag_type, ix0, iy0, ix1, iy1, step)
+            print(f"  [Tile Cache] {tag_type}: {len(gdf)} features, "
+                  f"split into tiles done\n")
+            return self._enrich_building_heights(gdf, tag_type, fs, fw, fn, fe)
+
+        # 3) 混合：逐瓦片提取缺失瓦片（带 buffer 保证跨界要素完整）
+        for ix, iy, tp in missing:
+            ts, tw, tn, te = tile_bbox(ix, iy, step)
+            buf = self._TILE_BUFFER_DEG
+            tmp_out = tp + f".tmp{os.getpid()}"
+            ok = self._run_osmium_pipeline(
+                pbf_file, tag_type,
+                ts - buf, tw - buf, tn + buf, te + buf, tmp_out)
+            if ok:
+                os.replace(tmp_out, tp)
+                tgdf = gpd.read_file(tp)
+                frames.append(tgdf)
+                print(f"  [Tile Cache] MISS->fetched {tag_type} tile "
+                      f"({ix},{iy}): {len(tgdf)} features")
+            else:
+                logger.warning(f"瓦片 ({ix},{iy}) 提取失败，跳过")
+        merged = pd.concat(frames, ignore_index=True) \
+            if len(frames) > 1 else frames[0]
+        merged = self._dedupe_features(merged)
+        print(f"  [Tile Cache] {tag_type}: {len(merged)} features merged\n")
+        return self._enrich_building_heights(merged, tag_type, fs, fw, fn, fe)
+
     def _run_osmium_pipeline(
         self,
         pbf_file: str,
@@ -975,3 +1130,18 @@ def fetch_from_cli(
     """使用 CLI 方式获取数据的便捷函数"""
     fetcher = get_cli_fetcher()
     return fetcher.fetch_features(tag_type, south, west, north, east, pbf_file, region)
+
+
+def fetch_tiled_from_cli(
+    tag_type: str,
+    south: float,
+    west: float,
+    north: float,
+    east: float,
+    pbf_file: str = None,
+    region: str = None,
+) -> gpd.GeoDataFrame:
+    """瓦片级缓存取数的便捷函数（Phase 2，跨网格线偏移部分复用）"""
+    fetcher = get_cli_fetcher()
+    return fetcher.fetch_tiled_features(tag_type, south, west, north, east,
+                                        pbf_file, region)

@@ -55,9 +55,16 @@
 
 实测（B，西湖 ~10km，draft）：冷启动 ~640s → 偏移 ~550m 的第二请求 **~30s**。
 
+**瓦片级缓存（Phase 2，同批上线）**：偏移跨过网格线时量化框会整体变大并 miss，瓦片级缓存解决部分复用：
+- 图层瓦片：`cache/tiles/{layer}/{ix}_{iy}.geojson`（每瓦片 0.05°，提取时带 ~200m buffer 保证跨界要素完整）；合并时按 `osm_type+osm_id` 去重（pyosmium shim 的 export 已输出 osm_id；无 id 时降级几何指纹）。
+- 高程瓦片：`cache/grids/tiles/elevtile_{ix}_{iy}_61.npy`，查询时拼接（共享边界去重）后重采样裁剪到精确框；平滑在拼接后整框做，无瓦片接缝。
+- 取数策略：全框缓存命中→直接返回；瓦片全缺→全框提取一次（单次全量 PBF 读，最快）+ 拆入瓦片；部分缺失→只提取缺失瓦片（逐瓦片扫全量 PBF，比全框慢，仅发生在跨网格线且部分命中时）。
+- 写入均原子（tmp + os.replace），并发安全。
+- 实测（B，跨双网格线框 ~8km）：首次全框提取后，另一量化框共享瓦片的偏移请求 **~53s**（图层瓦片全 HIT，仅 preprocess 首算）。
+
 运维要点：
 - 逃生门：`generate_city.py --no-snap` 回退旧行为；`--no-cache` 关闭 preprocess 缓存。
-- 清理缓存：`tmp/osmium_*.geojson`、`cache/pipeline/`、`cache/grids/`（按需手动删，无自动过期）。
+- 清理缓存：`tmp/osmium_*.geojson`、`cache/pipeline/`、`cache/grids/`、`cache/tiles/`（按需手动删，无自动过期）。
 - 跨 UTM 分区的框自动回退精确模式（snap 前后 UTM zone 不一致时）。
 
 ### 热门区域预热（tools/prewarm_tiles.py）

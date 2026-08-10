@@ -560,6 +560,94 @@ def fetch_elevation_grid(south: float, west: float, north: float, east: float,
     return grid
 
 
+# ==================== Tile-level cache (Phase 2) ====================
+
+# 每块 0.05° 瓦片的网格点数（≈92m 采样，接近 SRTM3 精度）。
+# 跨请求复用：重叠/偏移请求只需拼接已缓存瓦片。
+ELEV_TILE_RES = 61
+
+
+def _elev_tile_path(ix: int, iy: int) -> str:
+    """高程瓦片缓存路径（与全框 grids 缓存同目录下的 tiles/ 子目录）。"""
+    cache_base = select_cache_path(10)
+    d = os.path.join(cache_base, "grids", "tiles")
+    os.makedirs(d, exist_ok=True)
+    return os.path.join(d, f"elevtile_{ix}_{iy}_{ELEV_TILE_RES}.npy")
+
+
+def _compute_tile_elevation(ts: float, tw: float, tn: float, te: float) -> np.ndarray:
+    """单瓦片高程网格（row0=south, col0=west）：不做平滑，只补缺。"""
+    grid = _fetch_elevation_grid_from_cop30(ts, tw, tn, te,
+                                            ELEV_TILE_RES, ELEV_TILE_RES)
+    if grid is None or np.isnan(grid).sum() > grid.size * 0.5:
+        grid = _fetch_elevation_grid_from_srtm(ts, tw, tn, te,
+                                               ELEV_TILE_RES, ELEV_TILE_RES)
+    return _fill_nodata(grid)
+
+
+def _stitch_tile_grids(tiles: dict, ix0: int, iy0: int,
+                       ix1: int, iy1: int) -> np.ndarray:
+    """拼接瓦片网格为整框网格（row0=south）；相邻瓦片共享边界行/列，去重。"""
+    strips = []
+    for iy in range(iy0, iy1 + 1):
+        parts = [tiles[(ix, iy)] for ix in range(ix0, ix1 + 1)]
+        strip = parts[0] if len(parts) == 1 else np.hstack(
+            [parts[0]] + [p[:, 1:] for p in parts[1:]])
+        strips.append(strip)
+    return strips[0] if len(strips) == 1 else np.vstack(
+        [strips[0]] + [s[1:, :] for s in strips[1:]])
+
+
+def fetch_elevation_grid_tiled(south: float, west: float, north: float, east: float,
+                               resolution: int = 256,
+                               step: float = None,
+                               use_cache: bool = True) -> np.ndarray:
+    """瓦片级高程取数：按 0.05° 网格瓦片缓存，拼接后返回量化框整框网格。
+
+    与 fetch_elevation_grid 相同的网格约定（row0=south, col0=west）；
+    调用方（generate_city.py）拿到后再重采样裁剪到用户精确框。
+    平滑在拼接后整框做，避免瓦片接缝。
+    """
+    from _TEXTURE_STYLE_OF_DEEPSEEK._tile_grid import (
+        DEFAULT_TILE_STEP, snap_bbox, tile_range, tile_bbox)
+    # Function-level import: allows runtime monkey-patch from auto-params
+    from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.config import ELEVATION_SMOOTHING_SIGMA
+
+    step = step or DEFAULT_TILE_STEP
+    fs, fw, fn, fe = snap_bbox(south, west, north, east, step)
+    ix0, iy0, ix1, iy1 = tile_range(fs, fw, fn, fe, step)
+
+    tiles = {}
+    n_hit = 0
+    for iy in range(iy0, iy1 + 1):
+        for ix in range(ix0, ix1 + 1):
+            p = _elev_tile_path(ix, iy)
+            if use_cache and os.path.exists(p):
+                try:
+                    tiles[(ix, iy)] = np.load(p)
+                    n_hit += 1
+                    continue
+                except Exception:
+                    pass
+            ts, tw, tn, te = tile_bbox(ix, iy, step)
+            g = _compute_tile_elevation(ts, tw, tn, te)
+            # 原子写；用文件句柄写避免 np.save 对字符串路径自动追加 .npy
+            tmp_path = p + f".tmp{os.getpid()}"
+            with open(tmp_path, 'wb') as fh:
+                np.save(fh, g)
+            os.replace(tmp_path, p)
+            tiles[(ix, iy)] = g
+    logger.info(f"Elevation tiles: {n_hit} hit / {len(tiles)} total")
+
+    grid = _stitch_tile_grids(tiles, ix0, iy0, ix1, iy1)
+
+    if ELEVATION_SMOOTHING_SIGMA > 0:
+        sigma = min(ELEVATION_SMOOTHING_SIGMA, (grid.shape[0] + grid.shape[1]) / 200.0)
+        grid = gaussian_filter(grid, sigma=sigma, mode="nearest")
+
+    return grid
+
+
 def _fill_nodata(grid: np.ndarray) -> np.ndarray:
     """Fill NaN values in elevation grid using interpolation and median filter."""
     nan_mask = np.isnan(grid)

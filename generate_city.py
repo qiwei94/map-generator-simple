@@ -26,8 +26,8 @@ if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8')
 
 from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.processors.coords import bbox_to_utm, project_geodataframe
-from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.osmium_cli_fetcher import fetch_from_cli, get_cli_fetcher
-from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.elevation import fetch_elevation_grid
+from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.osmium_cli_fetcher import fetch_from_cli, fetch_tiled_from_cli, get_cli_fetcher
+from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.elevation import fetch_elevation_grid, fetch_elevation_grid_tiled
 from _TEXTURE_STYLE_OF_DEEPSEEK._tile_grid import snap_bbox as _snap_bbox
 from _TEXTURE_STYLE_OF_DEEPSEEK._pipeline_cache import PipelineCache
 from _TEXTURE_STYLE_OF_DEEPSEEK.terrain import build_deepseek_terrain
@@ -246,10 +246,24 @@ def _transform_layers_to_exact(layers, dx, dy, clip_box):
     """
     from shapely.affinity import translate
     from shapely.geometry import box as _box
+    try:
+        from shapely import make_valid
+    except ImportError:  # shapely < 2.0
+        from shapely.validation import make_valid
     clip = _box(*clip_box)
 
     def _proc_poly(p):
-        return _split_polygons(translate(p, xoff=dx, yoff=dy).intersection(clip))
+        moved = translate(p, xoff=dx, yoff=dy)
+        try:
+            cut = moved.intersection(clip)
+        except Exception:
+            # 非法多边形（自交环/游离孔洞）会让 GEOS 抛 TopologyException；
+            # make_valid 修复后重试，仍失败则丢弃该要素（不阻断整体）。
+            try:
+                cut = make_valid(moved).intersection(clip)
+            except Exception:
+                return []
+        return _split_polygons(cut)
 
     BL, BL_cat = [], []
     cats = list(layers.BL_categories)
@@ -278,7 +292,14 @@ def _transform_layers_to_exact(layers, dx, dy, clip_box):
 
     roads = []
     for line, tier, flag in layers.roads_lines:
-        seg = translate(line, xoff=dx, yoff=dy).intersection(clip)
+        moved = translate(line, xoff=dx, yoff=dy)
+        try:
+            seg = moved.intersection(clip)
+        except Exception:
+            try:
+                seg = make_valid(moved).intersection(clip)
+            except Exception:
+                continue
         if seg.is_empty:
             continue
         if seg.geom_type == "LineString":
@@ -404,10 +425,15 @@ def main():
         snap_span = max(fn - fs, fe - fw)
         res_fetch = resolution if not snap_active else int(
             (resolution - 1) * snap_span / exact_span) + 1
-        elevation_grid_snap = fetch_elevation_grid(
-            fs, fw, fn, fe, res_fetch,
-            elevation_file=cli_args.elevation_file,
-        )
+        if snap_active and not cli_args.elevation_file:
+            # 瓦片级高程缓存（Phase 2）：跨网格线偏移也能部分复用
+            elevation_grid_snap = fetch_elevation_grid_tiled(
+                fs, fw, fn, fe, res_fetch)
+        else:
+            elevation_grid_snap = fetch_elevation_grid(
+                fs, fw, fn, fe, res_fetch,
+                elevation_file=cli_args.elevation_file,
+            )
         if snap_active:
             target_shape = _grid_shape_for(south, west, north, east, resolution)
             elevation_grid = _crop_grid_to_bbox(
@@ -452,7 +478,7 @@ def main():
     print(f"\n[Stage 2] Fetching water data...")
     t2 = time.time()
 
-    water_gdf = fetch_from_cli(
+    water_gdf = (fetch_tiled_from_cli if snap_active else fetch_from_cli)(
         tag_type='water',
         south=fs, west=fw, north=fn, east=fe,
         pbf_file=PBF_FILE
@@ -501,7 +527,7 @@ def main():
     print(f"\n[Stage 3] Fetching vegetation data...")
     t3 = time.time()
 
-    vegetation_gdf = fetch_from_cli(
+    vegetation_gdf = (fetch_tiled_from_cli if snap_active else fetch_from_cli)(
         tag_type='vegetation',
         south=fs, west=fw, north=fn, east=fe,
         pbf_file=PBF_FILE
@@ -529,7 +555,7 @@ def main():
     print(f"\n[Stage 3b] Fetching buildings data...")
     t3b = time.time()
 
-    buildings_gdf = fetch_from_cli(
+    buildings_gdf = (fetch_tiled_from_cli if snap_active else fetch_from_cli)(
         tag_type='building',
         south=fs, west=fw, north=fn, east=fe,
         pbf_file=PBF_FILE
@@ -555,7 +581,7 @@ def main():
     print(f"\n[Stage 3c] Fetching roads data...")
     t3c = time.time()
 
-    roads_gdf = fetch_from_cli(
+    roads_gdf = (fetch_tiled_from_cli if snap_active else fetch_from_cli)(
         tag_type='road',
         south=fs, west=fw, north=fn, east=fe,
         pbf_file=PBF_FILE
@@ -577,7 +603,7 @@ def main():
     print(f"\n[Stage 3d] Fetching landuse data...")
     t3d = time.time()
 
-    landuse_gdf = fetch_from_cli(
+    landuse_gdf = (fetch_tiled_from_cli if snap_active else fetch_from_cli)(
         tag_type='landuse',
         south=fs, west=fw, north=fn, east=fe,
         pbf_file=PBF_FILE
