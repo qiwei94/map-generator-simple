@@ -58,7 +58,7 @@
 **瓦片级缓存（Phase 2，同批上线）**：偏移跨过网格线时量化框会整体变大并 miss，瓦片级缓存解决部分复用：
 - 图层瓦片：`cache/tiles/{layer}/{ix}_{iy}.geojson`（每瓦片 0.05°，提取时带 ~200m buffer 保证跨界要素完整）；合并时按 `osm_type+osm_id` 去重（pyosmium shim 的 export 已输出 osm_id；无 id 时降级几何指纹）。
 - 高程瓦片：`cache/grids/tiles/elevtile_{ix}_{iy}_61.npy`，查询时拼接（共享边界去重）后重采样裁剪到精确框；平滑在拼接后整框做，无瓦片接缝。
-- 取数策略：全框缓存命中→直接返回；瓦片全缺→全框提取一次（单次全量 PBF 读，最快）+ 拆入瓦片；部分缺失→只提取缺失瓦片（逐瓦片扫全量 PBF，比全框慢，仅发生在跨网格线且部分命中时）。
+- 取数策略：全框缓存命中→直接返回；瓦片全缺→全框提取一次（单次全量 PBF 读，最快）+ 拆入瓦片；部分缺失→只提取缺失瓦片（缺 ≥2 块时合并成一次提取再拆，避免 relation-first 水体逐瓦片重复全量扫 PBF）。
 - 写入均原子（tmp + os.replace），并发安全。
 - 实测（B，跨双网格线框 ~8km）：首次全框提取后，另一量化框共享瓦片的偏移请求 **~53s**（图层瓦片全 HIT，仅 preprocess 首算）。
 
@@ -166,6 +166,7 @@ ssh -J root@8.136.0.235 root@172.16.164.54
 3. ~~styles aesthetic import 报错~~ 已修：`aesthetic/review_agent.py` 加 `from __future__ import annotations`（py3.9 PEP604）。
 4. 主入口已切到 B（118.31.184.240）。A 旧 studio 已停，A 只留 NFS+数据（备份）。
 5. **两台机器间一切传输走内网（私网 IP），勿走公网**（公网费钱且慢）。
+6. ~~水体 relation 全丢（西湖等消失、水体图层空）~~ 已修（2026-08-10）：`tools/osmium_pyosmium.py` 三连缺陷——① tags-filter 只认 `nwr/xxx` 前缀、跳过 `natural=water` 裸表达式；② tags-filter 未挂节点坐标索引导致 way 无几何；③ pybind11 bug 使 `create_multipolygon` 对所有 relation 抛异常被吞。已改为裸表达式按 nwr 解析、挂 locations 索引落盘 `.nli`、relation 几何手工组装（area PBF 建 way 索引→拼环→inner 按包含分配）。**修后需清一次脏水体缓存**：`rm -rf cache/tiles/water cache/pipeline/snap_*`。修后实测：西湖冷框 ~407s（含水体首提），偏移框 **~51s**。
 
 ## 六、常用运维命令（在 B 上）
 
