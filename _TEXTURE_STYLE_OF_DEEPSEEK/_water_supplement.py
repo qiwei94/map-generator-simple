@@ -29,12 +29,13 @@ _AMAP_TILE_PX = 512         # scl=2 returns 512x512 tiles
 _MIN_SEGMENT_LEN = 200      # ignore uncovered segments shorter than this (m)
 _MIN_POLYGON_AREA_M2 = 50000
 _MAX_SUPPLEMENT_AREA_M2 = 500000  # reject Gaode polygons larger than 500k m² (0.5 km²)
-_ADAPTIVE_MIN_HW = 120      # minimum half-width for adaptive buffer (m) — river default
-_ADAPTIVE_MAX_HW = 450      # maximum half-width cap (m) — river default
+_ADAPTIVE_MIN_HW = 40       # adaptive buffer 最小半宽 (m)——无参考时的河道默认
+_ADAPTIVE_MAX_HW = 450      # 最大半宽上限 (m)——river default
 _ADAPTIVE_DECAY_DIST = 15000
+_ADAPTIVE_REF_MAX_DIST = 500  # 参考多边形必须贴近中心线（视为同一水体的延伸）
 
 _WATERWAY_HW_CAPS = {
-    "river":     (80, 450),
+    "river":     (40, 450),
     "riverbank": (100, 500),
     "canal":     (12, 50),
     "stream":    (5, 20),
@@ -599,10 +600,9 @@ def _adaptive_buffer_segments(
 
         min_hw, max_hw = _WATERWAY_HW_CAPS.get(wtype, (_ADAPTIVE_MIN_HW, _ADAPTIVE_MAX_HW))
 
-        mid = seg.interpolate(seg.length / 2)
         best_dist, best_poly = float('inf'), None
         for p in wl_list:
-            d = p.distance(mid)
+            d = p.distance(seg)
             if d < best_dist:
                 best_dist, best_poly = d, p
 
@@ -611,10 +611,21 @@ def _adaptive_buffer_segments(
         else:
             est_w = _estimate_polygon_width(best_poly)
             direct_w = _cross_section_width(wl_union, seg)
-            ref_w = max(est_w, direct_w) if direct_w > 0 else est_w
+            # 截面测量易被穿过邻接多边形内部的弦污染（延伸接触点曾
+            # 测出 1600m）；只在河带上限内采纳，否则用多边形自身估宽
+            if 0 < direct_w <= max_hw:
+                ref_w = max(est_w, direct_w)
+            else:
+                ref_w = est_w
 
-            decay = max(0.5, 1.0 - best_dist / _ADAPTIVE_DECAY_DIST)
-            half_w = ref_w / 2 * decay
+            # 参考只在“贴近 + 自身是河带状”时可信：中心线作为该水体
+            # 的延伸继承其宽度。远处的大湖（西湖估宽 ~850m）会把城市
+            # 河道半宽顶到上限 → 几百米宽藍带（历史 bug）。
+            if best_dist <= _ADAPTIVE_REF_MAX_DIST and ref_w <= max_hw:
+                decay = max(0.5, 1.0 - best_dist / _ADAPTIVE_DECAY_DIST)
+                half_w = ref_w / 2 * decay
+            else:
+                half_w = min_hw
 
         half_w = max(half_w, min_hw)
         half_w = min(half_w, max_hw)
