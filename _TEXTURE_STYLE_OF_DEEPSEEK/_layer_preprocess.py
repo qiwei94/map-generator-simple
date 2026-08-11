@@ -55,7 +55,6 @@ from _TEXTURE_STYLE_OF_DEEPSEEK.config import (
     BUILDING_V2_MODE,
     NOZZLE_DIAM_MM,
     MIN_PRINTABLE_AREA_M2,
-    WATERWAY_HALF_WIDTH,
     BUILDING_AGGREGATE_HEIGHT_MM,
     BUILDING_DEFAULT_HEIGHT_M,
     BLOCK_BASE_MIN_AREA_M2,
@@ -703,7 +702,7 @@ def _extract_WL_WO(
 
     - Polygon/MultiPolygon: is_water_landmark → WL，否则 → WO（仅当 area >= 1000m²）
     - LineString/MultiLineString: is_water_landmark → buffer 到
-        max(WATERWAY_HALF_WIDTH[wway], nozzle_real_m * 1.5)
+        max(保守默认半宽, nozzle_real_m * 0.5)
         → 加入 WL（已 buffer 后的 polygon）
     - LineString 非地标 → 忽略
     - wl_lines_raw: 原始 WL LineString + waterway type（buffer 前），供水体补全使用
@@ -714,7 +713,9 @@ def _extract_WL_WO(
     WL_polys: List[Polygon] = []
     WO_polys: List[Polygon] = []
     wl_lines_raw: List[Tuple[LineString, str]] = []
-    min_buffer = nozzle_real_m * 1.5
+    # 可打印下限 = 1 喷嘴宽（0.5×nozzle_real 半宽）。历史 1.5× 把大框
+    # （scale 小、nozzle_real 大）的城市河道全部撑到 ~200m 宽蓝带。
+    min_buffer = nozzle_real_m * 0.5
 
     for _, row in water_gdf.iterrows():
         geom = row.geometry
