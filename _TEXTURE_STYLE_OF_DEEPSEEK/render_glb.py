@@ -170,10 +170,12 @@ class _TerrainSampler:
         if self.grid is None or self.zrange <= 1e-6:
             return 0.0
         h, w = self.grid.shape
-        # grid 行 0 = 北（y_max）
+        # grid 行 0 = 南（y_min），与 fetch_elevation_grid / build_terrain_mesh
+        # 约定一致（历史 bug：曾按行 0 = 北处理，地形起伏南北翻转，
+        # 水体坐到镜像高地上 → 水面突出地表）
         col = int(np.clip((x - self.xmin) / (self.xmax - self.xmin) * (w - 1),
                           0, w - 1))
-        row = int(np.clip((self.ymax - y) / (self.ymax - self.ymin) * (h - 1),
+        row = int(np.clip((y - self.ymin) / (self.ymax - self.ymin) * (h - 1),
                           0, h - 1))
         t = (float(self.grid[row, col]) - self.zmin) / self.zrange
         return (max(t, 0.0) ** self.z_gamma) * self.relief_mm_max
@@ -325,7 +327,7 @@ def _terrain_heightfield(elevation_grid, bbox_local, scale, z_gamma,
 
     ny, nx = zn.shape
     xs = np.linspace(xmin, xmax, nx) * scale
-    ys = np.linspace(ymax, ymin, ny) * scale        # 行 0 = 北
+    ys = np.linspace(ymin, ymax, ny) * scale        # 行 0 = 南
     xx, yy = np.meshgrid(xs, ys)
     z_bot = -float(thickness_mm)
 
@@ -342,12 +344,12 @@ def _terrain_heightfield(elevation_grid, bbox_local, scale, z_gamma,
     ])
 
     # ── 底面：四个角就够（平面），避免重复网格 ──
-    # ── 边界环（从上方看绕一周，首尾不重复）──
+    # ── 边界环（从上方看绕一周，首尾不重复；行 0 = 南）──
     ring = np.concatenate([
-        idx[ny - 1, :],              # 南边：西 → 东
-        idx[ny - 2:0:-1, nx - 1],    # 东边：南 → 北
-        idx[0, ::-1],                # 北边：东 → 西
-        idx[1:ny - 1, 0],            # 西边：北 → 南
+        idx[0, :],                   # 南边：西 → 东
+        idx[1:ny - 1, nx - 1],       # 东边：南 → 北
+        idx[ny - 1, ::-1],           # 北边：东 → 西
+        idx[ny - 2:0:-1, 0],         # 西边：北 → 南
     ])
     n_ring = len(ring)
 

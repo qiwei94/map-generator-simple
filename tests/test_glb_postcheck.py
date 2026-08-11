@@ -15,7 +15,7 @@ _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT))
 
 from _TEXTURE_STYLE_OF_DEEPSEEK.render_glb import (  # noqa: E402
-    _COLORS, _terrain_heightfield, check_grounding)
+    _COLORS, _TerrainSampler, _terrain_heightfield, check_grounding)
 
 
 def flat_terrain(z=0.0, size=100.0, n=15):
@@ -117,6 +117,33 @@ class TestTerrainBase:
             z_gamma=0.45, relief_mm_max=8.0, thickness_mm=4.0)
         zs = m.vertices[:, 2]
         assert zs.max() == pytest.approx(0.0), "平地顶面应在 z=0"
+
+
+# ─── 网格朝向（历史 bug：row 0 = 南的网格被按 row 0 = 北处理，
+#     地形起伏南北翻转，水体坐到镜像高地 → 水面突出地表）───
+
+class TestGridOrientation:
+    def test_sampler_row0_is_south(self):
+        # 约定：fetch_elevation_grid 返回 row 0 = south。
+        # 构造只有北侧（最后一行）高的网格，采样必须在 y_max 处取到高值
+        grid = np.zeros((32, 32))
+        grid[-1, :] = 100.0
+        smp = _TerrainSampler(grid, (0, 0, 1000, 1000), scale=0.1,
+                              z_gamma=1.0, relief_mm_max=10.0)
+        assert smp.z_mm(500, 1000) == pytest.approx(10.0), "北缘应为最高点"
+        assert smp.z_mm(500, 0) == pytest.approx(0.0), "南缘应为最低点"
+
+    def test_heightfield_row0_is_south(self):
+        grid = np.zeros((32, 32))
+        grid[-1, :] = 100.0
+        m = _terrain_heightfield(
+            grid, (0, 0, 1000, 1000), scale=0.1,
+            z_gamma=1.0, relief_mm_max=10.0, thickness_mm=4.0)
+        v = m.vertices
+        z_north = v[v[:, 1] > 95.0, 2].max()   # 北缘顶点最高 z
+        z_south = v[v[:, 1] < 5.0, 2].max()    # 南缘顶点最高 z
+        assert z_north == pytest.approx(10.0), "北缘应为最高点"
+        assert z_south == pytest.approx(0.0), "南缘应为最低点（未南翻）"
 
 
 # ─── 真实产物回归（存在才跑）───────────────────────────────────────
