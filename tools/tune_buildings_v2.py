@@ -1341,9 +1341,13 @@ def render(out_path: Path, raw_polys, individuals, blocks_aggregated,
             linewidths=0.6, alpha=0.55))
 
     # 7. water landmarks (深湖蓝实色)
-    if wl_polys:
+    # 用 union 后的几何画：细缓冲带与宽江面同属 WL，union 吸收内部
+    # 边界；若按原始列表画，细带的深色描边会在江面中间留下“细线”。
+    if wl_geom is not None and not wl_geom.is_empty:
+        wl_draw = (list(wl_geom.geoms)
+                   if wl_geom.geom_type == "MultiPolygon" else [wl_geom])
         ax.add_collection(_polys_to_collection(
-            wl_polys, facecolor="#0e74a8", edgecolor="#072e44",
+            wl_draw, facecolor="#0e74a8", edgecolor="#072e44",
             linewidths=0.6, alpha=0.95))
 
     # 7.5 pier / breakwater —— 浅米陆地伸入水里，皮+芯：底芯 #d4c8a8，顶皮 #b8a884
