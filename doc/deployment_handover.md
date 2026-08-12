@@ -168,6 +168,7 @@ ssh -J root@8.136.0.235 root@172.16.164.54
 5. **两台机器间一切传输走内网（私网 IP），勿走公网**（公网费钱且慢）。
 6. ~~水体 relation 全丢（西湖等消失、水体图层空）~~ 已修（2026-08-10）：`tools/osmium_pyosmium.py` 三连缺陷——① tags-filter 只认 `nwr/xxx` 前缀、跳过 `natural=water` 裸表达式；② tags-filter 未挂节点坐标索引导致 way 无几何；③ pybind11 bug 使 `create_multipolygon` 对所有 relation 抛异常被吞。已改为裸表达式按 nwr 解析、挂 locations 索引落盘 `.nli`、relation 几何手工组装（area PBF 建 way 索引→拼环→inner 按包含分配）。**修后需清一次脏水体缓存**：`rm -rf cache/tiles/water cache/pipeline/snap_*`。修后实测：西湖冷框 ~407s（含水体首提），偏移框 **~51s**。
 7. ~~B 缺 rasterio 导致 amap 卫星水面静默为空（钱塘江变细线）~~ 已修（2026-08-12）：`requirements.txt` 声明的 rasterio 从未在 B 安装，`_vectorize_mask` 的 `import rasterio` 抛异常被吞 → 瓦片能取、矢量化返回 []。已 `pip install rasterio`（阿里云镜像，1.4.3）。同次修复：supplement 防误检门（面积上限/重叠率）误杀大河面，新增“中心线证据门”豁免。**教训：B 装新依赖后无需清缓存（amap 缓存按 bbox 命名，首次成功提取后才落盘）**。
+8. ~~钱塘江中间突兀细蓝线~~ 已修（2026-08-12，7ede6e2）：`supplement_wl_coverage` 在 uncovered 为空时提前 return。而 `wl_polygons` 里本来就含河流中心线的细缓冲带，中心线必然被自己的细带覆盖 → uncovered 恒空 → amap 真实宽江面永远进不了 WL，图上只剩 66m 细蓝带。已移除提前 return，无条件走 Gaode 补面评估。同次：PNG 渲染 WL 层改为画 union 后几何（30b122d），否则细带深色描边仍在江面中间留下细线。
 
 ## 六、常用运维命令（在 B 上）
 
