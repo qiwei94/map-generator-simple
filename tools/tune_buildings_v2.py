@@ -43,7 +43,9 @@ import geopandas as gpd
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.patches import Polygon as MplPoly, Rectangle as MplRect
+from matplotlib.patches import Polygon as MplPoly, Rectangle as MplRect, \
+    PathPatch as MplPathPatch
+from matplotlib.path import Path as MplPath
 from matplotlib.collections import PatchCollection, LineCollection
 from shapely import concave_hull as _shapely_concave_hull
 from shapely.geometry import (
@@ -886,8 +888,20 @@ def veg_block_fill(non_lm_veg_polys: List[Polygon],
 # ---------------------------------------------------------------------------
 
 def _polys_to_collection(polys, **kw):
-    patches = [MplPoly(np.array(p.exterior.coords))
-               for p in polys if isinstance(p, Polygon) and not p.is_empty]
+    # 带洞多边形必须走 Path（exterior+interiors 多环），否则 union 后
+    # 出现的环状水体（细带+江面包住街区）的洞会被填实成蓝色大块。
+    patches = []
+    for p in polys:
+        if not isinstance(p, Polygon) or p.is_empty:
+            continue
+        verts, codes = [], []
+        for ring in [p.exterior, *p.interiors]:
+            coords = list(ring.coords)
+            verts.extend(coords)
+            codes.append(MplPath.MOVETO)
+            codes.extend([MplPath.LINETO] * (len(coords) - 2))
+            codes.append(MplPath.CLOSEPOLY)
+        patches.append(MplPathPatch(MplPath(verts, codes)))
     return PatchCollection(patches, **kw)
 
 
