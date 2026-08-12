@@ -761,28 +761,46 @@ def supplement_wl_coverage(
                     added_count = 0
                     skipped_area = 0
                     skipped_overlap = 0
+                    lines_union = (unary_union(all_lines)
+                                   if all_lines else None)
                     for ap in amap_matched:
                         if not ap.is_valid or ap.area < _MIN_POLYGON_AREA_M2:
                             continue
-                        if ap.area > _MAX_SUPPLEMENT_AREA_M2:
+                        # 中心线证据：OSM 水道中心线穿过该面 ≥500m →
+                        # 真实大河（钱塘江级）。面积上限/重叠率门是为防
+                        # 误检设的，对有中心线证据的大河面豁免
+                        # （中心线细带与 2km 江面的面积重叠率永远 <15%）
+                        river_backed = False
+                        if lines_union is not None:
+                            try:
+                                river_backed = (
+                                    ap.intersection(lines_union).length
+                                    >= 500.0)
+                            except Exception:
+                                river_backed = False
+                        if (ap.area > _MAX_SUPPLEMENT_AREA_M2
+                                and not river_backed):
                             skipped_area += 1
                             continue
-                        # Reject if OSM overlap ratio is too low (likely false detection)
-                        osm_overlap = ap.intersection(wl_union).area if not wl_union.is_empty else 0
-                        if ap.area > 0 and osm_overlap / ap.area < 0.15:
-                            skipped_overlap += 1
-                            continue
+                        if not river_backed:
+                            # Reject if OSM overlap ratio is too low (likely false detection)
+                            osm_overlap = (ap.intersection(wl_union).area
+                                           if not wl_union.is_empty else 0)
+                            if ap.area > 0 and osm_overlap / ap.area < 0.15:
+                                skipped_overlap += 1
+                                continue
                         diff = ap.difference(poly_coverage)
                         if diff.is_empty:
                             continue
                         if isinstance(diff, Polygon) and diff.area > _MIN_POLYGON_AREA_M2:
-                            if diff.area <= _MAX_SUPPLEMENT_AREA_M2:
+                            if diff.area <= _MAX_SUPPLEMENT_AREA_M2 or river_backed:
                                 amap_polys_utm.append(diff)
                                 added_count += 1
                         elif isinstance(diff, MultiPolygon):
                             for part in diff.geoms:
                                 if (part.area > _MIN_POLYGON_AREA_M2
-                                        and part.area <= _MAX_SUPPLEMENT_AREA_M2):
+                                        and (part.area <= _MAX_SUPPLEMENT_AREA_M2
+                                             or river_backed)):
                                     amap_polys_utm.append(part)
                                     added_count += 1
                     if skipped_area or skipped_overlap:
