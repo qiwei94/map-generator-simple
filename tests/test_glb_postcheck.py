@@ -15,7 +15,8 @@ _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT))
 
 from _TEXTURE_STYLE_OF_DEEPSEEK.render_glb import (  # noqa: E402
-    _COLORS, _TerrainSampler, _terrain_heightfield, check_grounding)
+    _COLORS, _TerrainSampler, _terrain_heightfield, _drape_polys,
+    check_grounding)
 
 
 def flat_terrain(z=0.0, size=100.0, n=15):
@@ -144,6 +145,43 @@ class TestGridOrientation:
         z_south = v[v[:, 1] < 5.0, 2].max()    # 南缘顶点最高 z
         assert z_north == pytest.approx(10.0), "北缘应为最高点"
         assert z_south == pytest.approx(0.0), "南缘应为最低点（未南翻）"
+
+
+# ─── 贴地形 drape（道路/河流不得平板悬浮）───────────────────────
+
+class TestDrape:
+    def _sampler(self):
+        # 东高西低的斜坡网格（值只随列变化）
+        grid = np.tile(np.linspace(0, 100, 32), (32, 1))
+        return _TerrainSampler(grid, (0, 0, 1000, 1000), scale=0.1,
+                               z_gamma=1.0, relief_mm_max=10.0)
+
+    def test_drape_follows_terrain(self):
+        from shapely.geometry import box
+        smp = self._sampler()
+        m = _drape_polys([box(0, 0, 1000, 1000)], smp, scale=0.1,
+                         color=(74, 74, 74, 255), offset_mm=0.6,
+                         cell_m=50.0)
+        assert m is not None
+        v = m.vertices
+        # 逐顶点 z = 地形 + offset（贴合，非平板）
+        expect = smp.z_mm_vec(v[:, 0] / 0.1, v[:, 1] / 0.1) + 0.6
+        assert np.abs(v[:, 2] - expect).max() < 1e-6, "drape 必须逐顶点贴地形"
+        # 东侧（高）顶点明显高于西侧（低）
+        assert v[v[:, 0] > 90, 2].min() > v[v[:, 0] < 10, 2].max()
+
+    def test_drape_hole_respected(self):
+        from shapely.geometry import box
+        smp = self._sampler()
+        poly = box(0, 0, 1000, 1000).difference(box(400, 400, 600, 600))
+        m = _drape_polys([poly], smp, scale=0.1, color=(74, 74, 74, 255),
+                         offset_mm=0.6, cell_m=50.0)
+        assert m is not None
+        v = m.vertices
+        in_hole = ((v[:, 0] / 0.1 > 420) & (v[:, 0] / 0.1 < 580) &
+                   (v[:, 1] / 0.1 > 420) & (v[:, 1] / 0.1 < 580))
+        # 洞内不应有内部顶点（边界加密点只在环上）
+        assert not in_hole.any(), "洞内不得有 drape 顶点"
 
 
 # ─── 真实产物回归（存在才跑）───────────────────────────────────────

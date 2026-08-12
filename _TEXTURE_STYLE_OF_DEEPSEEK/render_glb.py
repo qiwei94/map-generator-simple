@@ -5,7 +5,8 @@
 
 与正式管线的差异（换速度的三刀）：
     1. 不做 Manifold boolean / brick 纹理 / 圆角——纯棱柱挤出
-    2. 不做逐顶点地形 drape——多边形按质心采样地形高度整体抬升
+    2. 道路/水体逐顶点贴地形 drape（贴合浮雕起伏）；建筑/街区等
+       体积层仍按质心采样整体抬升
     3. 地形用降采样 heightfield（默认 128²）+ 裙边，不追求 watertight
 
 消费 Stage 4.5 的 layers（与 3MF 同源，所见即所得的构图）。
@@ -167,18 +168,23 @@ class _TerrainSampler:
         self.relief_mm_max = relief_mm_max
 
     def z_mm(self, x, y) -> float:
+        return float(self.z_mm_vec(np.array([x]), np.array([y]))[0])
+
+    def z_mm_vec(self, xs, ys) -> np.ndarray:
+        """向量化地形采样（mm）。grid 行 0 = 南（y_min），与
+        fetch_elevation_grid / build_terrain_mesh 约定一致（历史 bug：
+        曾按行 0 = 北处理，地形南北镜像 → 水体突出地表）。"""
+        xs = np.asarray(xs, dtype=float)
+        ys = np.asarray(ys, dtype=float)
         if self.grid is None or self.zrange <= 1e-6:
-            return 0.0
+            return np.zeros_like(xs)
         h, w = self.grid.shape
-        # grid 行 0 = 南（y_min），与 fetch_elevation_grid / build_terrain_mesh
-        # 约定一致（历史 bug：曾按行 0 = 北处理，地形起伏南北翻转，
-        # 水体坐到镜像高地上 → 水面突出地表）
-        col = int(np.clip((x - self.xmin) / (self.xmax - self.xmin) * (w - 1),
-                          0, w - 1))
-        row = int(np.clip((y - self.ymin) / (self.ymax - self.ymin) * (h - 1),
-                          0, h - 1))
-        t = (float(self.grid[row, col]) - self.zmin) / self.zrange
-        return (max(t, 0.0) ** self.z_gamma) * self.relief_mm_max
+        col = np.clip(((xs - self.xmin) / (self.xmax - self.xmin) * (w - 1))
+                      .astype(int), 0, w - 1)
+        row = np.clip(((ys - self.ymin) / (self.ymax - self.ymin) * (h - 1))
+                      .astype(int), 0, h - 1)
+        t = (self.grid[row, col] - self.zmin) / self.zrange
+        return (np.maximum(t, 0.0) ** self.z_gamma) * self.relief_mm_max
 
 
 def _try_extrude(poly, height_m):
@@ -263,43 +269,69 @@ def _contour_z(poly, sampler: _TerrainSampler):
     return zs
 
 
-def _extrude_water(polys, sampler: _TerrainSampler, scale: float,
-                   simplify_m: float) -> "trimesh.Trimesh | None":
-    """水体专用：水柱式挤出（参照正式管线 water_column 思路）。
+def _drape_polys(polys, sampler: _TerrainSampler, scale: float, color,
+                 offset_mm: float, cell_m: float,
+                 simplify_m: float = 0.0) -> "trimesh.Trimesh | None":
+    """贴地形共形投影：三角化多边形，逐顶点 z = 地形 + offset。
 
-    薄片水面（0.25mm）在起伏地形上必被部分掩埋；改为从轮廓最低点
-    向上长到地形 75 分位 + 0.5mm，顶面在绝大部分区域露出，
-    底部落地不悬浮（postcheck 兼容）。"""
-    import numpy as np
+    道路/河流必须“贴”在浮雕起伏上（用户可见的悬浮即来自旧平板
+    挤出）。做法：边界按 cell_m 加密 + 内部散点，Delaunay 后保留
+    质心落在多边形内的三角形（近似凹形与洞）。单面壳，无侧壁。
+    """
+    import shapely
+    from scipy.spatial import Delaunay
+
     parts = []
     dropped = 0
-    total_area = dropped_area = 0.0
     for poly in polys:
+        if poly is None or poly.is_empty:
+            continue
         if simplify_m > 0:
             simp = poly.simplify(simplify_m, preserve_topology=True)
             if not simp.is_empty and simp.geom_type == "Polygon":
                 poly = simp
-        total_area += poly.area
-        zs = _contour_z(poly, sampler)
-        z_lo = min(zs)
-        z_hi = float(np.percentile(zs, 75))
-        th_mm = max(0.4, z_hi - z_lo + 0.5)
-        meshes = _try_extrude(poly, th_mm / scale)
-        if not meshes:
+        try:
+            dense = shapely.segmentize(poly, cell_m)
+        except Exception:
+            dense = poly
+        if dense.geom_type != "Polygon":
             dropped += 1
-            dropped_area += poly.area
             continue
-        for m in meshes:
-            m.apply_scale(scale)
-            m.apply_translation((0, 0, z_lo))
-            parts.append(m)
+        rings = [dense.exterior] + list(dense.interiors)
+        bpts = np.vstack([np.asarray(r.coords)[:-1] for r in rings])
+        minx, miny, maxx, maxy = dense.bounds
+        gx = np.arange(minx, maxx + cell_m, cell_m)
+        gy = np.arange(miny, maxy + cell_m, cell_m)
+        ipts = np.empty((0, 2))
+        if 1 < len(gx) * len(gy) <= 200000:
+            XX, YY = np.meshgrid(gx, gy)
+            inside = shapely.contains_xy(dense, XX.ravel(), YY.ravel())
+            ipts = np.column_stack([XX.ravel()[inside], YY.ravel()[inside]])
+        pts = np.vstack([bpts, ipts])
+        if len(pts) < 3:
+            dropped += 1
+            continue
+        try:
+            tri = Delaunay(pts)
+        except Exception:
+            dropped += 1
+            continue
+        cents = pts[tri.simplices].mean(axis=1)
+        keep = shapely.contains_xy(dense, cents[:, 0], cents[:, 1])
+        faces = tri.simplices[keep]
+        if len(faces) == 0:
+            dropped += 1
+            continue
+        z = sampler.z_mm_vec(pts[:, 0], pts[:, 1]) + offset_mm
+        verts = np.column_stack([pts[:, 0] * scale, pts[:, 1] * scale, z])
+        parts.append(trimesh.Trimesh(vertices=verts, faces=faces,
+                                     process=False))
     if dropped:
-        pct = dropped_area / max(total_area, 1e-9) * 100
-        print(f"  [glb] WARN: water {dropped} polys dropped ({pct:.1f}% area)")
+        print(f"  [glb] WARN: drape dropped {dropped} polys")
     if not parts:
         return None
     mesh = trimesh.util.concatenate(parts)
-    mesh.visual.vertex_colors = _COLORS["water"]
+    mesh.visual.vertex_colors = color
     return mesh
 
 
@@ -567,6 +599,8 @@ def render_glb_preview(layers, ctx: dict, output_path: str,
     # ── 平板层（block_base / water / vegetation）──
     # 草稿几何简化容差：按区域宽度自适应（大区域粗一些，控制 GLB 体积）
     draft_tol_m = max((xmax - xmin) / 2000.0, 5.0)
+    # drape 三角化边长：地形贴合密度（道路/水体用）
+    drape_cell_m = max((xmax - xmin) / 512.0, 20.0)
 
     flat_specs = [
         ("block_base", list(_iter_polys(layers.block_base))),
@@ -632,15 +666,14 @@ def render_glb_preview(layers, ctx: dict, output_path: str,
             water_polys = list(_iter_polys([unary_union(water_polys)]))
         except Exception:
             pass
-        mesh = _extrude_water(water_polys, sampler, scale,
-                              simplify_m=draft_tol_m)
+        mesh = _drape_polys(water_polys, sampler, scale, _COLORS["water"],
+                            0.25, drape_cell_m, simplify_m=draft_tol_m)
         if mesh is not None:
             scene.add_geometry(mesh, node_name="water")
             print(f"  [glb] water: {len(mesh.faces):,} faces")
 
-    # ── 道路（buffer 低精度 → 薄板）──
+    # ── 道路（贴地形 drape：随浮雕起伏，不悬浮）──
     if layers.roads_lines:
-        z0, th = _LAYER_Z["roads"]
         road_polys = []
         for item in layers.roads_lines:
             line, highway = item[0], item[1]
@@ -652,10 +685,8 @@ def render_glb_preview(layers, ctx: dict, output_path: str,
                 road_polys.append(line.buffer(w_m / 2.0, quad_segs=1))
             except Exception:
                 continue
-        mesh = _extrude_polys(
-            [(p, z0, th) for p in _iter_polys(road_polys)],
-            sampler, scale, _COLORS["roads"], simplify_m=draft_tol_m,
-            z_sample="min")
+        mesh = _drape_polys(list(_iter_polys(road_polys)), sampler, scale,
+                            _COLORS["roads"], 0.6, drape_cell_m)
         if mesh is not None:
             scene.add_geometry(mesh, node_name="roads")
             print(f"  [glb] roads: {len(mesh.faces):,} faces")
