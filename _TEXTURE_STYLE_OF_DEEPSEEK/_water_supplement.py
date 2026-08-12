@@ -725,12 +725,18 @@ def supplement_wl_coverage(
             if seg.length >= _MIN_SEGMENT_LEN:
                 uncovered.append((seg, wtype))
 
+    # 注意：不能因 uncovered 为空就提前 return。wl_polygons 里含河流
+    # 中心线的细缓冲带（min_buffer），中心线必然被自己的细带覆盖 →
+    # uncovered 恒空；但真实大河（钱塘江级）宽度远超细带，仍需走
+    # Gaode 补真实江面。历史 bug：提前 return 导致大河面永远进不来。
     if not uncovered:
-        return wl_polygons
+        print("  [water_supplement] no uncovered segments; "
+              "still checking Gaode for wide river surfaces")
 
     total_uncovered_km = sum(s.length for s, _ in uncovered) / 1000
-    print(f"  [water_supplement] {len(uncovered)} uncovered segments "
-          f"({total_uncovered_km:.1f} km)")
+    if uncovered:
+        print(f"  [water_supplement] {len(uncovered)} uncovered segments "
+              f"({total_uncovered_km:.1f} km)")
 
     result_polys = list(wl_polygons)
 
