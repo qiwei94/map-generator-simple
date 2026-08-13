@@ -1,0 +1,32 @@
+# Reproducible development and geometry-validation environment.
+# Create with: conda env create -f environment.yml
+# Activate with: conda activate map-generator
+name: map-generator
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+  - numpy=1.26.*
+  - scipy=1.11.*
+  - pandas=2.2.*
+  - shapely=2.0.*
+  - geopandas=0.14.*
+  - pyproj=3.6.*
+  - rasterio=1.4.*
+  - gdal=3.9.*
+  - osmium-tool
+  - trimesh=4.*
+  - osmnx=2.*
+  - mapbox-earcut=1.*
+  - matplotlib=3.8.*
+  - requests=2.*
+  - rich=13.*
+  - pytest=8.*
+  - pip:
+      - manifold3d>=3.4,<4
+      # Optional CLI feature: --ai-review
+      - anthropic>=0.49,<1
+variables:
+  PYTHONUTF8: "1"
+  PYTHONNOUSERSITE: "1"
