@@ -21,6 +21,13 @@ mapbox-earcut>=1.0.0
 # >=1.4 bundles GDAL in the wheel (no `apt install gdal-bin` needed).
 rasterio>=1.4.0
 
+# OSM 提取（tools/osmium_pyosmium.py shim 的运行时依赖）。
+# 注意：`pyosmium` 已从 PyPI 下架（404），继任包名就是 `osmium`（同一库，
+# 4.x 起改名，支持 Python 3.9–3.14，Windows 有 cp314 wheel）。
+# 清华镜像不同步此包，需官方源安装：
+#   pip install -i https://pypi.org/simple "osmium>=4.0"
+osmium>=4.0
+
 # 3D manifold mesh library — guaranteed watertight output for 3D printing
 manifold3d>=3.4.0
 

@@ -132,6 +132,20 @@ uptime ; free -h ; df -h /
   - `worker.service`：已 disable（本地模式不需要）。
 - 系统库已补齐到 `/usr/lib64/`：`libssl.so.1.1`、`libcrypto.so.1.1`、`libffi.so.6.0.2`。
 
+### 本地开发机（Windows，可完整跑管线，2026-08-12 验证）
+- Python 3.14.3（py launcher；3.13.15 亦已装但无必要，3.14 全套可跑）。
+- **关键依赖坑**：`pyosmium` 已从 PyPI 下架（404），继任包名为 **`osmium`**（4.3.1，有 cp314 win_amd64 wheel）；且**清华镜像不同步此包**，必须 `-i https://pypi.org/simple` 安装：`python -m pip install -i https://pypi.org/simple osmium`，其余照 `requirements.txt`。
+- **osmium 解析**：Windows 上 `_check_tool` 走 `where osmium`，运行前需把项目 `tools\` 加进 PATH（`tools\osmium.cmd` 为 pyosmium shim 包装，`--version` 输出 `osmium version 1.16.0 (pyosmium)`）。ogr2ogr 缺失自动降级 shapely 裁剪。
+- **缓存盘**：`select_cache_path` 解析到 **`F:\map_gen_cache\project_cache`**，已有：`srtm/`（316 个 .hgt，含杭州 N30E120/N31E120，高程无需外网）、`grids/`（538）、`tiles/`（building 38 / road 112 / vegetation 26 / water 86）。高程瓦片子目录 `grids\tiles` 首跑会由 srtm 现算。
+- PBF：`pbf_cache\zhejiang-latest.osm.pbf` 在仓库内；amap 水体补偿走公网高德瓦片（国内可达）；cv2 可选（缺则 chamfer 降级恒等变换，B 也未装，不影响结果）；matplotlib 无中文字体仅影响 PNG 标注字形。
+- 本地跑法（与 B 同款）：
+  ```powershell
+  $env:PATH += ";$PWD\tools"
+  python generate_city.py --bbox 30.1464,120.0207,30.3716,120.2813 `
+    --pbf pbf_cache/zhejiang-latest.osm.pbf --city local_test `
+    --auto-params --draft --png
+  ```
+
 ---
 
 ## 三、SSH 连接方式

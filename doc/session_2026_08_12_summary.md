@@ -46,6 +46,7 @@
 ## 六、现状
 
 - **代码**：分支 `v0.2-with-gemeni-advise`，HEAD = 7376f23（+ 本文档提交）；测试 **240 passed, 8 skipped**。
+- **本地（Windows，可完整跑管线）**：Python 3.14.3 + `requirements.txt` 全装 + **`osmium` 4.3.1**（注意：`pyosmium` 已从 PyPI 下架，继任包名就是 `osmium`，且清华镜像不同步，需 `-i https://pypi.org/simple` 安装）；`tools\` 进 PATH 后 osmium shim 可用；缓存盘 `F:\map_gen_cache\project_cache`（srtm 含杭州 N30E120/N31E120，高程无需外网）。详见 `deployment_handover.md` 设备清单「本地开发机」节。
 - **B（118.31.184.240，计算主力）**：**无 git**，部署走 scp 单文件覆盖；`_water_supplement.py`、`tune_buildings_v2.py` 已同步至 7376f23 版本；rasterio 1.4.3 已装。后续改这两个文件需重新 scp。
 - **缓存**：杭州 snap 框 preprocess 缓存命中（0.2s 加载）；amap 卫星水面缓存 358/549 polygons；各图层瓦片缓存热。
 - **画廊**：`output/custom_bdb29b/` 四件套（draft.glb / preview / topdown / height）已替换为 fixtest9 产物。
