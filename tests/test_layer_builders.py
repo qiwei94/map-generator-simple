@@ -312,6 +312,27 @@ class TestRoadsV3:
         if result is not None:
             assert isinstance(result, trimesh.Trimesh)
 
+    def test_bridge_deck_is_raised_but_has_normal_thickness(self):
+        """桥梁应抬高整个桥面，而不是只向下加厚。"""
+        from _TEXTURE_STYLE_OF_DEEPSEEK.roads import build_deepseek_roads_v3
+        from _TEXTURE_STYLE_OF_DEEPSEEK.config import (
+            ROAD_BRIDGE_EXTRA_MM,
+            ROAD_THICKNESS_MM,
+            Z_ROAD_ABOVE_TERRAIN_MM,
+        )
+
+        terrain = _make_flat_terrain_mesh()
+        line = LineString([(100, 100), (500, 100)])
+        normal = build_deepseek_roads_v3([(line, "primary", False)], terrain, 2000.0)
+        bridge = build_deepseek_roads_v3([(line, "primary", True)], terrain, 2000.0)
+
+        assert normal is not None and bridge is not None
+        assert np.ptp(normal.vertices[:, 2]) == pytest.approx(ROAD_THICKNESS_MM, abs=1e-6)
+        assert np.ptp(bridge.vertices[:, 2]) == pytest.approx(ROAD_THICKNESS_MM, abs=1e-6)
+        assert normal.vertices[:, 2].max() == pytest.approx(Z_ROAD_ABOVE_TERRAIN_MM, abs=1e-6)
+        assert bridge.vertices[:, 2].max() == pytest.approx(
+            Z_ROAD_ABOVE_TERRAIN_MM + ROAD_BRIDGE_EXTRA_MM, abs=1e-6)
+
     def test_multiple_roads_merge(self):
         """多条道路合并为单个 watertight mesh。"""
         from _TEXTURE_STYLE_OF_DEEPSEEK.roads import build_deepseek_roads_v3

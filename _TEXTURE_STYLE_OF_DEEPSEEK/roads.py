@@ -26,7 +26,6 @@ import trimesh
 import manifold3d
 from shapely.geometry import LineString, MultiLineString, MultiPolygon, Polygon
 from shapely.ops import unary_union
-from shapely.strtree import STRtree
 import geopandas as gpd
 
 from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.processors.terrain import sample_terrain_z
@@ -231,8 +230,9 @@ def build_deepseek_roads_v3(
 
     import manifold3d as m3d  # type: ignore
 
-    RO_THICKNESS = Z_ROAD_ABOVE_TERRAIN_MM
-    RL_THICKNESS = Z_ROAD_ABOVE_TERRAIN_MM + ROAD_BRIDGE_EXTRA_MM
+    # ``Z_ROAD_ABOVE_TERRAIN_MM`` is the road top offset, not its thickness.
+    # Bridges use the same printable thickness but raise their complete deck.
+    ROAD_TOP_OFFSET_MM = Z_ROAD_ABOVE_TERRAIN_MM
 
     # Step 1: Buffer all lines
     t1 = time.time()
@@ -264,48 +264,45 @@ def build_deepseek_roads_v3(
     if not all_polys:
         return None
 
-    # Step 2: unary_union
+    # Step 2: union only within the same elevation class.  Unioning normal
+    # roads and bridge segments first loses the bridge attribute and can turn
+    # an entire connected road network into a raised bridge deck.
     t2 = time.time()
-    merged = unary_union([p for p, _, _ in all_polys])
+    grouped_polys = {
+        False: [p for p, _, is_bridge in all_polys if not is_bridge],
+        True: [p for p, _, is_bridge in all_polys if is_bridge],
+    }
+    sub_polys: List[Tuple[Polygon, bool]] = []
+    for is_bridge, polys in grouped_polys.items():
+        if not polys:
+            continue
+        merged = unary_union(polys)
+        if merged.is_empty:
+            continue
+        if isinstance(merged, MultiPolygon):
+            sub_polys.extend((poly, is_bridge) for poly in merged.geoms)
+        elif isinstance(merged, Polygon):
+            sub_polys.append((merged, is_bridge))
     print(f"  Roads(v3): unary_union time {time.time() - t2:.1f}s")
-    if merged.is_empty:
-        return None
-
-    if isinstance(merged, MultiPolygon):
-        sub_polys = list(merged.geoms)
-    elif isinstance(merged, Polygon):
-        sub_polys = [merged]
-    else:
+    if not sub_polys:
         return None
     print(f"  Roads(v3): union → {len(sub_polys)} 连通块")
 
-    # Step 3: Build bridge mask for each sub_poly
-    # A sub_poly is a bridge if it overlaps any bridge buffered poly
-    bridge_polys = [p for p, _, b in all_polys if b]
-    is_bridge_flags = [False] * len(sub_polys)
-    if bridge_polys:
-        bridge_tree = STRtree(bridge_polys)
-        for i, sp in enumerate(sub_polys):
-            centroid = sp.centroid
-            candidates = bridge_tree.query(centroid)
-            if len(candidates) > 0:
-                is_bridge_flags[i] = True
-
-    n_bridges = sum(is_bridge_flags)
+    n_bridges = sum(is_bridge for _, is_bridge in sub_polys)
     print(f"  Roads(v3): {n_bridges}/{len(sub_polys)} bridge blocks")
 
     # Step 4: Extrude each sub_poly (bridge → thicker)
     t4 = time.time()
-    cents_x = np.array([p.centroid.x for p in sub_polys])
-    cents_y = np.array([p.centroid.y for p in sub_polys])
+    cents_x = np.array([p.centroid.x for p, _ in sub_polys])
+    cents_y = np.array([p.centroid.y for p, _ in sub_polys])
     terrain_zs = sample_terrain_z(terrain_mesh, cents_x * scale, cents_y * scale)
 
     parts: List = []
     n_failed = 0
-    for poly, tz, is_b in zip(sub_polys, terrain_zs, is_bridge_flags):
+    for (poly, is_b), tz in zip(sub_polys, terrain_zs):
         if np.isnan(tz):
             continue
-        thickness = RL_THICKNESS if is_b else RO_THICKNESS
+        thickness = ROAD_THICKNESS_MM
         # Reuse road extrude logic (single polygon → manifold)
         cs = shapely_poly_to_crosssection(poly)
         if cs.is_empty():
@@ -313,7 +310,9 @@ def build_deepseek_roads_v3(
             continue
         try:
             cs = cs.scale((scale, scale))
-            z_top = float(tz) + Z_ROAD_ABOVE_TERRAIN_MM
+            z_top = float(tz) + ROAD_TOP_OFFSET_MM
+            if is_b:
+                z_top += ROAD_BRIDGE_EXTRA_MM
             z_bottom = z_top - thickness
             man = cs.extrude(height=thickness).translate((0, 0, z_bottom))
             if not man.is_empty():

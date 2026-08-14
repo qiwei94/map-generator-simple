@@ -114,6 +114,20 @@ class TestBuildDeepseekTerrain:
 
 class TestSampleDeepseekTerrainZ:
 
+    def test_regular_grid_sampler_matches_surface_triangles(self):
+        """A sloped terrain must not sample the highest nearby vertex."""
+        from _TEXTURE_STYLE_OF_DEEPSEEK.terrain import (
+            build_deepseek_terrain,
+            sample_deepseek_terrain_z,
+        )
+
+        # Only the north-east corner is high.  The terrain grid diagonal passes
+        # through the centre, where the generated surface is still at base Z.
+        grid = np.array([[0.0, 0.0], [0.0, 100.0]])
+        solid = build_deepseek_terrain(grid, 100.0, 100.0, 0.01, 1.0)
+        z = sample_deepseek_terrain_z(solid, np.array([0.0]), np.array([0.0]))
+        assert z[0] == pytest.approx(Z_TERRAIN_BASE, abs=1e-6)
+
     def test_known_flat_points(self):
         from _TEXTURE_STYLE_OF_DEEPSEEK.terrain import (
             build_deepseek_terrain,

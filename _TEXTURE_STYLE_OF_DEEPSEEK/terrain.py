@@ -186,6 +186,12 @@ def build_deepseek_terrain(elevation_grid: np.ndarray,
     mesh.vertices[:, :2] *= scale
 
     # Step 3: Map surface Z to model mm (0..TERRAIN_THICKNESS_MM + Z_TERRAIN_BASE)
+    #
+    # Keep a regular-grid sampler alongside the rendered mesh.  Other layers
+    # (roads, buildings, vegetation) must use the same top surface as the
+    # terrain, rather than a nearest-vertex approximation.  The terrain mesh
+    # may later be decimated or repaired, so derive this grid from the source
+    # DEM and use the exact mapping range chosen for the mesh below.
     z_surface = mesh.vertices[:, 2]
     z_min, z_max = z_surface.min(), z_surface.max()
     z_range = z_max - z_min
@@ -194,8 +200,17 @@ def build_deepseek_terrain(elevation_grid: np.ndarray,
         t = (z_surface - z_min) / z_range  # 0..1 normalized
         t = np.power(t, Z_GAMMA)            # power curve: <1 boosts low relief
         mesh.vertices[:, 2] = t * TERRAIN_THICKNESS_MM + Z_TERRAIN_BASE
+
+        sampler_t = (np.asarray(elevation_grid, dtype=np.float64) - z_min) / z_range
+        sampler_t = np.clip(sampler_t, 0.0, 1.0)
+        sampler_grid = np.power(sampler_t, Z_GAMMA) * TERRAIN_THICKNESS_MM + Z_TERRAIN_BASE
     else:
         mesh.vertices[:, 2] = TERRAIN_THICKNESS_MM / 2 + Z_TERRAIN_BASE
+        sampler_grid = np.full_like(
+            elevation_grid,
+            TERRAIN_THICKNESS_MM / 2 + Z_TERRAIN_BASE,
+            dtype=np.float64,
+        )
 
     # Step 4: Build watertight solid (add walls + bottom in model mm)
     solid = _add_walls_and_bottom(mesh, Z_TERRAIN_BASE)
@@ -211,6 +226,18 @@ def build_deepseek_terrain(elevation_grid: np.ndarray,
                                          fix_normals=True,
                                          fix_degenerate=True,
                                          fix_duplicates=True)
+
+    # ``sample_terrain_z`` recognizes this metadata and performs exact
+    # piecewise-linear interpolation matching the terrain grid triangulation.
+    # Attach it after repair because repair/Manifold conversion can replace the
+    # trimesh instance and discard metadata.
+    solid.metadata["_regular_grid_sampler"] = {
+        "x_min": -width_m * scale / 2.0,
+        "x_max": width_m * scale / 2.0,
+        "y_min": -height_m * scale / 2.0,
+        "y_max": height_m * scale / 2.0,
+        "z_grid": sampler_grid,
+    }
 
     return solid
 

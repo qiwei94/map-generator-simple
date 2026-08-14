@@ -227,14 +227,73 @@ def _get_terrain_kdtree(mesh: trimesh.Trimesh):
 
 
 def sample_terrain_z(mesh: trimesh.Trimesh, x: np.ndarray,
-                     y: np.ndarray) -> np.ndarray:
+                      y: np.ndarray) -> np.ndarray:
     """Sample Z (elevation) values from terrain mesh at given X,Y positions.
 
-    Uses cached cKDTree nearest-neighbor interpolation. Faster than ray casting
-    and avoids access violations on meshes with degenerate faces.
+    Terrains created by :func:`build_deepseek_terrain` carry their source grid
+    in metadata, so this function can use the same piecewise-linear triangles
+    as the rendered terrain surface.  That prevents wide roads and building
+    bases from being lifted to the highest nearby vertex on slopes.
+
+    For legacy or externally supplied meshes without this metadata, use the
+    existing cached cKDTree fallback.  It remains fast and avoids ray-casting
+    failures on degenerate input meshes.
     """
     if len(x) == 0:
         return np.array([])
+
+    sampler = mesh.metadata.get("_regular_grid_sampler") if hasattr(mesh, "metadata") else None
+    if sampler is not None:
+        try:
+            z_grid = np.asarray(sampler["z_grid"], dtype=np.float64)
+            rows, cols = z_grid.shape
+            if rows >= 2 and cols >= 2:
+                xs = np.asarray(x, dtype=np.float64)
+                ys = np.asarray(y, dtype=np.float64)
+                if xs.shape != ys.shape:
+                    raise ValueError("x and y must have matching shapes")
+
+                x_min, x_max = float(sampler["x_min"]), float(sampler["x_max"])
+                y_min, y_max = float(sampler["y_min"]), float(sampler["y_max"])
+                inside = ((xs >= x_min) & (xs <= x_max) &
+                          (ys >= y_min) & (ys <= y_max))
+                out = np.full(xs.shape, np.nan, dtype=np.float64)
+                if np.any(inside):
+                    # Grid faces are generated as (south-west, north-west,
+                    # south-east) and (south-east, north-west, north-east).
+                    # Interpolate within exactly those two triangles rather
+                    # than taking a nearest-neighbour maximum.
+                    u = (xs[inside] - x_min) / (x_max - x_min) * (cols - 1)
+                    v = (ys[inside] - y_min) / (y_max - y_min) * (rows - 1)
+                    col = np.minimum(np.floor(u).astype(np.intp), cols - 2)
+                    row = np.minimum(np.floor(v).astype(np.intp), rows - 2)
+                    fu = np.clip(u - col, 0.0, 1.0)
+                    fv = np.clip(v - row, 0.0, 1.0)
+
+                    z_sw = z_grid[row, col]
+                    z_se = z_grid[row, col + 1]
+                    z_nw = z_grid[row + 1, col]
+                    z_ne = z_grid[row + 1, col + 1]
+                    lower = (1.0 - fu - fv) * z_sw + fu * z_se + fv * z_nw
+                    upper = ((1.0 - fv) * z_se + (1.0 - fu) * z_nw +
+                             (fu + fv - 1.0) * z_ne)
+                    out[inside] = np.where(fu + fv <= 1.0, lower, upper)
+
+                # Preserve legacy behavior for callers that ask just outside
+                # the terrain: use the nearest terrain vertices instead of
+                # returning NaN.  In-range samples remain exact.
+                if np.all(inside):
+                    return out
+                tree = _get_terrain_kdtree(mesh)
+                k = min(8, len(mesh.vertices))
+                _, idxs = tree.query(np.column_stack([xs[~inside], ys[~inside]]), k=k)
+                if k == 1:
+                    idxs = idxs[:, np.newaxis]
+                out[~inside] = mesh.vertices[idxs, 2].max(axis=1)
+                return out
+        except (KeyError, TypeError, ValueError):
+            # An invalid legacy metadata value should not break generation.
+            pass
 
     tree = _get_terrain_kdtree(mesh)
     k = min(8, len(mesh.vertices))
