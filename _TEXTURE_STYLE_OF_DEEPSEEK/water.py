@@ -15,10 +15,14 @@ Structure (model space):
 
 from __future__ import annotations
 
+from typing import Iterable, List
+
 import numpy as np
 import trimesh
 import manifold3d
 import geopandas as gpd
+from shapely.affinity import scale as scale_geometry
+from shapely.geometry import GeometryCollection, MultiPolygon, Polygon, box
 
 from _TEXTURE_STYLE_OF_DEEPSEEK._geom_utils import (
     collect_water_polygons,
@@ -31,7 +35,10 @@ from _TEXTURE_STYLE_OF_DEEPSEEK.config import (
     WATER_MAX_EDGE_M,
     Z_WATER_BASE_MM,
     Z_TERRAIN_BASE,
+    WATER_OVERLAY_TOP_MM,
+    WATER_OVERLAY_EMBED_MM,
 )
+from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.processors.terrain import sample_terrain_z
 
 
 # ---------------------------------------------------------------------------
@@ -141,13 +148,153 @@ def build_deepseek_water(gdf: gpd.GeoDataFrame,
 # V3 builder: 接收 preprocess 输出的 WL/WO polygon，区分凹陷深度
 # ---------------------------------------------------------------------------
 
+
+def _polygon_parts(geom) -> Iterable[Polygon]:
+    """Yield non-empty Polygon components from a Shapely result."""
+    if geom is None or geom.is_empty:
+        return
+    if isinstance(geom, Polygon):
+        yield geom
+    elif isinstance(geom, (MultiPolygon, GeometryCollection)):
+        for part in geom.geoms:
+            yield from _polygon_parts(part)
+
+
+def _draped_water_mesh(
+    polygon: Polygon,
+    terrain_mesh: trimesh.Trimesh,
+    scale: float,
+    top_offset_mm: float,
+    embed_mm: float,
+) -> trimesh.Trimesh | None:
+    """Create a watertight water overlay following the terrain triangles.
+
+    Water input coordinates are local metres, while terrain vertices are model
+    millimetres.  The overlay is clipped against the regular terrain grid, so
+    every top face uses the same interpolation and diagonal as the terrain.
+    This avoids a lake surface cutting through hills (or vanishing below them)
+    without using a destructive boolean on the entire terrain solid.
+    """
+    if scale <= 0:
+        return None
+
+    sampler = terrain_mesh.metadata.get("_regular_grid_sampler")
+    if sampler is None:
+        return None
+
+    z_grid = np.asarray(sampler.get("z_grid"), dtype=np.float64)
+    if z_grid.ndim != 2 or min(z_grid.shape) < 2:
+        return None
+
+    rows, cols = z_grid.shape
+    x_min, x_max = float(sampler["x_min"]), float(sampler["x_max"])
+    y_min, y_max = float(sampler["y_min"]), float(sampler["y_max"])
+    dx = (x_max - x_min) / (cols - 1)
+    dy = (y_max - y_min) / (rows - 1)
+    if dx <= 0 or dy <= 0:
+        return None
+
+    # Scale only XY.  The source geometries are in metres; the sampler uses mm.
+    poly_mm = scale_geometry(polygon, xfact=scale, yfact=scale, origin=(0, 0))
+    poly_mm = poly_mm.intersection(box(x_min, y_min, x_max, y_max))
+    if poly_mm.is_empty:
+        return None
+
+    min_x, min_y, max_x, max_y = poly_mm.bounds
+    col_start = max(0, int(np.floor((min_x - x_min) / dx)))
+    col_stop = min(cols - 2, int(np.ceil((max_x - x_min) / dx)) - 1)
+    row_start = max(0, int(np.floor((min_y - y_min) / dy)))
+    row_stop = min(rows - 2, int(np.ceil((max_y - y_min) / dy)) - 1)
+    if col_stop < col_start or row_stop < row_start:
+        return None
+
+    vertices: list[np.ndarray] = []
+    faces: list[np.ndarray] = []
+    vertex_count = 0
+    for row in range(row_start, row_stop + 1):
+        y0 = y_min + row * dy
+        y1 = y0 + dy
+        for col in range(col_start, col_stop + 1):
+            x0 = x_min + col * dx
+            x1 = x0 + dx
+            # Match ``_generate_grid_faces`` exactly: SW-NW-SE, SE-NW-NE.
+            terrain_triangles = (
+                Polygon(((x0, y0), (x0, y1), (x1, y0))),
+                Polygon(((x1, y0), (x0, y1), (x1, y1))),
+            )
+            for terrain_triangle in terrain_triangles:
+                if poly_mm.covers(terrain_triangle):
+                    clipped = terrain_triangle
+                else:
+                    clipped = poly_mm.intersection(terrain_triangle)
+
+                for part in _polygon_parts(clipped):
+                    if part.area <= 1e-10:
+                        continue
+                    try:
+                        xy, tri_faces = trimesh.creation.triangulate_polygon(
+                            part, engine="earcut",
+                        )
+                    except Exception:
+                        continue
+                    if len(tri_faces) == 0:
+                        continue
+                    z = sample_terrain_z(terrain_mesh, xy[:, 0], xy[:, 1])
+                    if not np.all(np.isfinite(z)):
+                        continue
+                    vertices.append(np.column_stack((xy, z + top_offset_mm)))
+                    faces.append(np.asarray(tri_faces, dtype=np.int64) + vertex_count)
+                    vertex_count += len(xy)
+
+    if not vertices:
+        return None
+
+    top = trimesh.Trimesh(
+        vertices=np.vstack(vertices), faces=np.vstack(faces), process=False,
+    )
+    top.merge_vertices()
+    top.update_faces(top.unique_faces())
+    top.remove_unreferenced_vertices()
+    trimesh.repair.fix_normals(top, multibody=True)
+
+    # Duplicate the terrain-conforming top below the terrain surface.  The
+    # boundary of the triangulated patch becomes the vertical side wall.
+    n_vertices = len(top.vertices)
+    lower_vertices = top.vertices.copy()
+    lower_vertices[:, 2] -= top_offset_mm + embed_mm
+
+    directed_edges = np.vstack((
+        top.faces[:, [0, 1]], top.faces[:, [1, 2]], top.faces[:, [2, 0]],
+    ))
+    sorted_edges = np.sort(directed_edges, axis=1)
+    _, inverse, counts = np.unique(
+        sorted_edges, axis=0, return_inverse=True, return_counts=True,
+    )
+    boundary_edges = directed_edges[counts[inverse] == 1]
+    if len(boundary_edges) == 0:
+        return None
+
+    a, b = boundary_edges[:, 0], boundary_edges[:, 1]
+    wall_faces = np.vstack((
+        np.column_stack((a, a + n_vertices, b)),
+        np.column_stack((b, a + n_vertices, b + n_vertices)),
+    ))
+    mesh = trimesh.Trimesh(
+        vertices=np.vstack((top.vertices, lower_vertices)),
+        faces=np.vstack((top.faces, top.faces[:, ::-1] + n_vertices, wall_faces)),
+        process=False,
+    )
+    trimesh.repair.fix_normals(mesh, multibody=True)
+    return mesh if mesh.is_watertight else None
+
 def build_deepseek_water_v3(
     WL_polys: List[Polygon],
     WO_polys: List[Polygon],
     bbox_x_min: float, bbox_y_min: float,
     bbox_x_max: float, bbox_y_max: float,
     scale: float = 1.0,
-    flat_only: bool = True,
+    flat_only: bool = False,
+    terrain_mesh: trimesh.Trimesh | None = None,
 ) -> trimesh.Trimesh:
     """V3 water builder.
 
@@ -156,8 +303,12 @@ def build_deepseek_water_v3(
         WO_polys: 小水体 polygon
         bbox_*: full bounding box (local coords, meters)
         scale: mm-per-meter
-        flat_only: True=只出平底板（水体形状由 terrain 镂空表达），
-                   False=底板+水体凸起（旧行为）
+        flat_only: True=only emit the legacy flat base plate.  Kept for
+                   compatibility; it is not suitable when terrain has no
+                   water holes.
+        terrain_mesh: terrain solid carrying the regular-grid sampler.  When
+                   supplied, emit terrain-conforming water overlays instead
+                   of the legacy full-area base plate.
 
     Returns:
         Watertight trimesh of base plate (+ optional water features), or None.
@@ -167,6 +318,41 @@ def build_deepseek_water_v3(
         return None
 
     n_wl = len(WL_polys)
+
+    if terrain_mesh is not None and not flat_only:
+        parts: list[trimesh.Trimesh] = []
+        failed = 0
+        for poly in WL_polys:
+            mesh = _draped_water_mesh(
+                poly, terrain_mesh, scale,
+                top_offset_mm=WATER_OVERLAY_TOP_MM,
+                embed_mm=WATER_OVERLAY_EMBED_MM,
+            )
+            if mesh is None:
+                failed += 1
+            else:
+                parts.append(mesh)
+        for poly in WO_polys:
+            mesh = _draped_water_mesh(
+                poly, terrain_mesh, scale,
+                top_offset_mm=WATER_OVERLAY_TOP_MM * 0.75,
+                embed_mm=WATER_OVERLAY_EMBED_MM,
+            )
+            if mesh is None:
+                failed += 1
+            else:
+                parts.append(mesh)
+
+        if not parts:
+            print("  Water(v3): no terrain-conforming overlays generated")
+            return None
+        result = trimesh.util.concatenate(parts)
+        print(
+            f"  Water(v3): {len(parts)} terrain-conforming overlays "
+            f"({n_wl} WL, {len(WO_polys)} WO)"
+            + (f", {failed} failures" if failed else "")
+        )
+        return result
 
     # Convert config mm thickness to model meters
     base_thickness_m = WATER_BASE_THICKNESS_MM / scale if scale > 0 else 0.0

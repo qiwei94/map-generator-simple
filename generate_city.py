@@ -609,7 +609,8 @@ def main():
         try:
             water_mesh = build_deepseek_water_v3(
                 layers.WL, layers.WO,
-                bbox_x_min, bbox_y_min, bbox_x_max, bbox_y_max, scale)
+                bbox_x_min, bbox_y_min, bbox_x_max, bbox_y_max, scale,
+                terrain_mesh=terrain_solid)
             if water_mesh is not None:
                 print(f"  Water faces: {len(water_mesh.faces):,}")
             else:

@@ -204,6 +204,35 @@ class TestWaterV3:
         assert result is not None
         assert isinstance(result, trimesh.Trimesh)
 
+    def test_terrain_conforming_water_is_visible_and_watertight(self):
+        """水面贴合坡面并露出 0.30mm，不再被地形遮住。"""
+        from _TEXTURE_STYLE_OF_DEEPSEEK.config import (
+            WATER_OVERLAY_EMBED_MM,
+            WATER_OVERLAY_TOP_MM,
+        )
+        from _TEXTURE_STYLE_OF_DEEPSEEK.terrain import build_deepseek_terrain
+        from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.processors.terrain import (
+            sample_terrain_z,
+        )
+        from _TEXTURE_STYLE_OF_DEEPSEEK.water import build_deepseek_water_v3
+
+        terrain = build_deepseek_terrain(
+            np.array([[0.0, 0.0], [0.0, 100.0]]),
+            width_m=200.0, height_m=200.0, area_km2=0.0, scale=1.0,
+        )
+        water = build_deepseek_water_v3(
+            [Polygon([(-80, -80), (80, -80), (80, 80), (-80, 80)])],
+            [], -100, -100, 100, 100, scale=1.0, terrain_mesh=terrain,
+        )
+
+        assert water is not None
+        assert water.is_watertight
+        sampled = sample_terrain_z(
+            terrain, water.vertices[:, 0], water.vertices[:, 1],
+        )
+        offsets = np.unique(np.round(water.vertices[:, 2] - sampled, 6))
+        assert np.allclose(offsets, [-WATER_OVERLAY_EMBED_MM, WATER_OVERLAY_TOP_MM])
+
 
 # ---------------------------------------------------------------------------
 # vegetation v3

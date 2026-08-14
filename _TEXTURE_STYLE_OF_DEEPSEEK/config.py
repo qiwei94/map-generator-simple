@@ -75,6 +75,11 @@ BUILDING_HEIGHT_MAX_MM = 4.0   # [TUNE] was 5.3 in terrain3d/config, reduced to 
 BUILDING_EXCLUSION_TOP_MM = 5.0  # [CALC] clears max building height(4.0) + margin
 ROAD_THICKNESS_MM = 0.4        # [CONV] = 1x nozzle diameter, single-extrusion ribbon
 WATER_THICKNESS_MM = 0.5       # [REF] flat plate portion (Hangzhou reference: 1.52mm total with relief)
+# Water is a terrain-conforming overlay rather than a second, hidden base
+# plate.  The overlap guarantees a printable bond with the terrain; the top
+# offset keeps the black water readable after slicing.
+WATER_OVERLAY_TOP_MM = 0.30    # [CALC] visible with a 0.4mm FDM nozzle
+WATER_OVERLAY_EMBED_MM = 0.20  # [CALC] overlap into terrain for fusion
 
 # ---------------------------------------------------------------------------
 # Building height estimation
