@@ -6,10 +6,11 @@
     120.29
   ],
   "pbf": "westlake_10km.osm.pbf",
+  "pbf_sha256": "f5a64af3bec9a104a7fc23ea9994a5f10d3c6301d8cd00bcfe237ab1357e36e8",
   "meshes": {
     "terrain": {
-      "vertex_count": 184503,
-      "face_count": 367446,
+      "vertex_count": 864910,
+      "face_count": 1729816,
       "bbox": [
         -98.0,
         -88.169,
@@ -18,91 +19,91 @@
         88.169,
         2.4
       ],
-      "volume": 40370.8778,
+      "volume": 41258.8327,
       "watertight": true
     },
     "buildings": {
-      "vertex_count": 188148,
-      "face_count": 371704,
-      "bbox": [
-        -82.0942,
-        -51.623,
-        -0.7385,
-        42.5164,
-        46.5744,
-        1.1225
-      ],
-      "volume": 1055.202,
-      "watertight": true
-    },
-    "landmarks": {
-      "vertex_count": 7399,
-      "face_count": 14454,
-      "bbox": [
-        -82.7992,
-        -51.0064,
-        -0.6856,
-        42.7645,
-        41.4341,
-        3.6548
-      ],
-      "volume": 115.6707,
-      "watertight": true
-    },
-    "roads": {
-      "vertex_count": 30588,
-      "face_count": 62268,
-      "bbox": [
-        -88.5839,
-        -58.9382,
-        -0.7617,
-        61.8856,
-        47.4175,
-        0.5136
-      ],
-      "volume": 709.9594,
-      "watertight": true
-    },
-    "water": {
-      "vertex_count": 8,
-      "face_count": 12,
+      "vertex_count": 427075,
+      "face_count": 843566,
       "bbox": [
         -98.0,
         -88.169,
-        -2.0,
-        98.0,
+        -1.0795,
+        97.5979,
         88.169,
-        -1.6
+        1.2221
       ],
-      "volume": 13824.9055,
+      "volume": 2609.9866,
+      "watertight": true
+    },
+    "landmarks": {
+      "vertex_count": 15654,
+      "face_count": 30644,
+      "bbox": [
+        -91.5987,
+        -87.6024,
+        -0.7881,
+        86.9831,
+        74.5131,
+        3.5768
+      ],
+      "volume": 266.5069,
+      "watertight": true
+    },
+    "roads": {
+      "vertex_count": 96637,
+      "face_count": 196982,
+      "bbox": [
+        -98.0683,
+        -88.4358,
+        -0.5491,
+        98.2396,
+        88.432,
+        0.8395
+      ],
+      "volume": 1647.8294,
+      "watertight": true
+    },
+    "water": {
+      "vertex_count": 352708,
+      "face_count": 705308,
+      "bbox": [
+        -93.5916,
+        -88.169,
+        -1.3032,
+        96.8372,
+        88.169,
+        1.1129
+      ],
+      "volume": 1580.5644,
       "watertight": true
     },
     "vegetation": {
-      "vertex_count": 66028,
-      "face_count": 129732,
+      "vertex_count": 143146,
+      "face_count": 279176,
       "bbox": [
         -98.0,
-        -71.2366,
-        -0.8422,
-        47.0844,
-        52.4524,
-        2.5
+        -88.169,
+        -1.3662,
+        97.4444,
+        88.169,
+        2.5341
       ],
       "volume": 0.0,
       "watertight": false
     },
     "block_base": {
-      "vertex_count": 678344,
-      "face_count": 1345536,
+      "vertex_count": 2187423,
+      "face_count": 4339562,
       "bbox": [
         -98.0,
         -88.169,
-        -0.7618,
+        -0.8805,
         98.0,
         88.169,
-        2.4311
+        2.447
       ],
-      "volume": 13339.121,
+      "volume": 7507.6921,
       "watertight": true
     }
   }

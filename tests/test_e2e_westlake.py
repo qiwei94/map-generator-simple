@@ -16,6 +16,7 @@ import json
 import os
 import sys
 import time
+import hashlib
 
 import numpy as np
 import pytest
@@ -56,11 +57,21 @@ def _mesh_fingerprint(mesh) -> dict:
     }
 
 
+def _file_sha256(path: str) -> str:
+    """Return a content identity for an external E2E fixture."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _compute_fingerprint(meshes: dict) -> dict:
     """Compute structural fingerprint for all sub-meshes."""
     fp = {
         "bbox_wgs84": [LAT1, LON1, LAT2, LON2],
         "pbf": "westlake_10km.osm.pbf",
+        "pbf_sha256": _file_sha256(PBF_PATH),
         "meshes": {},
     }
     for name in ["terrain", "buildings", "landmarks", "roads",
@@ -96,9 +107,6 @@ def _run_westlake_pipeline(output_dir: str) -> dict:
     from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.osmium_cli_fetcher import fetch_from_cli
     from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.elevation import fetch_elevation_grid
     from _TEXTURE_STYLE_OF_DEEPSEEK.terrain import build_deepseek_terrain
-    from _TEXTURE_STYLE_OF_DEEPSEEK.object4_terrain_with_holes import (
-        build_terrain_with_water_holes_manifold,
-    )
     from _TEXTURE_STYLE_OF_DEEPSEEK.buildings import build_deepseek_buildings_v3
     from _TEXTURE_STYLE_OF_DEEPSEEK.roads import build_deepseek_roads_v3
     from _TEXTURE_STYLE_OF_DEEPSEEK.water import build_deepseek_water_v3
@@ -165,24 +173,12 @@ def _run_westlake_pipeline(output_dir: str) -> dict:
         landuse_gdf = project_geodataframe(landuse_gdf, utm_crs, origin, clip_bbox=utm_bbox)
 
     # Stage 4: Terrain
-    terrain_solid = None
-    if water_gdf is not None and len(water_gdf) > 0:
-        try:
-            has_roads = roads_gdf is not None and len(roads_gdf) > 0
-            terrain_result = build_terrain_with_water_holes_manifold(
-                elevation_grid, width_m, height_m, area_km2, scale,
-                water_gdf,
-                roads_gdf=roads_gdf if has_roads else None,
-                enable_roads_fusion=has_roads,
-                bridges_only=True,
-            )
-            terrain_solid = terrain_result["mesh"]
-        except Exception:
-            pass
-    if terrain_solid is None:
-        terrain_solid = build_deepseek_terrain(
-            elevation_grid, width_m, height_m, area_km2, scale, water_gdf
-        )
+    # Match the production path: preserve the terrain surface and render water
+    # as a terrain-conforming overlay.  The retired terrain-hole boolean path
+    # changes face counts and hides regressions in the visible water layer.
+    terrain_solid = build_deepseek_terrain(
+        elevation_grid, width_m, height_m, area_km2, scale, water_gdf
+    )
 
     # Stage 4.5: Preprocess
     bbox_local = (bbox_x_min, bbox_y_min, bbox_x_max, bbox_y_max)
@@ -227,7 +223,8 @@ def _run_westlake_pipeline(output_dir: str) -> dict:
         try:
             water_mesh = build_deepseek_water_v3(
                 layers.WL, layers.WO,
-                bbox_x_min, bbox_y_min, bbox_x_max, bbox_y_max, scale)
+                bbox_x_min, bbox_y_min, bbox_x_max, bbox_y_max, scale,
+                terrain_mesh=terrain_solid)
         except Exception:
             pass
 
@@ -346,14 +343,28 @@ class TestWestlakeE2E:
         assert z_range > 0.5, f"Z range too small: {z_range}"
         assert z_range < TERRAIN_THICKNESS_MM + 2.0, f"Z range too large: {z_range}"
 
-    def test_water_below_terrain(self, westlake_result):
-        """Water Z_min is below terrain Z_min (water plate on build plate)."""
+    def test_water_interlocks_with_terrain(self, westlake_result):
+        """Water embeds into, and remains visible above, its local terrain."""
+        from _TEXTURE_STYLE_OF_DEEPSEEK.config import (
+            WATER_OVERLAY_EMBED_MM,
+            WATER_OVERLAY_TOP_MM,
+        )
+        from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.processors.terrain import (
+            sample_terrain_z,
+        )
+
         meshes = westlake_result["meshes"]
         if meshes["water"] is None:
             pytest.skip("No water mesh")
-        water_z_min = meshes["water"].vertices[:, 2].min()
-        terrain_z_min = meshes["terrain"].vertices[:, 2].min()
-        assert water_z_min < terrain_z_min
+        water = meshes["water"]
+        terrain = meshes["terrain"]
+        terrain_z = sample_terrain_z(
+            terrain, water.vertices[:, 0], water.vertices[:, 1],
+        )
+        offsets = water.vertices[:, 2] - terrain_z
+        assert np.nanmin(offsets) <= -WATER_OVERLAY_EMBED_MM + 1e-4
+        # Small water bodies intentionally use 75% of the main-water relief.
+        assert np.nanmax(offsets) >= WATER_OVERLAY_TOP_MM * 0.75 - 1e-4
 
     def test_structural_fingerprint(self, westlake_result, request):
         """Compare mesh fingerprints against golden baseline."""
@@ -369,6 +380,9 @@ class TestWestlakeE2E:
                 pytest.skip("Golden baseline created — re-run to compare")
 
         golden = _load_golden()
+
+        assert current_fp["pbf_sha256"] == golden["pbf_sha256"], \
+            "PBF fixture content changed; regenerate the fixture and golden together"
 
         # Compare mesh counts
         golden_names = set(golden["meshes"].keys())
