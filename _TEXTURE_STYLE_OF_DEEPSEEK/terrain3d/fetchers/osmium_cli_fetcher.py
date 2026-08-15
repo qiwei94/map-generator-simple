@@ -11,9 +11,11 @@
 
 import logging
 import os
+import shlex
 import subprocess
+import sys
 import tempfile
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 import geopandas as gpd
 
@@ -21,6 +23,8 @@ logger = logging.getLogger(__name__)
 
 # 默认 PBF 文件目录
 DEFAULT_PBF_DIR = os.path.join(os.path.dirname(__file__), '..', '..', '..', 'pbf_cache')
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..'))
+PORTABLE_OSMIUM_SCRIPT = os.path.join(PROJECT_ROOT, 'tools', 'osmium_pyosmium.py')
 
 
 class OsmiumCLIFetcher:
@@ -87,14 +91,26 @@ class OsmiumCLIFetcher:
         # 查找 conda 环境中的工具路径
         self.conda_env_path = self._find_conda_env_path()
 
-        # 检查 osmium 是否可用
-        self.osmium_available = self._check_tool('osmium')
+        # Prefer the native binary, but keep the pipeline functional on machines
+        # where only the Python dependency can be installed.
+        self.native_osmium_available = self._check_tool('osmium')
+        self.osmium_command = self._resolve_osmium_command()
+        self.osmium_available = self.osmium_command is not None
+        self.osmium_backend = (
+            'native' if self.native_osmium_available
+            else 'pyosmium' if self.osmium_available
+            else 'unavailable'
+        )
 
         # 检查 ogr2ogr 是否可用（用于 relation 数据的 bbox 裁剪）
         self.ogr2ogr_available = self._check_tool('ogr2ogr')
 
-        if not self.osmium_available:
-            logger.warning("osmium CLI 未安装。安装: conda install -c conda-forge osmium-tool")
+        if self.osmium_backend == 'pyosmium':
+            logger.info("原生 osmium 不可用，使用 portable pyosmium 回退")
+        elif not self.osmium_available:
+            logger.warning(
+                "osmium 不可用。安装 osmium-tool，或 pip install osmium 以启用 portable 回退"
+            )
         if not self.ogr2ogr_available:
             logger.warning("ogr2ogr 未安装。安装: conda install -c conda-forge gdal")
             logger.warning("ogr2ogr 用于河流 relation 数据的 bbox 裁剪，缺失可能导致河流数据不完整")
@@ -223,6 +239,38 @@ class OsmiumCLIFetcher:
                     return tool_path_no_ext
         
         return tool_name
+
+    def _resolve_osmium_command(self) -> Optional[List[str]]:
+        """Return an argv prefix for native osmium or the bundled fallback."""
+        if self.native_osmium_available:
+            return [self._get_tool_path('osmium')]
+
+        if not os.path.isfile(PORTABLE_OSMIUM_SCRIPT):
+            return None
+
+        command = [sys.executable, PORTABLE_OSMIUM_SCRIPT]
+        flags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+        try:
+            result = subprocess.run(
+                command + ['--version'],
+                capture_output=True,
+                timeout=10,
+                creationflags=flags,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            return None
+        return command if result.returncode == 0 else None
+
+    def _get_tool_command(self, tool_name: str) -> List[str]:
+        """Return a subprocess-safe argv prefix for a supported tool."""
+        if tool_name == 'osmium':
+            return list(self.osmium_command or [])
+        return [self._get_tool_path(tool_name)]
+
+    @staticmethod
+    def _format_command(command: List[str]) -> str:
+        """Format argv for logs only; execution always receives the list."""
+        return shlex.join(command)
     
     def _find_pbf_file(self, region: str) -> Optional[str]:
         """查找区域对应的 PBF 文件"""
@@ -388,24 +436,27 @@ class OsmiumCLIFetcher:
         else:
             flags = 0
 
-        osmium_path = self._get_tool_path('osmium')
+        osmium_command = self._get_tool_command('osmium')
+        if not osmium_command:
+            logger.error("osmium command unavailable")
+            return False
 
         # 判断是否使用 relation-first 管线
         use_relation_first = tag_type in self.RELATION_FIRST_TYPES
 
         if use_relation_first:
             return self._run_relation_first_pipeline(
-                osmium_path, pbf_file, tag_type, south, west, north, east,
+                osmium_command, pbf_file, tag_type, south, west, north, east,
                 output_path, temp_dir, base_name, flags
             )
         else:
             return self._run_standard_pipeline(
-                osmium_path, pbf_file, tag_type, south, west, north, east,
+                osmium_command, pbf_file, tag_type, south, west, north, east,
                 output_path, temp_dir, base_name, flags
             )
 
     def _run_standard_pipeline(
-        self, osmium_path, pbf_file, tag_type, south, west, north, east,
+        self, osmium_command, pbf_file, tag_type, south, west, north, east,
         output_path, temp_dir, base_name, flags
     ) -> bool:
         """标准管线：extract → tags-filter → export → (ogr2ogr clip for water)"""
@@ -418,8 +469,8 @@ class OsmiumCLIFetcher:
         # Step 1: bbox 裁剪（水体用 -s smart 保留跨 bbox 的完整 way/relation）
         area_pbf = os.path.join(temp_dir, f"{base_name}_area.pbf")
 
-        cmd1 = [
-            osmium_path, 'extract',
+        cmd1 = osmium_command + [
+            'extract',
             '-b', bbox_str,
         ]
         if is_water:
@@ -431,7 +482,7 @@ class OsmiumCLIFetcher:
         ])
 
         smart_label = ' -s smart' if is_water else ''
-        logger.info(f"Step 1: {osmium_path} extract -b {bbox_str}{smart_label}")
+        logger.info("Step 1: %s", self._format_command(cmd1))
         print(f"  [Step 1/{n_steps}] osmium extract (clipping area){' (smart mode)' if is_water else ''}...")
         print(f"           Command: osmium extract -b {bbox_str}{smart_label} {pbf_file} -o {area_pbf} --overwrite")
         t1 = time.time()
@@ -463,15 +514,15 @@ class OsmiumCLIFetcher:
             logger.error(f"未知的 tag_type: {tag_type}")
             return False
 
-        cmd2 = [
-            osmium_path, 'tags-filter',
+        cmd2 = osmium_command + [
+            'tags-filter',
             area_pbf,
         ] + filter_expr.split() + [
             '-o', filtered_pbf,
             '--overwrite'
         ]
 
-        logger.info(f"Step 2: {osmium_path} tags-filter {filter_expr}")
+        logger.info("Step 2: %s", self._format_command(cmd2))
         print(f"  [Step 2/{n_steps}] osmium tags-filter (filtering {tag_type} features)...")
         print(f"           Command: osmium tags-filter {area_pbf} {filter_expr} -o {filtered_pbf} --overwrite")
         t2 = time.time()
@@ -497,15 +548,15 @@ class OsmiumCLIFetcher:
         else:
             raw_geojson = output_path
 
-        cmd3 = [
-            osmium_path, 'export',
+        cmd3 = osmium_command + [
+            'export',
             filtered_pbf,
             '-o', raw_geojson,
             '-f', 'geojson',
             '--overwrite'
         ]
 
-        logger.info(f"Step 3: {osmium_path} export -f geojson")
+        logger.info("Step 3: %s", self._format_command(cmd3))
         print(f"  [Step 3/{n_steps}] osmium export (converting to GeoJSON)...")
         print(f"           Command: osmium export {filtered_pbf} -o {raw_geojson} -f geojson --overwrite")
         t3 = time.time()
@@ -584,7 +635,7 @@ class OsmiumCLIFetcher:
         return True
 
     def _run_relation_first_pipeline(
-        self, osmium_path, pbf_file, tag_type, south, west, north, east,
+        self, osmium_command, pbf_file, tag_type, south, west, north, east,
         output_path, temp_dir, base_name, flags
     ) -> bool:
         """Relation-first 管线：tags-filter → export → ogr2ogr clip
@@ -602,8 +653,8 @@ class OsmiumCLIFetcher:
 
         # Step 1a: extract 裁剪区域（避免对完整国家 PBF 做 tags-filter 触发 zlib buffer error）
         area_pbf = os.path.join(temp_dir, f"{base_name}_{tag_type}_area.pbf")
-        cmd_extract = [
-            osmium_path, 'extract',
+        cmd_extract = osmium_command + [
+            'extract',
             '-b', bbox_str,
             '-s', 'smart',
             pbf_file,
@@ -611,7 +662,7 @@ class OsmiumCLIFetcher:
             '--overwrite'
         ]
 
-        logger.info(f"Step 1a: {osmium_path} extract -b {bbox_str}")
+        logger.info("Step 1a: %s", self._format_command(cmd_extract))
         print(f"  [Step 1/3] osmium extract → tags-filter (extract area then filter {tag_type})...")
         print(f"           Extract: osmium extract -b {bbox_str} -s smart {pbf_file}")
         t1 = time.time()
@@ -636,8 +687,8 @@ class OsmiumCLIFetcher:
 
         # Step 1b: tags-filter 在裁切后的小文件上（不会触发 buffer error）
         filtered_pbf = os.path.join(temp_dir, f"{base_name}_{tag_type}_full.pbf")
-        cmd1 = [
-            osmium_path, 'tags-filter',
+        cmd1 = osmium_command + [
+            'tags-filter',
             area_pbf,
         ] + filter_expr.split() + [
             '-o', filtered_pbf,
@@ -664,15 +715,15 @@ class OsmiumCLIFetcher:
         # Step 2: 导出为 GeoJSON（保持完整 relation 结构）
         full_geojson = os.path.join(temp_dir, f"{base_name}_{tag_type}_full.geojson")
 
-        cmd2 = [
-            osmium_path, 'export',
+        cmd2 = osmium_command + [
+            'export',
             filtered_pbf,
             '-o', full_geojson,
             '-f', 'geojson',
             '--overwrite'
         ]
 
-        logger.info(f"Step 2: {osmium_path} export -f geojson")
+        logger.info("Step 2: %s", self._format_command(cmd2))
         print(f"  [Step 2/3] osmium export (converting to GeoJSON)...")
         print(f"           Command: osmium export {filtered_pbf} -o {full_geojson} -f geojson --overwrite")
         t2 = time.time()
@@ -786,8 +837,8 @@ def sample_building_density(
     """
     import re, shutil, time as _time
     fetcher = get_cli_fetcher()
-    osmium_path = fetcher._get_tool_path('osmium')
-    if not osmium_path:
+    osmium_command = fetcher._get_tool_command('osmium')
+    if not osmium_command:
         return {'count_est': 0, 'area_km2': 0, 'density': 0, 'should_filter': False}
 
     t0 = _time.time()
@@ -799,20 +850,20 @@ def sample_building_density(
     count_est = 0
     try:
         # Step 1: osmium extract (bbox clip)
-        subprocess.run([
-            osmium_path, 'extract',
+        subprocess.run(osmium_command + [
+            'extract',
             '-b', f'{west},{south},{east},{north}', '-s', 'smart',
             pbf_file, '-o', area_pbf, '--overwrite'
         ], capture_output=True, timeout=120, check=True, creationflags=flags)
         # Step 2: osmium tags-filter (building only)
-        subprocess.run([
-            osmium_path, 'tags-filter',
+        subprocess.run(osmium_command + [
+            'tags-filter',
             area_pbf, 'nwr/building',
             '-o', bldg_pbf, '--overwrite'
         ], capture_output=True, timeout=60, check=True, creationflags=flags)
         # Step 3: osmium fileinfo -e (text format) → parse "Number of ways"
-        info = subprocess.run([
-            osmium_path, 'fileinfo', '-e', bldg_pbf
+        info = subprocess.run(osmium_command + [
+            'fileinfo', '-e', bldg_pbf
         ], capture_output=True, text=True, timeout=30, creationflags=flags)
         if info.returncode == 0:
             # Parse "Number of ways: 36118" from text output
