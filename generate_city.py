@@ -37,6 +37,11 @@ from _TEXTURE_STYLE_OF_DEEPSEEK.block_base import build_deepseek_block_base_v3
 from _TEXTURE_STYLE_OF_DEEPSEEK._layer_preprocess import preprocess_layers
 from _TEXTURE_STYLE_OF_DEEPSEEK.exporter import export_deepseek_3mf, split_terrain_mesh
 from _TEXTURE_STYLE_OF_DEEPSEEK.config import compute_scale, WATERWAY_WIDTHS, TERRAIN_GRID, get_area_class, BUILDING_V2_HOTSPOT_RELAX
+from _TEXTURE_STYLE_OF_DEEPSEEK.design_spec import (
+    DESIGN_PRESETS,
+    filter_features,
+    resolve_design_spec,
+)
 
 # ---------------------------------------------------------------------------
 # 城市预设
@@ -65,8 +70,12 @@ def parse_args():
         description="统一城市 3MF 模型生成 (osmium CLI pipeline)"
     )
     parser.add_argument(
-        '--preset', choices=list(PRESETS.keys()),
-        help='使用内置城市预设（坐标+PBF 路径）'
+        '--preset', choices=sorted(set(PRESETS) | set(DESIGN_PRESETS)),
+        help='使用内置城市预设，或配合显式 bbox/PBF 使用 DesignSpec 预设'
+    )
+    parser.add_argument(
+        '--design-spec', type=str, metavar='PATH',
+        help='DesignSpec JSON 文件；与 DesignSpec 类型的 --preset 互斥'
     )
     parser.add_argument(
         '--bbox', type=str, metavar='S,W,N,E',
@@ -128,7 +137,7 @@ def parse_args():
     args = parser.parse_args()
 
     # 合并 preset + 显式参数
-    if args.preset:
+    if args.preset in PRESETS:
         p = PRESETS[args.preset]
         if not args.bbox:
             s, w, n, e = p["bbox"]
@@ -137,6 +146,10 @@ def parse_args():
             args.pbf = p["pbf"]
         if not args.city:
             args.city = args.preset
+
+    args.design_preset = args.preset if args.preset in DESIGN_PRESETS else None
+    if args.design_preset and args.design_spec:
+        parser.error("DesignSpec 类型的 --preset 与 --design-spec 不能同时使用")
 
     # 验证必须参数
     if not args.bbox or not args.pbf or not args.city:
@@ -163,6 +176,17 @@ def main():
     ENABLE_VEGETATION = not cli_args.no_vegetation
     ENABLE_BLOCK_BASE = not cli_args.no_block_base
     MERGE_BLOCK_LAYERS = cli_args.merge_layers
+    design = resolve_design_spec(
+        cli_args.design_spec,
+        preset=cli_args.design_preset if not cli_args.design_spec else None,
+    )
+    if cli_args.no_vegetation:
+        design = design.with_layer("vegetation", enabled=False)
+    if cli_args.no_block_base:
+        design = design.with_layer("block_base", enabled=False)
+    required_sources = set(design.required_sources())
+    ENABLE_VEGETATION = ENABLE_VEGETATION and design.enabled("vegetation")
+    ENABLE_BLOCK_BASE = ENABLE_BLOCK_BASE and design.enabled("block_base")
 
     # PBF 文件
     PBF_FILE = cli_args.pbf
@@ -176,6 +200,7 @@ def main():
     print(f"  City: {CITY_NAME}")
     print(f"  BBox: ({LAT1}, {LON1}) → ({LAT2}, {LON2})")
     print(f"  PBF: {PBF_FILE}")
+    print(f"  Design: {design.name} ({design.fingerprint[:12]})")
     print(f"  Options: vegetation={'ON' if ENABLE_VEGETATION else 'OFF'}, "
           f"block_base={'ON' if ENABLE_BLOCK_BASE else 'OFF'}, "
           f"merge_layers={'ON' if MERGE_BLOCK_LAYERS else 'OFF'}")
@@ -184,6 +209,7 @@ def main():
     t_start = time.time()
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
+    design.save(os.path.join(OUTPUT_DIR, "design_spec.json"))
 
     # =====================================================================
     # Stage 0: 检查 CLI 工具可用性
@@ -191,13 +217,14 @@ def main():
     print("\n[Stage 0] Checking CLI tools...")
     fetcher = get_cli_fetcher()
     print(f"  osmium available: {fetcher.osmium_available}")
+    print(f"  osmium backend: {fetcher.osmium_backend}")
 
     if not fetcher.osmium_available:
         print("\n  ERROR: osmium CLI not installed!")
         print("  Install: conda install -c conda-forge osmium-tool")
         sys.exit(1)
     else:
-        print("  Using pure osmium CLI pipeline (extract → tags-filter → export)")
+        print("  Using osmium pipeline (extract → tags-filter → export)")
 
     # =====================================================================
     # Stage 1: Bounding box
@@ -276,11 +303,16 @@ def main():
     print(f"\n[Stage 2] Fetching water data...")
     t2 = time.time()
 
-    water_gdf = fetch_from_cli(
-        tag_type='water',
-        south=south, west=west, north=north, east=east,
-        pbf_file=PBF_FILE
+    water_gdf = (
+        fetch_from_cli(
+            tag_type='water',
+            south=south, west=west, north=north, east=east,
+            pbf_file=PBF_FILE
+        )
+        if 'water' in required_sources else None
     )
+    if water_gdf is not None:
+        water_gdf = filter_features(water_gdf, design.layer('water'))
 
     water_fetch_time = time.time() - t2
 
@@ -325,11 +357,18 @@ def main():
     print(f"\n[Stage 3] Fetching vegetation data...")
     t3 = time.time()
 
-    vegetation_gdf = fetch_from_cli(
-        tag_type='vegetation',
-        south=south, west=west, north=north, east=east,
-        pbf_file=PBF_FILE
+    vegetation_gdf = (
+        fetch_from_cli(
+            tag_type='vegetation',
+            south=south, west=west, north=north, east=east,
+            pbf_file=PBF_FILE
+        )
+        if 'vegetation' in required_sources else None
     )
+    if vegetation_gdf is not None:
+        vegetation_gdf = filter_features(
+            vegetation_gdf, design.layer('vegetation')
+        )
 
     veg_fetch_time = time.time() - t3
 
@@ -353,11 +392,21 @@ def main():
     print(f"\n[Stage 3b] Fetching buildings data...")
     t3b = time.time()
 
-    buildings_gdf = fetch_from_cli(
-        tag_type='building',
-        south=south, west=west, north=north, east=east,
-        pbf_file=PBF_FILE
+    building_tag_type = 'building_landmarks' if design.landmarks_only else 'building'
+    buildings_gdf = (
+        fetch_from_cli(
+            tag_type=building_tag_type,
+            south=south, west=west, north=north, east=east,
+            pbf_file=PBF_FILE
+        )
+        if 'buildings' in required_sources else None
     )
+    if buildings_gdf is not None:
+        building_layer = (
+            design.layer('landmarks')
+            if design.landmarks_only else design.layer('buildings')
+        )
+        buildings_gdf = filter_features(buildings_gdf, building_layer)
 
     if buildings_gdf is not None and len(buildings_gdf) > 0:
         print(f"  Features: {len(buildings_gdf)}")
@@ -379,11 +428,16 @@ def main():
     print(f"\n[Stage 3c] Fetching roads data...")
     t3c = time.time()
 
-    roads_gdf = fetch_from_cli(
-        tag_type='road',
-        south=south, west=west, north=north, east=east,
-        pbf_file=PBF_FILE
+    roads_gdf = (
+        fetch_from_cli(
+            tag_type='road',
+            south=south, west=west, north=north, east=east,
+            pbf_file=PBF_FILE
+        )
+        if 'roads' in required_sources else None
     )
+    if roads_gdf is not None:
+        roads_gdf = filter_features(roads_gdf, design.layer('roads'))
 
     if roads_gdf is not None and len(roads_gdf) > 0:
         print(f"  Features: {len(roads_gdf)}")
@@ -401,10 +455,13 @@ def main():
     print(f"\n[Stage 3d] Fetching landuse data...")
     t3d = time.time()
 
-    landuse_gdf = fetch_from_cli(
-        tag_type='landuse',
-        south=south, west=west, north=north, east=east,
-        pbf_file=PBF_FILE
+    landuse_gdf = (
+        fetch_from_cli(
+            tag_type='landuse',
+            south=south, west=west, north=north, east=east,
+            pbf_file=PBF_FILE
+        )
+        if 'landuse' in required_sources else None
     )
 
     if landuse_gdf is not None and len(landuse_gdf) > 0:
@@ -544,7 +601,9 @@ def main():
     buildings_mesh = None
     landmarks_mesh = None
     terrain_solid_no_buildings = terrain_solid
-    if MERGE_BLOCK_LAYERS:
+    if not (design.enabled('buildings') or design.enabled('landmarks')):
+        print(f"  Buildings and landmarks DISABLED by DesignSpec")
+    elif MERGE_BLOCK_LAYERS:
         print(f"  MERGE_BLOCK_LAYERS=True: BO 将合入 block_base，此处只建 landmarks")
         if layers.BL:
             try:
@@ -553,6 +612,8 @@ def main():
                     bbox_local=bbox_local)
                 if isinstance(bldg_result, dict):
                     landmarks_mesh = bldg_result.get("landmarks")
+                    if not design.enabled('landmarks'):
+                        landmarks_mesh = None
                     n_lm = len(landmarks_mesh.faces) if landmarks_mesh is not None else 0
                     print(f"  Landmarks mesh: {n_lm:,} faces")
                 else:
@@ -567,6 +628,10 @@ def main():
             if isinstance(bldg_result, dict):
                 landmarks_mesh = bldg_result.get("landmarks")
                 buildings_mesh = bldg_result.get("buildings")
+                if not design.enabled('landmarks'):
+                    landmarks_mesh = None
+                if not design.enabled('buildings'):
+                    buildings_mesh = None
                 n_lm = len(landmarks_mesh.faces) if landmarks_mesh is not None else 0
                 n_amb = len(buildings_mesh.faces) if buildings_mesh is not None else 0
                 print(f"  Landmarks mesh: {n_lm:,} faces")
@@ -584,7 +649,7 @@ def main():
     t6 = time.time()
 
     roads_mesh = None
-    if layers.roads_lines:
+    if design.enabled('roads') and layers.roads_lines:
         try:
             roads_mesh = build_deepseek_roads_v3(layers.roads_lines, terrain_solid, scale)
             if roads_mesh is not None:
@@ -605,7 +670,7 @@ def main():
     t7 = time.time()
 
     water_mesh = None
-    if layers.WL or layers.WO:
+    if design.enabled('water') and (layers.WL or layers.WO):
         try:
             water_mesh = build_deepseek_water_v3(
                 layers.WL, layers.WO,

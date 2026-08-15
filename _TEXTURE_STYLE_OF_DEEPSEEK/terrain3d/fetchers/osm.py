@@ -122,6 +122,12 @@ FEATURE_CONFIGS: Dict[str, dict] = {
         "step_names": ["raw", "filtered", "clipped", "final"],
         "extra_filter_fn": None,
     },
+    "building_landmarks": {
+        "tag_filters": {"building": True},
+        "valid_geom_types": {"Polygon", "MultiPolygon"},
+        "step_names": ["raw", "filtered", "clipped", "final"],
+        "extra_filter_fn": None,
+    },
     "road": {
         "tag_filters": {"highway": True},
         "valid_geom_types": {"LineString", "MultiLineString"},
@@ -527,6 +533,7 @@ def fetch_buildings(
     east: float,
     min_area_m2: float = 0,
     export_gpkg: Optional[str] = None,
+    landmarks_only: bool = False,
 ) -> gpd.GeoDataFrame:
     """Fetch building footprints from PBF file.
 
@@ -534,6 +541,7 @@ def fetch_buildings(
         south, west, north, east: WGS84 bounding box.
         min_area_m2: Minimum footprint area in m² (features below are dropped).
         export_gpkg: If provided, export pipeline steps to this GeoPackage.
+        landmarks_only: Use the narrow landmark source filter instead of all buildings.
 
     Returns:
         GeoDataFrame in EPSG:4326 with building polygons.
@@ -542,7 +550,8 @@ def fetch_buildings(
     pbf_path = _resolve_pbf_path()
 
     # Check tile cache
-    cached = _check_tile_cache("building", south, west, north, east)
+    feature_type = "building_landmarks" if landmarks_only else "building"
+    cached = _check_tile_cache(feature_type, south, west, north, east)
     if cached is not None:
         return cached
 
@@ -564,11 +573,11 @@ def fetch_buildings(
         extra_fn = _filter_min_area
 
     config = {
-        **FEATURE_CONFIGS["building"],
+        **FEATURE_CONFIGS[feature_type],
         "extra_filter_fn": extra_fn,
     }
 
-    pipeline = OSMPipeline(pbf_path, "building", (south, west, north, east), config)
+    pipeline = OSMPipeline(pbf_path, feature_type, (south, west, north, east), config)
     result = pipeline.run(export_gpkg=export_gpkg)
 
     # Add est_height column (with optional nDSM)
@@ -586,7 +595,7 @@ def fetch_buildings(
 
     # Save to tile cache
     if not result.empty:
-        _save_tile_cache("building", south, west, north, east, result)
+        _save_tile_cache(feature_type, south, west, north, east, result)
 
     return result
 

@@ -43,11 +43,19 @@ from _TEXTURE_STYLE_OF_DEEPSEEK.validator import (
     validate_3mf,
     print_validation_report,
 )
+from _TEXTURE_STYLE_OF_DEEPSEEK.design_spec import (
+    DESIGN_PRESETS,
+    DesignInput,
+    filter_features,
+    resolve_design_spec,
+)
 
 
 def run(lat1: float, lon1: float, lat2: float, lon2: float,
         output_dir: str = "output/deepseek",
-        city_name: str = None) -> str:
+        city_name: str = None,
+        design_spec: DesignInput = None,
+        preset: str = None) -> str:
     """Generate a _TEXTURE_STYLE_OF_DEEPSEEK 3MF model.
 
     Args:
@@ -55,6 +63,8 @@ def run(lat1: float, lon1: float, lat2: float, lon2: float,
         lat2, lon2: second corner (WGS84 degrees)
         output_dir: directory for output files
         city_name: name for output file (auto-detected from coords if None)
+        design_spec: DesignSpec object, mapping, or JSON file path.
+        preset: Built-in design preset; mutually exclusive with design_spec.
 
     Returns:
         Path to the generated .3mf file.
@@ -77,12 +87,16 @@ def run(lat1: float, lon1: float, lat2: float, lon2: float,
     os.makedirs(output_dir, exist_ok=True)
 
     output_path = os.path.join(output_dir, f"{city_name}_deepseek.3mf")
+    resolved_design = resolve_design_spec(design_spec, preset=preset)
+    resolved_design.save(os.path.join(output_dir, "design_spec.json"))
+    required_sources = set(resolved_design.required_sources())
 
     print(f"\n{'='*60}")
     print(f"  _TEXTURE_STYLE_OF_DEEPSEEK Pipeline")
     print(f"  City: {city_name}")
     print(f"  BBox: ({lat1:.4f}, {lon1:.4f}) -> ({lat2:.4f}, {lon2:.4f})")
     print(f"  Output: {output_path}")
+    print(f"  Design: {resolved_design.name} ({resolved_design.fingerprint[:12]})")
     print(f"{'='*60}\n")
 
     # ====================================================================
@@ -121,19 +135,49 @@ def run(lat1: float, lon1: float, lat2: float, lon2: float,
     print("\n[Stage 2] Fetching OSM data...")
     t2 = time.time()
 
-    buildings_gdf = fetch_buildings(south, west, north, east)
+    buildings_gdf = (
+        fetch_buildings(
+            south, west, north, east,
+            landmarks_only=resolved_design.landmarks_only,
+        )
+        if "buildings" in required_sources else None
+    )
+    if buildings_gdf is not None:
+        building_layer = (
+            resolved_design.layer("landmarks")
+            if resolved_design.landmarks_only
+            else resolved_design.layer("buildings")
+        )
+        buildings_gdf = filter_features(buildings_gdf, building_layer)
     n_buildings = len(buildings_gdf) if buildings_gdf is not None else 0
     print(f"  Buildings: {n_buildings}")
 
-    roads_gdf = fetch_roads(south, west, north, east)
+    roads_gdf = (
+        fetch_roads(south, west, north, east)
+        if "roads" in required_sources else None
+    )
+    if roads_gdf is not None:
+        roads_gdf = filter_features(roads_gdf, resolved_design.layer("roads"))
     n_roads = len(roads_gdf) if roads_gdf is not None else 0
     print(f"  Roads: {n_roads}")
 
-    water_gdf = fetch_water(south, west, north, east)
+    water_gdf = (
+        fetch_water(south, west, north, east)
+        if "water" in required_sources else None
+    )
+    if water_gdf is not None:
+        water_gdf = filter_features(water_gdf, resolved_design.layer("water"))
     n_water = len(water_gdf) if water_gdf is not None else 0
     print(f"  Water features: {n_water}")
 
-    vegetation_gdf = fetch_vegetation(south, west, north, east)
+    vegetation_gdf = (
+        fetch_vegetation(south, west, north, east)
+        if "vegetation" in required_sources else None
+    )
+    if vegetation_gdf is not None:
+        vegetation_gdf = filter_features(
+            vegetation_gdf, resolved_design.layer("vegetation")
+        )
     n_vegetation = len(vegetation_gdf) if vegetation_gdf is not None else 0
     print(f"  Vegetation features: {n_vegetation}")
     print(f"  Time: {time.time() - t2:.1f}s")
@@ -224,12 +268,17 @@ def run(lat1: float, lon1: float, lat2: float, lon2: float,
 
     buildings_mesh = None
     landmarks_mesh = None
-    if layers.BL or layers.BO:
+    if (resolved_design.enabled("buildings") or resolved_design.enabled("landmarks")) \
+            and (layers.BL or layers.BO):
         bldg_result = build_deepseek_buildings_v3(
             layers.BL, layers.BO, terrain_solid, scale)
         if isinstance(bldg_result, dict):
             landmarks_mesh = bldg_result.get("landmarks")
             buildings_mesh = bldg_result.get("buildings")
+            if not resolved_design.enabled("landmarks"):
+                landmarks_mesh = None
+            if not resolved_design.enabled("buildings"):
+                buildings_mesh = None
             n_lm = len(landmarks_mesh.faces) if landmarks_mesh is not None else 0
             n_amb = len(buildings_mesh.faces) if buildings_mesh is not None else 0
             print(f"  Landmarks mesh: {n_lm:,} faces (E5 暖砂石)")
@@ -246,7 +295,7 @@ def run(lat1: float, lon1: float, lat2: float, lon2: float,
     print("\n[Stage 6] Building roads (v3)...")
     t6 = time.time()
 
-    if layers.roads_lines:
+    if resolved_design.enabled("roads") and layers.roads_lines:
         try:
             roads_mesh = build_deepseek_roads_v3(layers.roads_lines, terrain_solid, scale)
             if roads_mesh is not None:
@@ -267,7 +316,7 @@ def run(lat1: float, lon1: float, lat2: float, lon2: float,
     print("\n[Stage 7] Building water plate (v3: base + WL/WO relief)...")
     t7 = time.time()
 
-    if layers.WL or layers.WO:
+    if resolved_design.enabled("water") and (layers.WL or layers.WO):
         origin_x, origin_y = origin
         water_bbox_x_min = utm_bbox[0] - origin_x
         water_bbox_y_min = utm_bbox[1] - origin_y
@@ -294,7 +343,7 @@ def run(lat1: float, lon1: float, lat2: float, lon2: float,
     print("\n[Stage 8] Building vegetation features (v3)...")
     t8 = time.time()
 
-    if layers.VL or layers.VO:
+    if resolved_design.enabled("vegetation") and (layers.VL or layers.VO):
         vegetation_mesh = build_deepseek_vegetation_v3(
             layers.VL, layers.VO, terrain_solid, scale)
         if vegetation_mesh is not None:
@@ -312,7 +361,7 @@ def run(lat1: float, lon1: float, lat2: float, lon2: float,
     print("\n[Stage 8.5] Building block_base (v3 — city tessellation)...")
     t85 = time.time()
 
-    if layers.block_base:
+    if resolved_design.enabled("block_base") and layers.block_base:
         block_base_mesh = build_deepseek_block_base_v3(
             layers.block_base, terrain_solid, scale)
         if block_base_mesh is not None:
@@ -380,8 +429,19 @@ if __name__ == "__main__":
                         help="Output directory")
     parser.add_argument("--city-name", default=None,
                         help="City name for output file")
+    design_group = parser.add_mutually_exclusive_group()
+    design_group.add_argument(
+        "--preset", choices=DESIGN_PRESETS, default="city_texture",
+        help="Constrained design preset",
+    )
+    design_group.add_argument(
+        "--design-spec", default=None,
+        help="Path to a DesignSpec JSON file",
+    )
 
     args = parser.parse_args()
     run(args.lat1, args.lon1, args.lat2, args.lon2,
         output_dir=args.output_dir,
-        city_name=args.city_name)
+        city_name=args.city_name,
+        design_spec=args.design_spec,
+        preset=None if args.design_spec else args.preset)
