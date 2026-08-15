@@ -3,9 +3,9 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-<meta name="theme-color" content="#14161c">
-<title>旅程回忆</title>
-<link rel="stylesheet" href="style.css?v=35">
+<meta name="theme-color" content="#171916">
+<title>旅程浮雕 Studio</title>
+<link rel="stylesheet" href="style.css?v=36">
 <link rel="stylesheet" href="vendor/leaflet/leaflet.css">
 <!-- 本地自托管，无 CDN 依赖 -->
 <script type="module" src="vendor/model-viewer.min.js"
@@ -16,15 +16,44 @@
 
 <header class="topbar">
   <div class="brand">
-    <span class="brand-mark">◆</span>
+    <span class="brand-mark" aria-hidden="true"></span>
     <div>
-      <h1>旅程回忆</h1>
-      <p class="sub">照片 → 轨迹 → 浮雕 → 独一无二的回忆实体</p>
+      <h1>旅程浮雕</h1>
+      <p class="sub">把走过的地方，留成可以触摸的地形</p>
     </div>
   </div>
+  <nav class="flow-nav" aria-label="制作进度">
+    <a href="#step1"><span>01</span>地点</a>
+    <a href="#step2"><span>02</span>构图</a>
+    <a href="#step3"><span>03</span>风格</a>
+    <a href="#step5"><span>04</span>成品</a>
+  </nav>
 </header>
 
 <main id="main">
+
+  <section class="product-hero" aria-labelledby="heroTitle">
+    <div class="hero-copy">
+      <p class="hero-kicker">为一段真实旅程制作</p>
+      <h2 id="heroTitle">一座城市，一片湖，<br>一件真正属于你的浮雕。</h2>
+      <p>从地点或旅行照片开始。系统会整理地图、地形与路线，交付经过检查、可直接打印的多色模型。</p>
+      <div class="hero-specs">
+        <span><strong>200 × 200 mm</strong>典型成品</span>
+        <span><strong>3 色材料</strong>多色打印</span>
+        <span><strong>Print-ready</strong>交付前验证</span>
+      </div>
+    </div>
+    <div class="hero-object" aria-label="西湖浮雕示意">
+      <div class="hero-object-head"><span>杭州 · 西湖</span><span>已通过打印校验</span></div>
+      <div class="relief-model">
+        <span class="relief-water"></span>
+        <span class="relief-river"></span>
+        <span class="relief-city relief-city-a"></span>
+        <span class="relief-city relief-city-b"></span>
+      </div>
+      <div class="material-key"><span>地形</span><span>水体</span><span>城市</span></div>
+    </div>
+  </section>
 
   <!-- ══ Step 1 · 选位置 ══ -->
   <section class="card step" id="step1">
@@ -32,12 +61,12 @@
 
     <!-- Tab 切换：搜索 / 照片 -->
     <div class="s1-tabs" id="s1Tabs">
-      <button class="s1-tab active" data-tab="photo">📷 照片定位</button>
-      <button class="s1-tab" data-tab="search">🔍 搜索地名</button>
+      <button class="s1-tab active" data-tab="search">搜索地点</button>
+      <button class="s1-tab" data-tab="photo">用照片还原旅程</button>
     </div>
 
     <!-- 搜索面板 -->
-    <div class="s1-panel" id="s1Search" hidden>
+    <div class="s1-panel" id="s1Search">
       <div class="lm-search">
         <input type="text" id="lmInput" class="text-input" maxlength="40"
                placeholder="西湖 / 拙政园 / 埃菲尔铁塔 / 浙大紫金港…"
@@ -47,7 +76,7 @@
     </div>
 
     <!-- 照片面板 -->
-    <div class="s1-panel" id="s1Photo">
+    <div class="s1-panel" id="s1Photo" hidden>
       <div class="privacy-note">🔒 照片仅用于读取 GPS 坐标标记地点，不会以任何形式存储或上传至第三方服务器。解析完成后立即从内存中丢弃。</div>
       <div class="photo-row">
         <label class="btn btn-ghost btn-file">📷 选择照片
@@ -131,9 +160,25 @@
   <section class="card step" id="step4">
     <h2 class="section-title"><span class="step-num">4</span>预览
       <span class="hint" id="glbInfo">确认构图与风格，满意后再出打印文件</span></h2>
+    <fieldset class="profile-picker" id="profilePicker">
+      <legend>生成方式</legend>
+      <label class="profile-option active">
+        <input type="radio" name="generationProfile" value="classic" checked>
+        <span><strong>经典通用</strong><small>所有城市 · 支持快速 3D 预览</small></span>
+      </label>
+      <label class="profile-option">
+        <input type="radio" name="generationProfile" value="quality_flat">
+        <span><strong>西湖质量 · 平整填充</strong><small>高质量 25km 正式模型 · 边缘退让</small></span>
+      </label>
+      <label class="profile-option">
+        <input type="radio" name="generationProfile" value="quality_textured">
+        <span><strong>西湖质量 · 纹理填充</strong><small>保留不同地块的语义起伏</small></span>
+      </label>
+      <p class="profile-note" id="profileNote">质量模式仅在“杭州 · 西湖”预设中开放，并直接生成正式 3MF。</p>
+    </fieldset>
     <div class="actions">
-      <button class="btn btn-primary" id="btnDraft">⚡ 生成预览
-        <small>约 1–2 分钟（2D 图 + 3D 模型）</small></button>
+      <button class="btn btn-primary" id="btnDraft">生成快速预览
+        <small>PNG + 可旋转 3D 模型</small></button>
     </div>
     <div class="preview-2d" id="preview2d" hidden>
       <figure class="p2-item" id="p2Topdown" hidden>
@@ -155,8 +200,8 @@
     <h2 class="section-title"><span class="step-num">5</span>打印文件
       <span class="hint">预览满意后再生成，避免白等</span></h2>
     <div class="actions">
-      <button class="btn btn-primary" id="btnFull">🖨 生成打印模型 3MF
-        <small>约 3–5 分钟</small></button>
+      <button class="btn btn-primary" id="btnFull">生成正式打印文件
+        <small id="fullModeHint">经典通用 · 3MF + PNG</small></button>
     </div>
     <div class="downloads" id="downloads"></div>
   </section>
@@ -167,6 +212,8 @@
       <span class="pill" id="jobStatus">运行中</span>
       <span class="mono" id="jobElapsed">0s</span>
     </div>
+    <p class="job-stage" id="jobStage">正在准备地图数据</p>
+    <div class="quality-checks" id="qualityChecks" hidden></div>
     <div class="job-token" id="jobTokenRow" hidden>
       <span>任务令牌</span>
       <code class="mono" id="jobToken"></code>
@@ -191,8 +238,8 @@
   <div class="lightbox-cap" id="lightboxCap"></div>
 </div>
 
-<footer class="foot">旅程回忆 · 把走过的路，凝固成独一无二的实体 · <a href="#" onclick="copyMyLink();return false" style="color:var(--accent)">🔗 复制我的链接</a> · <a href="#" onclick="localStorage.removeItem('jr_session');location.href=location.pathname;return false" style="color:var(--ink-dim)">重新开始</a></footer>
+<footer class="foot">旅程浮雕 · 把走过的路，凝固成可以触摸的实体 · <a href="#" onclick="copyMyLink();return false">复制我的链接</a> · <a href="#" onclick="localStorage.removeItem('jr_session');location.href=location.pathname;return false">重新开始</a></footer>
 
-<script src="app.js?v=35"></script>
+<script src="app.js?v=36"></script>
 </body>
 </html>

@@ -13,6 +13,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -241,6 +242,92 @@ def _classify_job_error(job: dict, retcode: int) -> tuple:
     return _classify_error_text(tail, retcode)
 
 
+def _read_job_log_tail(job: dict, max_bytes: int = 20_000) -> str:
+    try:
+        with open(job["log_path"], "r", encoding="utf-8",
+                  errors="replace") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - max_bytes))
+            return f.read()
+    except OSError:
+        return ""
+
+
+def _job_stage_label(job: dict, log_tail: str) -> str:
+    if job.get("status") == "pending":
+        return "等待计算节点接单"
+    if job.get("status") == "done":
+        return "模型与交付文件已经生成"
+    if job.get("status") == "failed":
+        return "生成未完成"
+
+    stages = (
+        ("Exported:", "正在整理与验证交付文件"),
+        ("[Stage 5", "正在构建可打印模型几何"),
+        ("[Stage 4.8]", "正在生成可旋转 3D 预览"),
+        ("[Stage 4.65]", "正在渲染高清俯视图"),
+        ("[Stage 4.6]", "正在渲染图层诊断图"),
+        ("[Stage 4.5]", "正在整理道路、建筑与水体图层"),
+        ("[Stage 4]", "正在构建地形与水体结构"),
+        ("[Stage 3", "正在读取城市地图要素"),
+        ("[Stage 2", "正在提取区域地图数据"),
+        ("[Stage 1", "正在准备高程数据"),
+    )
+    for marker, label in stages:
+        if marker in log_tail:
+            return label
+    return "正在准备地图与高程数据"
+
+
+def _job_quality_warnings(log_tail: str) -> list[str]:
+    warnings = []
+    if "WL=0 WO=0" in log_tail:
+        warnings.append("生成日志中的主要水体与普通水体数量均为 0，请核对源数据和预览")
+    if "roads=0" in log_tail or "Roads: None" in log_tail:
+        warnings.append("生成日志中的道路数量为 0，请核对源数据和预览")
+    return warnings
+
+
+def _job_quality_checks(log_tail: str) -> list[dict]:
+    """把日志里的多源证据整理成前端可展示的验收项。
+
+    这里只报告已经发生的检查，不把缺少第三方地图凭据误报成失败。
+    """
+    checks = []
+    layer_match = re.search(r"WL=(\d+)\s+WO=(\d+).*?roads=(\d+)", log_tail)
+    if layer_match:
+        wl, wo, roads = (int(value) for value in layer_match.groups())
+        checks.append({
+            "id": "source_features",
+            "label": "源数据结构层",
+            "status": "pass" if (wl + wo > 0 and roads > 0) else "warning",
+            "detail": f"水体 {wl + wo} · 道路 {roads}",
+        })
+
+    satellite_match = re.search(
+        r"\[glb\] water: \+(\d+) satellite polys", log_tail)
+    gaode_match = re.search(
+        r"\[water_supplement\] \+(\d+) Gaode supplement polygons", log_tail)
+    supplement = satellite_match or gaode_match
+    if supplement:
+        checks.append({
+            "id": "secondary_map",
+            "label": "第二地图源补强",
+            "status": "pass",
+            "detail": f"补入 {int(supplement.group(1))} 个水体面",
+        })
+
+    if "[postcheck] PASS" in log_tail or "[glb postcheck] PASS" in log_tail:
+        checks.append({
+            "id": "grounding",
+            "label": "图层落地检查",
+            "status": "pass",
+            "detail": "道路、水体与地形接触关系通过",
+        })
+    return checks
+
+
 def _job_public(job: dict, include_log: bool = False) -> dict:
     """任务对外视图（去掉 proc 等内部字段）。
 
@@ -258,22 +345,20 @@ def _job_public(job: dict, include_log: bool = False) -> dict:
         "status": job["status"],
         "elapsed_s": round(elapsed, 1),
     }
+    log_tail = _read_job_log_tail(job)
+    out["stage_label"] = _job_stage_label(job, log_tail)
+    quality_warnings = _job_quality_warnings(log_tail)
+    if quality_warnings:
+        out["quality_warnings"] = quality_warnings
+    quality_checks = _job_quality_checks(log_tail)
+    if quality_checks:
+        out["quality_checks"] = quality_checks
     if job["status"] == "failed":
         out["error_code"] = job.get("error_code", "render_failed")
         out["error_msg"] = job.get("error_msg",
                                    ERROR_CATEGORIES["render_failed"])
     if include_log:
-        tail = ""
-        try:
-            with open(job["log_path"], "r", encoding="utf-8",
-                      errors="replace") as f:
-                f.seek(0, os.SEEK_END)
-                size = f.tell()
-                f.seek(max(0, size - 4000))
-                tail = f.read()
-        except OSError:
-            pass
-        out["log_tail"] = tail
+        out["log_tail"] = log_tail[-4000:]
     return out
 
 

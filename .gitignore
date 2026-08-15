@@ -5,6 +5,7 @@ __pycache__/
 *.so
 .Python
 venv/
+.venv/
 env/
 ENV/
 
@@ -38,6 +39,7 @@ Thumbs.db
 
 # Data: 排除大体积缓存（height_cache ~135MB），保留配置/景点目录/地名表（开箱即用）
 data/height_cache/
+data/sessions/
 
 # 临时验证截图（浏览器 e2e 验证产物）
 verification_*.png

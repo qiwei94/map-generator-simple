@@ -8,6 +8,7 @@ const state = {
   gallery: null,       // 当前预设城市的画廊元数据
   renderKind: "topdown",
   selectedStyle: null,
+  generationProfile: "classic",
   job: null,           // {id, mode}
   /* 当前目标：预设城市 or 自定义区域 */
   target: { kind: "area", city: null, title: "自定义区域" },
@@ -35,6 +36,7 @@ function getSession() {
     createdAt: Date.now(),
     target: null,          // {kind, city, title, prototype}
     selectedStyle: null,
+    generationProfile: "classic",
     areaName: "",
     photoPoints: [],       // [{lat, lon, name}] 照片 GPS 坐标（不含原图）
     journeyClusters: null, // [{lat, lon, name, count}]
@@ -81,6 +83,9 @@ async function restoreSession() {
   }
   if (s.selectedStyle) {
     state.selectedStyle = s.selectedStyle;
+  }
+  if (s.generationProfile) {
+    state.generationProfile = s.generationProfile;
   }
   if (s.areaName) {
     const el = $("areaName");
@@ -140,6 +145,7 @@ function persistState() {
   const patch = {
     target: state.target,
     selectedStyle: state.selectedStyle,
+    generationProfile: state.generationProfile,
     areaName: ($("areaName") || {}).value || "",
     lastCity: state.target.city || (lastArtifacts ? state.jobSlug : null),
     lastBbox: map.state.map ? currentBbox() : null,
@@ -353,7 +359,7 @@ function updateRect() {
   const bounds = [[s, w], [n, e]];
   if (map.state.rect) map.state.rect.setBounds(bounds);
   else map.state.rect = L.rectangle(bounds, {
-    color: "#e23d3d", weight: 2, fillOpacity: 0.08, dashArray: "6 4",
+    color: "#d18a5f", weight: 2, fillOpacity: 0.08, dashArray: "6 4",
     interactive: false,
   }).addTo(map.state.map);
 }
@@ -1087,6 +1093,7 @@ function renderStep3() {
       box.appendChild(el);
     }
   }
+  syncGenerationProfileAvailability();
 }
 
 function updateStyleHint() {
@@ -1115,12 +1122,61 @@ $("renderToggle").querySelectorAll("button").forEach((b) => {
 
 /* ---------------- Step 4/5：生成 ---------------- */
 
+function qualityProfileAvailable() {
+  return state.target.kind === "preset" && state.target.city === "westlake";
+}
+
+function syncGenerationProfileAvailability() {
+  const available = qualityProfileAvailable();
+  const qualityInputs = $("profilePicker").querySelectorAll(
+    'input[value="quality_flat"], input[value="quality_textured"]');
+  qualityInputs.forEach((input) => { input.disabled = !available; });
+
+  if (!available && state.generationProfile !== "classic") {
+    state.generationProfile = "classic";
+  }
+  const selected = $("profilePicker").querySelector(
+    `input[value="${state.generationProfile}"]`);
+  if (selected) selected.checked = true;
+  $("profilePicker").querySelectorAll(".profile-option").forEach((label) => {
+    const input = label.querySelector("input");
+    label.classList.toggle("active", input.checked);
+  });
+
+  const quality = state.generationProfile !== "classic";
+  $("profileNote").textContent = available
+    ? "西湖质量模式已开放：直接生成当前高质量 25km 正式模型；平整与纹理输出相互独立。"
+    : "质量模式仅在“杭州 · 西湖”预设中开放；其他区域继续使用经典通用模式。";
+  $("profileNote").classList.toggle("available", available);
+  $("btnDraft").disabled = !!state.job || quality;
+  $("btnDraft").title = quality ? "质量模式直接生成正式 3MF" : "";
+  $("fullModeHint").textContent = quality
+    ? `${state.generationProfile === "quality_flat" ? "平整填充" : "纹理填充"} · 3MF + PNG`
+    : "经典通用 · 3MF + PNG";
+}
+
+$("profilePicker").addEventListener("change", (event) => {
+  const input = event.target.closest('input[name="generationProfile"]');
+  if (!input || input.disabled) return;
+  state.generationProfile = input.value;
+  state.selectedStyle = state.generationProfile === "classic"
+    ? state.selectedStyle : null;
+  syncGenerationProfileAvailability();
+  updateStyleHint();
+  persistState();
+});
+
 /** 组装请求体：预设城市 or 自定义区域，统一入口 */
 function buildRequest(mode) {
-  const body = { mode };
+  const body = { mode, generation_profile: state.generationProfile };
+  if (mode === "draft" && state.generationProfile !== "classic") {
+    throw new Error("西湖质量模式直接生成正式打印文件，不提供快速预览");
+  }
   if (state.target.kind === "preset") {
     body.city = state.target.city;
-    if (state.selectedStyle) body.style = state.selectedStyle;
+    if (state.selectedStyle && state.generationProfile === "classic") {
+      body.style = state.selectedStyle;
+    }
     return body;
   }
   if (!map.state.map) throw new Error("请先在上方选择位置");
@@ -1128,6 +1184,7 @@ function buildRequest(mode) {
   const [s, w, n, e] = bbox;
   const inBox = (lat, lon) => lat >= s && lat <= n && lon >= w && lon <= e;
   body.area = { bbox, name: $("areaName").value.trim() };
+  if (state.selectedStyle && state.gallery) body.style = state.selectedStyle;
   body.markers = [];
   if (map.journey) {
     const cs = map.journey.clusters.filter((c) => inBox(c.lat, c.lon));
@@ -1149,7 +1206,8 @@ async function startJob(mode) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
-    state.job = { id: resp.job_id, mode, city: resp.city };
+    state.job = { id: resp.job_id, mode, city: resp.city,
+                  generationProfile: body.generation_profile };
     $("jobPanel").hidden = false;
     const extra = body.markers && body.markers.length
       ? ` · ${body.markers.length} 处标注` : "";
@@ -1158,6 +1216,7 @@ async function startJob(mode) {
     $("jobStatus").textContent =
       (mode === "draft" ? "生成 3D 预览中" : "生成打印模型中") + styleLabel + extra;
     $("jobStatus").className = "pill";
+    $("jobStage").textContent = "正在准备地图与高程数据";
     showJobToken(resp.job_id);
     setBusy(true);
     pollJob();
@@ -1167,7 +1226,7 @@ async function startJob(mode) {
 }
 
 function setBusy(busy) {
-  $("btnDraft").disabled = busy;
+  $("btnDraft").disabled = busy || state.generationProfile !== "classic";
   $("btnFull").disabled = busy;
 }
 
@@ -1203,24 +1262,33 @@ async function pollJob() {
     $("jobElapsed").textContent = fmtDuration(j.elapsed_s);
     // 运行日志不外露；只展示友好状态，失败时显示归类后的异常提示
     const hint = $("jobHint");
+    renderQualityChecks(j.quality_checks || []);
     // pending = 排队等 worker 拉取；running = 正在计算
     if (j.status === "pending") {
       $("jobStatus").textContent = "⏳ 排队中，等待计算节点接单…";
       $("jobStatus").className = "pill";
+      $("jobStage").textContent = "任务已保存，可以稍后凭令牌找回";
       setTimeout(pollJob, 3000);
       return;
     }
     if (j.status === "running") {
       $("jobStatus").textContent = "⏳ 正在生成，请耐心等待…";
       $("jobStatus").className = "pill";
+      $("jobStage").textContent = j.stage_label || "正在构建地图图层与模型几何";
       setTimeout(pollJob, 2500);
       return;
     }
     const failed = j.status !== "done";
     $("jobStatus").textContent = failed ? "✕ 失败" : "✓ 完成";
     $("jobStatus").className = "pill " + j.status;
+    $("jobStage").textContent = failed
+      ? "生成未完成，请查看下方说明"
+      : "模型与交付文件已经生成";
     if (failed) {
       hint.textContent = j.error_msg || "生成失败，请稍后重试";
+      hint.hidden = false;
+    } else if (j.quality_warnings && j.quality_warnings.length) {
+      hint.textContent = `生成完成，但需要检查：${j.quality_warnings.join("；")}`;
       hint.hidden = false;
     } else {
       hint.hidden = true;
@@ -1263,6 +1331,21 @@ async function pollJob() {
     state.job = null;
     setBusy(false);
   }
+}
+
+function renderQualityChecks(checks) {
+  const el = $("qualityChecks");
+  if (!checks.length) {
+    el.hidden = true;
+    el.innerHTML = "";
+    return;
+  }
+  el.innerHTML = checks.map((check) => `
+    <div class="quality-check ${check.status}">
+      <strong>${esc(check.label)}</strong>
+      <span>${esc(check.detail)}</span>
+    </div>`).join("");
+  el.hidden = false;
 }
 
 /* ---------------- 任务令牌：展示 + 找回 ---------------- */
@@ -1486,6 +1569,7 @@ window.addEventListener("load", async () => {
   initMap();
   lmSearch("", false);   // 预取目录缓存，不弹下拉
   await restoreSession();  // 恢复上次会话
+  syncGenerationProfileAvailability();
   // 任务链接 ?job=xxx → 自动找回该任务
   const jobParam = new URLSearchParams(window.location.search).get("job");
   if (jobParam) { $("jobLookup").value = jobParam; lookupJob(jobParam); }

@@ -91,3 +91,35 @@ def test_profiles_endpoint_describes_scope_and_draft_support():
     assert profiles["classic"]["draft"] is True
     assert profiles["quality_flat"]["scope"] == "westlake"
     assert profiles["quality_flat"]["draft"] is False
+
+
+def test_job_status_exposes_real_stage_and_zero_feature_warning(tmp_path):
+    log_path = tmp_path / "job.log"
+    log_path.write_text(
+        "[Stage 4.5] Preprocessing layers\n"
+        "BL=6 BO=376 WL=0 WO=0 block_base=575 roads=390\n"
+        "  [glb] water: +21 satellite polys (true shape)\n"
+        "  [postcheck] PASS: 全部图层落地\n",
+        encoding="utf-8",
+    )
+    job = {
+        "id": "testjob",
+        "city": "westlake",
+        "city_title": "杭州 · 西湖",
+        "mode": "draft",
+        "style": None,
+        "generation_profile": "classic",
+        "status": "running",
+        "started": 1.0,
+        "ended": None,
+        "log_path": str(log_path),
+    }
+
+    public = server._job_public(job)
+
+    assert public["stage_label"] == "正在整理道路、建筑与水体图层"
+    assert "水体" in public["quality_warnings"][0]
+    checks = {check["id"]: check for check in public["quality_checks"]}
+    assert checks["source_features"]["status"] == "warning"
+    assert checks["secondary_map"]["detail"] == "补入 21 个水体面"
+    assert checks["grounding"]["status"] == "pass"
