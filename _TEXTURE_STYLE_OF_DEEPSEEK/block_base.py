@@ -345,26 +345,32 @@ def _build_flat(
     scale: float,
     thickness_mm: float,
 ) -> Optional[trimesh.Trimesh]:
-    """Legacy flat extrusion path via manifold3d."""
+    """Flat extrusion path via manifold3d.
+
+    Terrain height is sampled in one vectorized batch.  Besides being much
+    faster for city-scale inputs, this keeps ``flat`` a genuinely lightweight
+    alternative to the per-polygon textured path.
+    """
     parts: list[manifold3d.Manifold] = []
-    n_skipped = 0
+    valid_indices = [
+        i for i, poly in enumerate(polys)
+        if not poly.is_empty and poly.area >= 10.0
+    ]
+    n_skipped = len(polys) - len(valid_indices)
+    if not valid_indices:
+        return None
 
-    for poly in polys:
-        if poly.is_empty or poly.area < 10.0:
+    centroids_x = np.array([polys[i].centroid.x for i in valid_indices]) * scale
+    centroids_y = np.array([polys[i].centroid.y for i in valid_indices]) * scale
+    terrain_z = sample_terrain_z(terrain_mesh, centroids_x, centroids_y)
+
+    for sample_i, poly_i in enumerate(valid_indices):
+        if sample_i >= len(terrain_z) or np.isnan(terrain_z[sample_i]):
             n_skipped += 1
             continue
 
-        centroid = poly.centroid
-        tz = sample_terrain_z(
-            terrain_mesh,
-            np.array([centroid.x]) * scale,
-            np.array([centroid.y]) * scale,
-        )
-        if len(tz) == 0 or np.isnan(tz[0]):
-            n_skipped += 1
-            continue
-
-        z_base = float(tz[0])
+        poly = polys[poly_i]
+        z_base = float(terrain_z[sample_i])
         man = _polygon_to_manifold(poly, scale, z_base, thickness_mm)
         if not man.is_empty():
             parts.append(man)

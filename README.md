@@ -120,6 +120,17 @@ python generate_city.py \
 `westlake_cli_preview.png`；`--review-png` 输出
 `westlake_cli_topdown.png` 和 `westlake_cli_height.png`。
 
+城市基底可用同一入口做三档对比；默认仍为既有的 `textured`，避免静默改变当前正确输出：
+
+```bash
+python generate_city.py --block-base-mode off
+python generate_city.py --block-base-mode flat
+python generate_city.py --block-base-mode textured
+```
+
+三档分别表示不生成城市基底、生成无纹理平面基底、生成现有语义 Z 纹理基底。
+输出文件名包含 `_block-off`、`_block-flat` 或 `_block-textured`，可以并排保留。
+
 ---
 
 ## 计算与部署架构（实测结论）

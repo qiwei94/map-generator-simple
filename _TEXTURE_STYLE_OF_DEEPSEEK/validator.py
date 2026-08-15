@@ -337,7 +337,10 @@ def validate_3mf(filepath: str) -> Dict[str, any]:
     water_obj = objects.get("water")
     if water_obj and len(water_obj["vertices"]) > 0:
         water_z_span = water_obj["vertices"][:, 2].max() - water_obj["vertices"][:, 2].min()
-        v8_ok = water_z_span >= 0.4  # base thickness + water height
+        # Decimal 3MF coordinates such as -2.0 and -1.6 can subtract to
+        # 0.3999999999999999 in binary floating point.  Accept the specified
+        # 0.4 mm plate instead of reporting a false critical error.
+        v8_ok = water_z_span >= 0.4 - 1e-6
     else:
         water_z_span = 0
         v8_ok = True

@@ -114,3 +114,16 @@ class TestValidate3mf:
         assert "rules" in result
         assert "errors" in result
         assert "warnings" in result
+
+    def test_exact_point_four_mm_water_plate_is_not_rejected(self, tmp_path):
+        from _TEXTURE_STYLE_OF_DEEPSEEK.exporter import export_deepseek_3mf
+
+        terrain = trimesh.creation.box(extents=[196, 176, 4])
+        water = trimesh.creation.box(extents=[196, 176, 0.4])
+        water.apply_translation([0, 0, -1.8])  # serialized bounds: -2.0 .. -1.6
+        out = str(tmp_path / "water-point-four.3mf")
+        export_deepseek_3mf({"terrain": terrain, "water": water}, out)
+
+        result = validate_3mf(out)
+        v8 = next(rule for rule in result["rules"] if rule["id"] == "V8")
+        assert bool(v8["passed"])

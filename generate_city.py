@@ -97,6 +97,15 @@ def build_parser():
         default=False,
         help='输出干净俯视 PNG 和建筑高度 PNG'
     )
+    parser.add_argument(
+        '--block-base-mode',
+        choices=('off', 'flat', 'textured'),
+        default='textured',
+        help=(
+            '城市基底模式：off=关闭，flat=无纹理平面基底，'
+            'textured=现有语义 Z 纹理（默认，兼容既有输出）'
+        ),
+    )
     return parser
 
 
@@ -118,15 +127,16 @@ if __name__ == "__main__":
     CITY_NAME = "westlake_cli"
     OUTPUT_DIR = "output/westlake_cli"
 
-    # Sub-mesh on/off (一次性调参开关，改完跑即可)
+    # Sub-mesh on/off
     ENABLE_VEGETATION = False
-    ENABLE_BLOCK_BASE = True
+    BLOCK_BASE_MODE = cli_args.block_base_mode
     # MERGE_BLOCK_LAYERS 和 _bldg_tag 由 Stage 0c 自动检测决定
     # 低密度城市（<150K 建筑）→ 完整三层：block_base + BO + BL
     # 高密度城市（≥150K 建筑）→ MERGE 两层：block_base + BL（跳过 BO）
 
     print("=" * 70)
     print("  Pure Osmium CLI Pipeline: extract → tags-filter → export → 3MF")
+    print(f"  Block base mode: {BLOCK_BASE_MODE}")
     print("=" * 70)
 
     t_start = time.time()
@@ -801,8 +811,8 @@ if __name__ == "__main__":
     t85 = time.time()
 
     block_base_mesh = None
-    if not ENABLE_BLOCK_BASE:
-        print(f"  BlockBase DISABLED via ENABLE_BLOCK_BASE flag")
+    if BLOCK_BASE_MODE == 'off':
+        print("  BlockBase mode=off: no city-base mesh will be generated")
     elif layers.block_base:
         try:
             merged_polys = list(layers.block_base)
@@ -818,9 +828,16 @@ if __name__ == "__main__":
             block_base_mesh = build_deepseek_block_base_v3(
                 merged_polys, terrain_solid, scale,
                 bbox_local=bbox_local, thickness_mm=merge_thickness,
-                block_classes=merged_classes)
+                brick_style=(BLOCK_BASE_MODE == 'textured'),
+                block_classes=(
+                    merged_classes if BLOCK_BASE_MODE == 'textured' else None
+                ))
             if block_base_mesh is not None:
-                print(f"  BlockBase faces: {len(block_base_mesh.faces):,}")
+                print(
+                    f"  BlockBase mode={BLOCK_BASE_MODE}: "
+                    f"{len(block_base_mesh.faces):,} faces, "
+                    f"watertight={block_base_mesh.is_watertight}"
+                )
             else:
                 print(f"  No block_base mesh generated")
         except Exception as e:
@@ -870,6 +887,7 @@ if __name__ == "__main__":
     # Export 3MF
     from datetime import datetime
     _suffix = "_2layer" if MERGE_BLOCK_LAYERS else ""
+    _suffix += f"_block-{BLOCK_BASE_MODE}"
     _timestamp = datetime.now().strftime("%m%d_%H%M")
     output_path = os.path.join(OUTPUT_DIR, f"full_{CITY_NAME}{_suffix}_{_timestamp}.3mf")
     export_deepseek_3mf(meshes, output_path)
@@ -889,12 +907,20 @@ if __name__ == "__main__":
     print(f"  Pipeline Summary")
     print(f"{'=' * 70}")
     print(f"  Method: {METHOD}")
+    print(f"  Block base mode: {BLOCK_BASE_MODE}")
     print(f"  Area: {area_km2:.1f} km², Scale: {scale:.6f} mm/m")
     print(f"  Terrain faces: {len(terrain_solid.faces):,}")
     print(f"  Water faces: {len(water_mesh.faces):,}" if water_mesh is not None else "  Water: None")
     print(f"  Vegetation faces: {len(vegetation_mesh.faces):,}" if vegetation_mesh is not None else "  Vegetation: None")
     print(f"  Buildings faces: {len(buildings_mesh.faces):,}" if buildings_mesh is not None else "  Buildings: None")
     print(f"  Roads faces: {len(roads_mesh.faces):,}" if roads_mesh is not None else "  Roads: None")
+    if block_base_mesh is not None:
+        print(
+            f"  Block base faces: {len(block_base_mesh.faces):,}, "
+            f"watertight={block_base_mesh.is_watertight}"
+        )
+    else:
+        print("  Block base: None")
     print(f"  Output: {output_path} ({file_size:.2f} MB)")
     for png_path in png_outputs:
         print(f"  PNG: {png_path}")

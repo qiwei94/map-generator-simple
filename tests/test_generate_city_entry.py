@@ -9,6 +9,7 @@ def test_png_flags_are_opt_in():
 
     assert args.png is False
     assert args.review_png is False
+    assert args.block_base_mode == "textured"
 
 
 def test_png_flags_can_be_enabled_together():
@@ -23,3 +24,10 @@ def test_historical_entry_uses_the_official_parser():
 
     assert args.png is True
     assert args.review_png is False
+
+
+def test_block_base_modes_are_exposed_by_both_entries():
+    for parser_factory in (build_parser, compatibility_parser):
+        for mode in ("off", "flat", "textured"):
+            args = parser_factory().parse_args(["--block-base-mode", mode])
+            assert args.block_base_mode == mode
