@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <meta name="theme-color" content="#171916">
 <title>旅程浮雕 Studio</title>
-<link rel="stylesheet" href="style.css?v=36">
+<link rel="stylesheet" href="style.css?v=37">
 <link rel="stylesheet" href="vendor/leaflet/leaflet.css">
 <!-- 本地自托管，无 CDN 依赖 -->
 <script type="module" src="vendor/model-viewer.min.js"
@@ -16,43 +16,42 @@
 
 <header class="topbar">
   <div class="brand">
-    <span class="brand-mark" aria-hidden="true"></span>
     <div>
+      <p class="brand-overline">RELIEF STUDIO</p>
       <h1>旅程浮雕</h1>
-      <p class="sub">把走过的地方，留成可以触摸的地形</p>
     </div>
   </div>
   <nav class="flow-nav" aria-label="制作进度">
-    <a href="#step1"><span>01</span>地点</a>
-    <a href="#step2"><span>02</span>构图</a>
-    <a href="#step3"><span>03</span>风格</a>
-    <a href="#step5"><span>04</span>成品</a>
+    <a href="#step1"><span>01</span>定位</a>
+    <a href="#step2"><span>02</span>取景</a>
+    <a href="#step4"><span>03</span>生成</a>
   </nav>
+  <p class="top-spec">3MF · PRINT READY</p>
 </header>
 
 <main id="main">
 
   <section class="product-hero" aria-labelledby="heroTitle">
     <div class="hero-copy">
-      <p class="hero-kicker">为一段真实旅程制作</p>
-      <h2 id="heroTitle">一座城市，一片湖，<br>一件真正属于你的浮雕。</h2>
-      <p>从地点或旅行照片开始。系统会整理地图、地形与路线，交付经过检查、可直接打印的多色模型。</p>
+      <p class="hero-kicker">MAP RELIEF / 25 KM</p>
+      <h2 id="heroTitle">先看真实输出，<br>再决定怎么生成。</h2>
+      <p>从地点、照片或现有城市数据开始。取景、选择生成方式，然后交付可打印的多色 3MF。</p>
+      <a class="hero-cta" href="#step1">创建一张地图 <span>↓</span></a>
       <div class="hero-specs">
-        <span><strong>200 × 200 mm</strong>典型成品</span>
-        <span><strong>3 色材料</strong>多色打印</span>
-        <span><strong>Print-ready</strong>交付前验证</span>
+        <span><strong>25 km</strong>西湖真实范围</span>
+        <span><strong>200 mm</strong>标准成品宽度</span>
+        <span><strong>12 / 12</strong>项目规则通过</span>
       </div>
     </div>
-    <div class="hero-object" aria-label="西湖浮雕示意">
-      <div class="hero-object-head"><span>杭州 · 西湖</span><span>已通过打印校验</span></div>
-      <div class="relief-model">
-        <span class="relief-water"></span>
-        <span class="relief-river"></span>
-        <span class="relief-city relief-city-a"></span>
-        <span class="relief-city relief-city-b"></span>
-      </div>
-      <div class="material-key"><span>地形</span><span>水体</span><span>城市</span></div>
-    </div>
+    <figure class="hero-visual">
+      <img src="assets/westlake-real-output.jpg"
+           alt="真实生成的杭州西湖与钱塘江 25 公里浮雕俯视图">
+      <div class="hero-visual-meta"><span>真实管线审查图</span><span>2026.08</span></div>
+      <figcaption>
+        <p>HANGZHOU / 30.13—30.36 N</p>
+        <strong>西湖、钱塘江与城市纹理</strong>
+      </figcaption>
+    </figure>
   </section>
 
   <!-- ══ Step 1 · 选位置 ══ -->
@@ -240,6 +239,6 @@
 
 <footer class="foot">旅程浮雕 · 把走过的路，凝固成可以触摸的实体 · <a href="#" onclick="copyMyLink();return false">复制我的链接</a> · <a href="#" onclick="localStorage.removeItem('jr_session');location.href=location.pathname;return false">重新开始</a></footer>
 
-<script src="app.js?v=36"></script>
+<script src="app.js?v=37"></script>
 </body>
 </html>
