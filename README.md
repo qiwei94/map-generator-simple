@@ -131,6 +131,13 @@ python generate_city.py --block-base-mode textured
 三档分别表示不生成城市基底、生成无纹理平面基底、生成现有语义 Z 纹理基底。
 输出文件名包含 `_block-off`、`_block-flat` 或 `_block-textured`，可以并排保留。
 
+城市基底默认退让模型外圈 2mm：外圈街区整块移除，紧邻的过渡带仅保留具有建筑覆盖的街区。3mm 更明显；设为 0 可恢复旧版铺满边缘的行为：
+
+```bash
+python generate_city.py --block-base-mode flat --block-base-edge-retreat-mm 3
+python generate_city.py --block-base-mode flat --block-base-edge-retreat-mm 0
+```
+
 ---
 
 ## 计算与部署架构（实测结论）

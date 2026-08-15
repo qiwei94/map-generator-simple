@@ -10,6 +10,8 @@ def test_png_flags_are_opt_in():
     assert args.png is False
     assert args.review_png is False
     assert args.block_base_mode == "textured"
+    assert args.block_base_edge_retreat_mm == 2.0
+    assert args.block_base_edge_transition_mm == 1.5
 
 
 def test_png_flags_can_be_enabled_together():

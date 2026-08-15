@@ -35,7 +35,10 @@ from _TEXTURE_STYLE_OF_DEEPSEEK.buildings import build_deepseek_buildings, build
 from _TEXTURE_STYLE_OF_DEEPSEEK.roads import build_deepseek_roads, build_deepseek_roads_v3
 from _TEXTURE_STYLE_OF_DEEPSEEK.water import build_deepseek_water, build_deepseek_water_v3
 from _TEXTURE_STYLE_OF_DEEPSEEK.vegetation_exclusion import build_deepseek_vegetation_v3
-from _TEXTURE_STYLE_OF_DEEPSEEK.block_base import build_deepseek_block_base_v3
+from _TEXTURE_STYLE_OF_DEEPSEEK.block_base import (
+    build_deepseek_block_base_v3,
+    filter_block_base_edges,
+)
 from _TEXTURE_STYLE_OF_DEEPSEEK._layer_preprocess import preprocess_layers
 from _TEXTURE_STYLE_OF_DEEPSEEK._pipeline_cache import PipelineCache
 from _TEXTURE_STYLE_OF_DEEPSEEK._process_lock import acquire_lock
@@ -106,6 +109,20 @@ def build_parser():
             'textured=现有语义 Z 纹理（默认，兼容既有输出）'
         ),
     )
+    parser.add_argument(
+        '--block-base-edge-retreat-mm',
+        type=float,
+        default=2.0,
+        metavar='MM',
+        help='城市基底外圈退让宽度（模型毫米，默认 2；设为 0 恢复旧输出）',
+    )
+    parser.add_argument(
+        '--block-base-edge-transition-mm',
+        type=float,
+        default=1.5,
+        metavar='MM',
+        help='退让圈内侧的建筑覆盖筛选过渡带宽度（默认 1.5mm）',
+    )
     return parser
 
 
@@ -114,6 +131,10 @@ if __name__ == "__main__":
     # CLI 参数
     # ---------------------------------------------------------------------------
     cli_args = build_parser().parse_args()
+    if cli_args.block_base_edge_retreat_mm < 0:
+        raise SystemExit("--block-base-edge-retreat-mm must be non-negative")
+    if cli_args.block_base_edge_transition_mm < 0:
+        raise SystemExit("--block-base-edge-transition-mm must be non-negative")
 
     # PBF 文件
     PBF_FILE = os.path.join(_project_root, 'pbf_cache', 'zhejiang-latest.osm.pbf')
@@ -825,6 +846,26 @@ if __name__ == "__main__":
                 merge_thickness = 0.625  # 合并模式用 BO 高度，比 0.3mm 更有存在感
                 print(f"  MERGE: block_base({len(layers.block_base)}) + BO({len(layers.BO)}) "
                       f"= {len(merged_polys)} polys, thickness={merge_thickness}mm")
+            if cli_args.block_base_edge_retreat_mm > 0:
+                occupied_polys = list(layers.BO) + list(layers.BL)
+                merged_polys, kept_indices, edge_stats = filter_block_base_edges(
+                    merged_polys,
+                    bbox_local,
+                    scale,
+                    retreat_mm=cli_args.block_base_edge_retreat_mm,
+                    transition_mm=cli_args.block_base_edge_transition_mm,
+                    occupied_polys=occupied_polys,
+                )
+                if merged_classes is not None:
+                    merged_classes = [merged_classes[i] for i in kept_indices]
+                print(
+                    "  BlockBase edge retreat: "
+                    f"{cli_args.block_base_edge_retreat_mm:g}mm + "
+                    f"{cli_args.block_base_edge_transition_mm:g}mm transition; "
+                    f"kept={edge_stats['kept']}/{edge_stats['input']}, "
+                    f"outer_removed={edge_stats['outer_removed']}, "
+                    f"transition_removed={edge_stats['transition_removed']}"
+                )
             block_base_mesh = build_deepseek_block_base_v3(
                 merged_polys, terrain_solid, scale,
                 bbox_local=bbox_local, thickness_mm=merge_thickness,
@@ -888,6 +929,9 @@ if __name__ == "__main__":
     from datetime import datetime
     _suffix = "_2layer" if MERGE_BLOCK_LAYERS else ""
     _suffix += f"_block-{BLOCK_BASE_MODE}"
+    if cli_args.block_base_edge_retreat_mm > 0:
+        _edge_tag = f"{cli_args.block_base_edge_retreat_mm:g}".replace('.', 'p')
+        _suffix += f"_edge-{_edge_tag}mm"
     _timestamp = datetime.now().strftime("%m%d_%H%M")
     output_path = os.path.join(OUTPUT_DIR, f"full_{CITY_NAME}{_suffix}_{_timestamp}.3mf")
     export_deepseek_3mf(meshes, output_path)

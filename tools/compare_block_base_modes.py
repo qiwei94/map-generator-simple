@@ -32,7 +32,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from _TEXTURE_STYLE_OF_DEEPSEEK.block_base import build_deepseek_block_base_v3
+from _TEXTURE_STYLE_OF_DEEPSEEK.block_base import (
+    build_deepseek_block_base_v3,
+    filter_block_base_edges,
+)
 from _TEXTURE_STYLE_OF_DEEPSEEK.exporter import export_deepseek_3mf
 from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.processors.coords import bbox_to_utm
 
@@ -246,6 +249,14 @@ def main() -> int:
 
     bbox = bbox_to_utm(30.13, 120.01, 30.36, 120.29)
     scale = 196.0 / max(bbox["width_m"], bbox["height_m"])
+    utm_bbox = bbox["utm_bbox"]
+    origin = bbox["origin"]
+    bbox_local = (
+        utm_bbox[0] - origin[0],
+        utm_bbox[1] - origin[1],
+        utm_bbox[2] - origin[0],
+        utm_bbox[3] - origin[1],
+    )
 
     modes: Dict[str, Optional[trimesh.Trimesh]] = {
         "off": None,
@@ -263,12 +274,38 @@ def main() -> int:
     flat_seconds = time.time() - t0
     print(f"  flat build: {flat_seconds:.1f}s")
 
+    filter_stats = {}
+    edge_build_seconds = {}
+    occupied_polys = list(layers.BO) + list(layers.BL)
+    for retreat_mm in (2.0, 3.0):
+        mode = f"flat-edge{retreat_mm:g}"
+        edge_polys, _indices, stats = filter_block_base_edges(
+            list(layers.block_base),
+            bbox_local,
+            scale,
+            retreat_mm=retreat_mm,
+            transition_mm=1.5,
+            occupied_polys=occupied_polys,
+        )
+        filter_stats[mode] = stats
+        print(f"Building {mode}: {stats}")
+        edge_t0 = time.time()
+        modes[mode] = build_deepseek_block_base_v3(
+            edge_polys,
+            terrain_mesh,
+            scale,
+            brick_style=False,
+            block_classes=None,
+        )
+        edge_build_seconds[mode] = time.time() - edge_t0
+        print(f"  {mode} build: {edge_build_seconds[mode]:.1f}s")
+
     metrics = {
         "baseline": str(args.baseline),
         "common_faces": int(sum(len(mesh.faces) for mesh in common_meshes.values())),
         "modes": {},
     }
-    for mode in ("off", "flat", "textured"):
+    for mode in ("off", "flat", "flat-edge2", "flat-edge3", "textured"):
         block_mesh = modes[mode]
         output_meshes = dict(common_meshes)
         output_meshes["block_base"] = block_mesh
@@ -287,6 +324,9 @@ def main() -> int:
         })
         if mode == "flat":
             stats["build_seconds"] = round(flat_seconds, 2)
+        if mode in filter_stats:
+            stats["build_seconds"] = round(edge_build_seconds[mode], 2)
+            stats["edge_filter"] = filter_stats[mode]
         metrics["modes"][mode] = stats
         print(f"  {mode}: {stats}")
 
