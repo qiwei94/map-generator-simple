@@ -100,6 +100,18 @@ STUDIO_PORT=9000 python webapp/server.py   # 自定义端口
 - 本机：`http://127.0.0.1:8787`
 - 手机同 WiFi：用 `ipconfig` 查 WLAN 的 IPv4 访问（注意排除代理虚拟网卡地址）。
 
+Studio 的“生成方式”保持相互隔离：
+
+- **经典通用**：沿用 `generate_city_legacy.py`，支持全部已配置区域和快速预览。
+- **西湖质量 · 平整填充**：调用 `generate_city.py`，输出独立到
+  `output/westlake_quality_flat/`，block base 使用平整填充和 2 mm 边缘退让。
+- **西湖质量 · 纹理填充**：输出独立到
+  `output/westlake_quality_textured/`，保留语义地块起伏和 2 mm 边缘退让。
+
+两种质量模式目前只接受“杭州 · 西湖”25 km 正式模型，不提供 draft，也不会
+静默退回经典管线。任务页会分别展示源数据要素数量、第二地图源水体补强和图层
+落地后检证据；例如 OSM 水体为零时，即使卫星水体补强成功也仍会提示人工复核。
+
 ### 4. 测试
 ```bash
 pytest tests/ -m "not slow"        # 离线套件（网络用例标 slow 默认跳过）
