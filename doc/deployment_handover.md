@@ -14,7 +14,7 @@
                                             │ studio.service（FastAPI :80）       │
                                             │  ├─ 静态页 webapp/static/（5步流程） │
                                             │  └─ /api/generate → 子进程          │
-                                            │      generate_city.py（单线程）    │
+                                            │ generate_city_legacy.py（单线程） │
                                             │      draft≈1G内存 / full≈3.4~5.7G │
                                             │ /root/map-cache（75G 本地数据）     │
                                             │  ├─ pbf_cache/  80个PBF (32G)      │
@@ -36,9 +36,9 @@
 - 产品「旅程回忆 / Journey Relief Studio」：上传旅行照片 → 还原轨迹/停留点 → 选风格 → 生成可 3D 打印浮雕（draft GLB 预览 + full 3MF）。
 - Web 前端：`webapp/static/`（index.html / app.js / style.css，纯静态，版本号 `?v=N` 防缓存）。
 - Web 后端：`webapp/server.py`（FastAPI，轻后端，不 import 重管线）。两种运行模式：
-  - **本地模式（默认/all-in-one）**：`/api/generate` 直接起 `generate_city.py` 子进程在本机算。单机部署用这个。
+  - **本地模式（默认/all-in-one）**：`/api/generate` 直接起 `generate_city_legacy.py` 子进程在本机算。单机部署用这个。
   - **Worker 模式（`WORKER_MODE=1`）**：只入队，由独立 `tools/cloud_worker.py` 拉取计算（跨机拆分用）。
-- 计算管线：`generate_city.py` + `_TEXTURE_STYLE_OF_DEEPSEEK/`（单线程，内存峰值：draft≈1G，full 甜区≈3.4G，full 西湖≈5.7G）。
+- Web 通用管线：`generate_city_legacy.py` + `_TEXTURE_STYLE_OF_DEEPSEEK/`（单线程，内存峰值：draft≈1G，full 甜区≈3.4G，full 西湖≈5.7G）。正式西湖 25KM 3MF 入口为 `generate_city.py`。
 - 任务令牌：生成后前端显示 job 令牌 + 复制链接（`?job=xxx`），可找回任务（`/api/jobs/{id}` 持久化在 `tmp/webapp_jobs/_jobs.json`）。
 - 会话持久化：localStorage + 云端 `/api/session/{id}`（`?s=xxx` 跨设备恢复）。
 - 测试：`pytest tests/ -m "not slow"`（约 223 passed）。
@@ -63,13 +63,13 @@
 - 实测（B，跨双网格线框 ~8km）：首次全框提取后，另一量化框共享瓦片的偏移请求 **~53s**（图层瓦片全 HIT，仅 preprocess 首算）。
 
 运维要点：
-- 逃生门：`generate_city.py --no-snap` 回退旧行为；`--no-cache` 关闭 preprocess 缓存。
+- 逃生门：`generate_city_legacy.py --no-snap` 回退旧行为；`--no-cache` 关闭 preprocess 缓存。
 - 清理缓存：`tmp/osmium_*.geojson`、`cache/pipeline/`、`cache/grids/`、`cache/tiles/`（按需手动删，无自动过期）。
 - 跨 UTM 分区的框自动回退精确模式（snap 前后 UTM zone 不一致时）。
 
 ### 热门区域预热（tools/prewarm_tiles.py）
 
-读 `cities.json` 热门取景框 → 按量化格去重 → 逐个跑 `generate_city.py --draft` 填满三层缓存。新城市上线 / PBF 数据更新后跑一次：
+读 `cities.json` 热门取景框 → 按量化格去重 → 逐个跑 `generate_city_legacy.py --draft` 填满三层缓存。新城市上线 / PBF 数据更新后跑一次：
 
 ```bash
 # 在 B 上（PATH 需含 tools/osmium）
@@ -141,7 +141,7 @@ uptime ; free -h ; df -h /
 - 本地跑法（与 B 同款）：
   ```powershell
   $env:PATH += ";$PWD\tools"
-  python generate_city.py --bbox 30.1464,120.0207,30.3716,120.2813 `
+  python generate_city_legacy.py --bbox 30.1464,120.0207,30.3716,120.2813 `
     --pbf pbf_cache/zhejiang-latest.osm.pbf --city local_test `
     --auto-params --draft --png
   ```

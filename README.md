@@ -53,7 +53,8 @@
 ## 目录结构
 
 ```
-generate_city.py              # 主管线入口（--bbox / --preset / --draft / --marker / --params-json）
+generate_city.py              # 当前正式西湖 25KM 3MF 入口
+generate_city_legacy.py       # 旧通用入口（Web/draft/任意 bbox 兼容）
 _TEXTURE_STYLE_OF_DEEPSEEK/   # 几何预处理 + 渲染核心
   _layer_preprocess.py        #   图层预处理（BL/BO/WL/VO/roads…）
   render_glb.py               #   draft GLB 导出 + 落地后检 + 染红标注
@@ -109,7 +110,7 @@ pytest tests/ -m "not slow"        # 离线套件（网络用例标 slow 默认�
 专用西湖脚本可在生成 3MF 的同一次运行中输出彩色诊断图、干净俯视图和高度图：
 
 ```bash
-python real_back_up_westlake_cli.py \
+python generate_city.py \
   --elevation-file /path/to/westlake_dem.tif \
   --png \
   --review-png

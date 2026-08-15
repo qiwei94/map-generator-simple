@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """热门区域缓存预热工具（Phase 3）。
 
-对 cities.json 中的热门取景框逐个跑 generate_city.py --draft，
+对 cities.json 中的热门取景框逐个跑 generate_city_legacy.py --draft，
 把"量化框共享缓存"提前填满：
   - tmp/osmium_{layer}_{snapbbox}.geojson  各图层 GeoJSON
   - 高程网格缓存（cache/grids）
@@ -84,7 +84,7 @@ def main():
     ok, failed = 0, []
     for i, (e, cell, pbf) in enumerate(plan, 1):
         city_name = f"prewarm_{e['city']}"
-        cmd = [sys.executable, os.path.join(_ROOT, "generate_city.py"),
+        cmd = [sys.executable, os.path.join(_ROOT, "generate_city_legacy.py"),
                "--bbox", e["bbox"], "--pbf", pbf,
                "--city", city_name, "--auto-params", "--draft"]
         print(f"\n[{i}/{len(plan)}] {e['city']} ...")

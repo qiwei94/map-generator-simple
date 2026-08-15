@@ -330,7 +330,7 @@ def main():
         print("  Continuing anyway...")
     print()
 
-    generate_script = str(PROJECT_ROOT / "generate_city.py")
+    generate_script = str(PROJECT_ROOT / "generate_city_legacy.py")
     os.makedirs(args.output, exist_ok=True)
 
     results = []

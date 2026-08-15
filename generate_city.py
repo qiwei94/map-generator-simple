@@ -1,22 +1,23 @@
-"""统一城市 3MF 模型生成脚本
+"""西湖 25KM 正式 3MF 生成入口。
 
-通过 CLI 参数传入坐标和 PBF 路径，或使用内置预设。
+正式管线：
+PBF → osmium extract → osmium tags-filter → osmium export → GeoJSON → GeoDataFrame → 3MF
 
-用法:
-  python generate_city.py --preset westlake
-  python generate_city.py --bbox 30.13,120.01,30.36,120.29 --pbf pbf_cache/zhejiang-latest.osm.pbf --city westlake
-  python generate_city.py --preset chicago --merge-layers --narrow-threshold 8.0
+用法：
+  python generate_city.py --elevation-file /path/to/westlake_dem.tif
+  python generate_city.py --elevation-file /path/to/westlake_dem.tif --png --review-png
 
-前置要求:
-  conda install -c conda-forge osmium-tool
+前置要求：
+conda install -c conda-forge osmium-tool
 """
 
 import argparse
-import json
+import hashlib
 import os
 import sys
 import time
 import numpy as np
+import pandas as pd
 
 _project_root = os.path.dirname(os.path.abspath(__file__))
 if _project_root not in sys.path:
@@ -26,10 +27,8 @@ if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8')
 
 from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.processors.coords import bbox_to_utm, project_geodataframe
-from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.osmium_cli_fetcher import fetch_from_cli, fetch_tiled_from_cli, get_cli_fetcher
-from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.elevation import fetch_elevation_grid, fetch_elevation_grid_tiled
-from _TEXTURE_STYLE_OF_DEEPSEEK._tile_grid import snap_bbox as _snap_bbox
-from _TEXTURE_STYLE_OF_DEEPSEEK._pipeline_cache import PipelineCache
+from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.osmium_cli_fetcher import fetch_from_cli, get_cli_fetcher, sample_building_density
+from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.elevation import fetch_elevation_grid
 from _TEXTURE_STYLE_OF_DEEPSEEK.terrain import build_deepseek_terrain
 from _TEXTURE_STYLE_OF_DEEPSEEK.object4_terrain_with_holes import build_terrain_with_water_holes_manifold
 from _TEXTURE_STYLE_OF_DEEPSEEK.buildings import build_deepseek_buildings, build_deepseek_buildings_v3
@@ -38,324 +37,195 @@ from _TEXTURE_STYLE_OF_DEEPSEEK.water import build_deepseek_water, build_deepsee
 from _TEXTURE_STYLE_OF_DEEPSEEK.vegetation_exclusion import build_deepseek_vegetation_v3
 from _TEXTURE_STYLE_OF_DEEPSEEK.block_base import build_deepseek_block_base_v3
 from _TEXTURE_STYLE_OF_DEEPSEEK._layer_preprocess import preprocess_layers
+from _TEXTURE_STYLE_OF_DEEPSEEK._pipeline_cache import PipelineCache
+from _TEXTURE_STYLE_OF_DEEPSEEK._process_lock import acquire_lock
 from _TEXTURE_STYLE_OF_DEEPSEEK.exporter import export_deepseek_3mf, split_terrain_mesh
 from _TEXTURE_STYLE_OF_DEEPSEEK.config import compute_scale, WATERWAY_WIDTHS, TERRAIN_GRID, get_area_class, BUILDING_V2_HOTSPOT_RELAX
 
-# ---------------------------------------------------------------------------
-# 城市预设
-# ---------------------------------------------------------------------------
-PRESETS = {
-    "westlake": {
-        "bbox": (30.13, 120.01, 30.36, 120.29),
-        "pbf": "pbf_cache/zhejiang-latest.osm.pbf",
-    },
-    "chicago": {
-        "bbox": (41.76, -87.77, 42.00, -87.49),
-        "pbf": "pbf_cache/illinois-latest.osm.pbf",
-    },
-    "chongqing": {
-        "bbox": (29.43, 106.41, 29.66, 106.66),
-        "pbf": "pbf_cache/chongqing-260508.osm.pbf",
-    },
-}
 
-# ---------------------------------------------------------------------------
-# CLI 参数
-# ---------------------------------------------------------------------------
-
-def parse_args():
+def build_parser():
+    """Build the CLI parser separately so its public options are testable."""
     parser = argparse.ArgumentParser(
-        description="统一城市 3MF 模型生成 (osmium CLI pipeline)"
+        description="使用 osmium CLI 管线生成西湖 3MF 模型"
     )
     parser.add_argument(
-        '--preset', choices=list(PRESETS.keys()),
-        help='使用内置城市预设（坐标+PBF 路径）'
+        '--elevation-file',
+        type=str,
+        default=None,
+        metavar='PATH',
+        help='本地 DEM GeoTIFF 文件路径（可从 gscloud.cn 下载区域 DEM），跳过网络下载'
     )
     parser.add_argument(
-        '--bbox', type=str, metavar='S,W,N,E',
-        help='边界框坐标: south,west,north,east (WGS84)'
+        '--use-ndsm',
+        action='store_true',
+        default=False,
+        help='使用 nDSM (Copernicus DSM - SRTM) 估算建筑高度，替代默认 10m fallback'
     )
     parser.add_argument(
-        '--pbf', type=str, metavar='PATH',
-        help='OSM PBF 文件路径'
+        '--narrow-threshold',
+        type=float,
+        default=6.0,
+        help='细长建筑 aspect ratio 阈值，超过此值触发高度惩罚（默认 6.0）'
     )
     parser.add_argument(
-        '--city', type=str, metavar='NAME',
-        help='城市名称（用于输出文件命名）'
+        '--narrow-penalty',
+        type=float,
+        default=0.5,
+        help='细长建筑高度缩放系数（默认 0.5，即减半）'
     )
     parser.add_argument(
-        '--elevation-file', type=str, default=None, metavar='PATH',
-        help='本地 DEM GeoTIFF 文件路径，跳过网络下载'
+        '--sample-only',
+        action='store_true',
+        default=False,
+        help='仅采样统计建筑密度，自动推荐参数，不执行全管线'
     )
     parser.add_argument(
-        '--use-ndsm', action='store_true', default=False,
-        help='使用 nDSM (Copernicus DSM - SRTM) 估算建筑高度'
+        '--no-cache',
+        action='store_true',
+        default=False,
+        help='禁用管线缓存，强制重新计算所有阶段'
     )
     parser.add_argument(
-        '--narrow-threshold', type=float, default=6.0,
-        help='细长建筑 aspect ratio 阈值（默认 6.0）'
+        '--png',
+        action='store_true',
+        default=False,
+        help='输出彩色图层诊断预览 PNG'
     )
     parser.add_argument(
-        '--narrow-penalty', type=float, default=0.5,
-        help='细长建筑高度缩放系数（默认 0.5）'
+        '--review-png',
+        action='store_true',
+        default=False,
+        help='输出干净俯视 PNG 和建筑高度 PNG'
     )
-    parser.add_argument(
-        '--no-vegetation', action='store_true', default=False,
-        help='跳过植被层'
-    )
-    parser.add_argument(
-        '--no-block-base', action='store_true', default=False,
-        help='跳过 block_base 层'
-    )
-    parser.add_argument(
-        '--merge-layers', action='store_true', default=False,
-        help='合并 block_base + BO 为 2-layer 模式'
-    )
-    parser.add_argument(
-        '--auto-params', action='store_true', default=False,
-        help='启用自动参数系统（检测城市特征 → 自适应参数）'
-    )
-    parser.add_argument(
-        '--params-json', type=str, default=None, metavar='PATH',
-        help='JSON 参数覆盖文件（画廊风格参数，最高优先级；自动启用 --auto-params）'
-    )
-    parser.add_argument(
-        '--ai-review', action='store_true', default=False,
-        help='启用 AI 视觉评审（需要 ANTHROPIC_API_KEY + --png）'
-    )
-    parser.add_argument(
-        '--art-direction', action='store_true', default=False,
-        help='启用 AI 艺术指导（Layer 2，为新城市生成风格策略）'
-    )
-    parser.add_argument(
-        '--png', action='store_true', default=False,
-        help='同时渲染 PNG 预览图（pipeline 诊断图，带图例与统计）'
-    )
-    parser.add_argument(
-        '--review-png', action='store_true', default=False,
-        help='同时渲染画廊级俯视图（无文字、超采样，风格画廊同源）'
-    )
-    parser.add_argument(
-        '--draft', action='store_true', default=False,
-        help='Draft 模式：跳过 brick/boolean，快速导出 GLB 预览后退出'
-    )
-    parser.add_argument(
-        '--marker', action='append', default=None, metavar='LAT,LON',
-        help='在 draft GLB 中插红色大头针标注（可重复，如照片 GPS 点）'
-    )
-    parser.add_argument(
-        '--debug-obj', action='store_true', default=False,
-        help='逐个导出每个 mesh 为独立 OBJ 文件（用于 debug）'
-    )
-    parser.add_argument(
-        '--no-snap', action='store_true', default=False,
-        help='关闭取数框网格量化（回退精确 bbox 取数，不做跨请求缓存复用）'
-    )
-    parser.add_argument(
-        '--no-cache', action='store_true', default=False,
-        help='禁用 preprocess 阶段缓存（强制重算）'
-    )
-
-    args = parser.parse_args()
-
-    # 合并 preset + 显式参数
-    if args.preset:
-        p = PRESETS[args.preset]
-        if not args.bbox:
-            s, w, n, e = p["bbox"]
-            args.bbox = f"{s},{w},{n},{e}"
-        if not args.pbf:
-            args.pbf = p["pbf"]
-        if not args.city:
-            args.city = args.preset
-
-    # 验证必须参数
-    if not args.bbox or not args.pbf or not args.city:
-        parser.error("需要 --preset 或 (--bbox + --pbf + --city)")
-
-    # 解析 bbox 字符串为 tuple
-    try:
-        parts = [float(x.strip()) for x in args.bbox.split(',')]
-        if len(parts) != 4:
-            raise ValueError
-        args.bbox_tuple = tuple(parts)
-    except (ValueError, AttributeError):
-        parser.error("--bbox 格式: south,west,north,east (逗号分隔的4个浮点数)")
-
-    # 解析 --marker 为 [(lat, lon), ...]
-    args.marker_points = []
-    for m in (args.marker or []):
-        try:
-            lat_s, lon_s = m.split(',')
-            args.marker_points.append((float(lat_s), float(lon_s)))
-        except ValueError:
-            parser.error(f"--marker 格式: lat,lon（收到: {m}）")
-
-    return args
+    return parser
 
 
-# =====================================================================
-# 取数框量化（snap-to-grid）辅助：重叠区域跨请求复用缓存
-# =====================================================================
-
-def _grid_shape_for(south, west, north, east, resolution):
-    """与 fetch_elevation_grid 内部一致的 rows/cols 计算。"""
-    lat_range = north - south
-    lon_range = east - west
-    if lat_range >= lon_range:
-        return resolution, max(2, int(resolution * lon_range / lat_range))
-    return max(2, int(resolution * lat_range / lon_range)), resolution
-
-
-def _crop_grid_to_bbox(grid, snap_bbox, exact_bbox, target_shape):
-    """从量化框高程网格中双线性重采样出精确框子网格。
-
-    网格约定：row 0 = south，col 0 = west（与 fetch_elevation_grid 一致）。
-    """
-    from scipy.ndimage import map_coordinates
-    fs, fw, fn, fe = snap_bbox
-    south, west, north, east = exact_bbox
-    rows, cols = grid.shape
-    tr, tc = target_shape
-    r = np.linspace((south - fs) / (fn - fs) * (rows - 1),
-                    (north - fs) / (fn - fs) * (rows - 1), tr)
-    c = np.linspace((west - fw) / (fe - fw) * (cols - 1),
-                    (east - fw) / (fe - fw) * (cols - 1), tc)
-    rr, cc = np.meshgrid(r, c, indexing="ij")
-    out = map_coordinates(grid, [rr, cc], order=1, mode="nearest")
-    return out.astype(grid.dtype, copy=False)
-
-
-def _split_polygons(geom):
-    """展平 MultiPolygon/GeometryCollection 为 Polygon 列表（丢弃非面要素）。"""
-    if geom is None or geom.is_empty:
-        return []
-    if geom.geom_type == "Polygon":
-        return [geom]
-    if geom.geom_type in ("MultiPolygon", "GeometryCollection"):
-        return [g for g in geom.geoms
-                if g.geom_type == "Polygon" and not g.is_empty]
-    return []
-
-
-def _transform_layers_to_exact(layers, dx, dy, clip_box):
-    """把 snap 本地坐标系下的 LayerPolygons 平移 (dx, dy) 并裁剪到精确框。
-
-    缓存的 preprocess 结果是在量化框坐标系里算的；复用时平移到本次请求的
-    精确坐标系，再裁到精确 bbox，语义等价于原生按精确框计算。
-    """
-    from shapely.affinity import translate
-    from shapely.geometry import box as _box
-    try:
-        from shapely import make_valid
-    except ImportError:  # shapely < 2.0
-        from shapely.validation import make_valid
-    clip = _box(*clip_box)
-
-    def _proc_poly(p):
-        moved = translate(p, xoff=dx, yoff=dy)
-        try:
-            cut = moved.intersection(clip)
-        except Exception:
-            # 非法多边形（自交环/游离孔洞）会让 GEOS 抛 TopologyException；
-            # make_valid 修复后重试，仍失败则丢弃该要素（不阻断整体）。
-            try:
-                cut = make_valid(moved).intersection(clip)
-            except Exception:
-                return []
-        return _split_polygons(cut)
-
-    BL, BL_cat = [], []
-    cats = list(layers.BL_categories)
-    if len(cats) < len(layers.BL):  # 长度异常时补齐，避免 zip 静默丢弃
-        cats.extend([None] * (len(layers.BL) - len(cats)))
-    for (p, h), cat in zip(layers.BL, cats):
-        for q in _proc_poly(p):
-            BL.append((q, h))
-            BL_cat.append(cat)
-
-    def _proc_list(polys):
-        out = []
-        for p in polys:
-            out.extend(_proc_poly(p))
-        return out
-
-    bb, bb_cls = [], []
-    if layers.block_base_classes and len(layers.block_base_classes) == len(layers.block_base):
-        for p, cls in zip(layers.block_base, layers.block_base_classes):
-            for q in _proc_poly(p):
-                bb.append(q)
-                bb_cls.append(cls)
-    else:
-        bb = _proc_list(layers.block_base)
-        bb_cls = list(layers.block_base_classes)
-
-    roads = []
-    for line, tier, flag in layers.roads_lines:
-        moved = translate(line, xoff=dx, yoff=dy)
-        try:
-            seg = moved.intersection(clip)
-        except Exception:
-            try:
-                seg = make_valid(moved).intersection(clip)
-            except Exception:
-                continue
-        if seg.is_empty:
-            continue
-        if seg.geom_type == "LineString":
-            roads.append((seg, tier, flag))
-        elif seg.geom_type == "MultiLineString":
-            roads.extend((g, tier, flag) for g in seg.geoms if not g.is_empty)
-
-    layers.BL = BL
-    layers.BL_categories = BL_cat
-    layers.BO = _proc_list(layers.BO)
-    layers.VL = _proc_list(layers.VL)
-    layers.VO = _proc_list(layers.VO)
-    layers.WL = _proc_list(layers.WL)
-    layers.WO = _proc_list(layers.WO)
-    layers.block_base = bb
-    layers.block_base_classes = bb_cls
-    layers.roads_lines = roads
-    return layers
-
-
-def main():
-    cli_args = parse_args()
-
-    LAT1, LON1, LAT2, LON2 = cli_args.bbox_tuple
-    CITY_NAME = cli_args.city
-    OUTPUT_DIR = f"output/{CITY_NAME}"
-    ENABLE_VEGETATION = not cli_args.no_vegetation
-    ENABLE_BLOCK_BASE = not cli_args.no_block_base
-    MERGE_BLOCK_LAYERS = cli_args.merge_layers
+if __name__ == "__main__":
+    # ---------------------------------------------------------------------------
+    # CLI 参数
+    # ---------------------------------------------------------------------------
+    cli_args = build_parser().parse_args()
 
     # PBF 文件
-    PBF_FILE = cli_args.pbf
-    if not os.path.isabs(PBF_FILE):
-        PBF_FILE = os.path.join(_project_root, PBF_FILE)
+    PBF_FILE = os.path.join(_project_root, 'pbf_cache', 'zhejiang-latest.osm.pbf')
     if not os.path.exists(PBF_FILE):
         print(f"ERROR: PBF file not found: {PBF_FILE}")
         sys.exit(1)
 
+    # 西湖 25km 区域
+    LAT1, LON1 = 30.13, 120.01
+    LAT2, LON2 = 30.36, 120.29
+    CITY_NAME = "westlake_cli"
+    OUTPUT_DIR = "output/westlake_cli"
+
+    # Sub-mesh on/off (一次性调参开关，改完跑即可)
+    ENABLE_VEGETATION = False
+    ENABLE_BLOCK_BASE = True
+    # MERGE_BLOCK_LAYERS 和 _bldg_tag 由 Stage 0c 自动检测决定
+    # 低密度城市（<150K 建筑）→ 完整三层：block_base + BO + BL
+    # 高密度城市（≥150K 建筑）→ MERGE 两层：block_base + BL（跳过 BO）
+
     print("=" * 70)
-    print(f"  City: {CITY_NAME}")
-    print(f"  BBox: ({LAT1}, {LON1}) → ({LAT2}, {LON2})")
-    print(f"  PBF: {PBF_FILE}")
-    print(f"  Options: vegetation={'ON' if ENABLE_VEGETATION else 'OFF'}, "
-          f"block_base={'ON' if ENABLE_BLOCK_BASE else 'OFF'}, "
-          f"merge_layers={'ON' if MERGE_BLOCK_LAYERS else 'OFF'}")
+    print("  Pure Osmium CLI Pipeline: extract → tags-filter → export → 3MF")
     print("=" * 70)
 
     t_start = time.time()
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
+    # Process lock: prevent multiple concurrent instances
+    acquire_lock(OUTPUT_DIR, CITY_NAME)
+
+    # Pipeline cache (saves terrain/preprocess to disk for faster re-runs)
+    _pipeline_cache = PipelineCache(CITY_NAME, enabled=not cli_args.no_cache)
+    if cli_args.no_cache:
+        print("[CACHE] Disabled via --no-cache")
+
     # =====================================================================
     # Stage 0: 检查 CLI 工具可用性
     # =====================================================================
     print("\n[Stage 0] Checking CLI tools...")
     fetcher = get_cli_fetcher()
+
+    # =====================================================================
+    # Stage 0b: 采样模式 — 快速统计建筑密度，推荐参数后退出
+    # =====================================================================
+    if cli_args.sample_only:
+        print(f"\n[Stage 0b] SAMPLE MODE — 快速采样建筑密度...")
+        import subprocess, json, shutil
+        t_s = time.time()
+        osmium = fetcher._get_tool_path('osmium')
+        if not osmium:
+            print("  ERROR: osmium not found")
+            sys.exit(1)
+        _tmp_dir = os.path.join(_project_root, 'tmp', f'_sample_{CITY_NAME}')
+        os.makedirs(_tmp_dir, exist_ok=True)
+        _pbf_extract = os.path.join(_tmp_dir, 'extract.osm.pbf')
+        _pbf_buildings = os.path.join(_tmp_dir, 'buildings.osm.pbf')
+        _flags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+        n_buildings = -1
+        try:
+            # Step 1: osmium extract (bbox裁剪)
+            subprocess.run([
+                osmium, 'extract',
+                '-b', f'{LON1},{LAT1},{LON2},{LAT2}', '-s', 'smart',
+                PBF_FILE, '-o', _pbf_extract, '--overwrite'
+            ], capture_output=True, timeout=120, check=True, creationflags=_flags)
+            # Step 2: osmium tags-filter (只保留building)
+            subprocess.run([
+                osmium, 'tags-filter',
+                _pbf_extract, 'nwr/building',
+                '-o', _pbf_buildings, '--overwrite'
+            ], capture_output=True, timeout=60, check=True, creationflags=_flags)
+            # Step 3: osmium fileinfo -e 获取元素统计
+            info = subprocess.run([
+                osmium, 'fileinfo', '-e', '-f', 'json', _pbf_buildings
+            ], capture_output=True, text=True, timeout=30, creationflags=_flags)
+            data = json.loads(info.stdout)
+            # fileinfo json 里有 metadata count
+            for item in data.get('data', {}).get('count', []):
+                if item.get('type') == 'node':
+                    pass  # nodes 不是建筑
+            # 更可靠: 用 osmium export 输出 geojsonseq 然后 count
+            # 但更快: 直接读取 PBF 的 way count
+            # 简化方案: 文件大小估算
+            fsize = os.path.getsize(_pbf_buildings)
+            # 粗略估算: 每个建筑约 200-500 bytes in PBF
+            n_buildings_est = max(0, fsize // 300)
+            print(f"  建筑 PBF 大小: {fsize / 1024:.1f} KB")
+            print(f"  估算建筑数: ~{n_buildings_est:,} (基于文件大小)")
+            # 更精确: 用 fileinfo
+            if info.returncode == 0:
+                # 解析 extended metadata
+                meta = data.get('data', {})
+                if 'metadata' in meta:
+                    for m in meta['metadata']:
+                        if 'count' in m:
+                            print(f"  fileinfo: {m}")
+        except Exception as e:
+            print(f"  采样失败: {e}")
+            n_buildings_est = -1
+        finally:
+            shutil.rmtree(_tmp_dir, ignore_errors=True)
+
+        area_km2_est = (LAT2 - LAT1) * 111 * (LON2 - LON1) * 111 * \
+                       np.cos(np.radians((LAT1 + LAT2) / 2))
+        density = n_buildings_est / area_km2_est if area_km2_est > 0 and n_buildings_est > 0 else 0
+
+        print(f"\n  估计面积: {area_km2_est:.1f} km²")
+        print(f"  建筑密度: ~{density:.0f} /km²")
+        print()
+        if n_buildings_est > 500000:
+            print(f"  ⚠️  超高密度城市！建议:")
+            print(f"     - MERGE_BLOCK_LAYERS = True (必须)")
+            print(f"     - building_landmarks 过滤器 (已自动启用)")
+            print(f"     - 缩小 bbox 到核心区: 经纬度跨度 ≤ 0.1°")
+        elif n_buildings_est > 100000:
+            print(f"  ℹ️  高密度城市，MERGE 模式 + building_landmarks 过滤器已启用")
+        else:
+            print(f"  ✅ 建筑密度正常，可安全运行全管线")
+        print(f"  采样耗时: {time.time() - t_s:.1f}s")
+        sys.exit(0)
     print(f"  osmium available: {fetcher.osmium_available}")
 
     if not fetcher.osmium_available:
@@ -363,7 +233,22 @@ def main():
         print("  Install: conda install -c conda-forge osmium-tool")
         sys.exit(1)
     else:
+        USE_CLI = True
         print("  Using pure osmium CLI pipeline (extract → tags-filter → export)")
+
+    # =====================================================================
+    # Stage 0c: 自动检测建筑密度 — 决定过滤器和管线模式
+    # =====================================================================
+    print(f"\n[Stage 0c] Auto-detecting building density...")
+    t0c = time.time()
+    _density_info = sample_building_density(PBF_FILE, LAT1, LON1, LAT2, LON2)
+    _bldg_tag = 'building_landmarks' if _density_info['should_filter'] else 'building'
+    MERGE_BLOCK_LAYERS = _density_info['should_filter']  # 高密度才用 MERGE 模式
+    if MERGE_BLOCK_LAYERS:
+        print(f"  高密度城市: building_landmarks + MERGE 两层模式")
+    else:
+        print(f"  低密度城市: 全量 building + 完整三层模式 (block_base + BO + BL)")
+    print(f"  Time: {time.time() - t0c:.1f}s")
 
     # =====================================================================
     # Stage 1: Bounding box
@@ -388,26 +273,9 @@ def main():
     bbox_x_max = utm_bbox[2] - origin[0]
     bbox_y_max = utm_bbox[3] - origin[1]
 
-    # 取数框量化（snap-to-grid）：取数用量化框（跨请求缓存复用），
-    # 输出度量与最终裁剪仍用用户精确框。--no-snap 回退旧行为。
-    snap_active = not cli_args.no_snap
-    if snap_active:
-        fs, fw, fn, fe = _snap_bbox(south, west, north, east)
-        snap_info = bbox_to_utm(fs, fw, fn, fe)
-        # 量化框跨 UTM 分区时平移近似失效，回退精确取数
-        if snap_info["utm_crs"].to_string() != utm_crs.to_string():
-            print(f"  Snap disabled: fetch bbox crosses UTM zone")
-            snap_active = False
-    if not snap_active:
-        fs, fw, fn, fe = south, west, north, east
-        snap_info = bbox
-
     print(f"  Area: {width_m:.0f}m × {height_m:.0f}m = {area_km2:.1f} km² ({area_class})")
     print(f"  Scale: {scale:.6f} mm/m")
     print(f"  Resolution: {resolution}x{resolution}")
-    if snap_active:
-        print(f"  Fetch bbox (snapped): ({fs:.4f}, {fw:.4f}) → ({fn:.4f}, {fe:.4f}) "
-              f"[snap={_snap_bbox.__defaults__[0]:.2f}°]")
     print(f"  Time: {time.time() - t1:.1f}s")
 
     # =====================================================================
@@ -419,28 +287,10 @@ def main():
     t1b = time.time()
 
     try:
-        # 按量化框取数（缓存 key 稳定，重叠请求命中）；分辨率按跨度比例
-        # 放大以保持采样密度，取回后重采样裁剪到精确框。
-        exact_span = max(north - south, east - west)
-        snap_span = max(fn - fs, fe - fw)
-        res_fetch = resolution if not snap_active else int(
-            (resolution - 1) * snap_span / exact_span) + 1
-        if snap_active and not cli_args.elevation_file:
-            # 瓦片级高程缓存（Phase 2）：跨网格线偏移也能部分复用
-            elevation_grid_snap = fetch_elevation_grid_tiled(
-                fs, fw, fn, fe, res_fetch)
-        else:
-            elevation_grid_snap = fetch_elevation_grid(
-                fs, fw, fn, fe, res_fetch,
-                elevation_file=cli_args.elevation_file,
-            )
-        if snap_active:
-            target_shape = _grid_shape_for(south, west, north, east, resolution)
-            elevation_grid = _crop_grid_to_bbox(
-                elevation_grid_snap, (fs, fw, fn, fe),
-                (south, west, north, east), target_shape)
-        else:
-            elevation_grid = elevation_grid_snap
+        elevation_grid = fetch_elevation_grid(
+            south, west, north, east, resolution,
+            elevation_file=cli_args.elevation_file,
+        )
         print(f"  Grid shape: {elevation_grid.shape}")
         print(f"  Elevation range: {elevation_grid.min():.1f}m to {elevation_grid.max():.1f}m")
         print(f"  Time: {time.time() - t1b:.1f}s")
@@ -448,7 +298,6 @@ def main():
         print(f"  WARNING: Elevation fetch failed: {e}")
         print(f"  Using flat terrain (0m elevation)")
         elevation_grid = np.zeros((resolution, resolution), dtype=np.float64)
-        elevation_grid_snap = elevation_grid
         print(f"  Time: {time.time() - t1b:.1f}s")
 
     # =====================================================================
@@ -464,6 +313,7 @@ def main():
             print(f"  nDSM range: {ndsm_grid.min():.1f}m to {ndsm_grid.max():.1f}m")
             print(f"  Non-zero pixels: {(ndsm_grid > 0).sum()}/{ndsm_grid.size} "
                   f"({(ndsm_grid > 0).sum()/ndsm_grid.size*100:.1f}%)")
+            # Set module-level cache so building fetchers can use it
             from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.osm import set_ndsm_grid
             set_ndsm_grid(ndsm_grid, south, west, north, east)
             print(f"  Time: {time.time() - t1c:.1f}s")
@@ -478,48 +328,112 @@ def main():
     print(f"\n[Stage 2] Fetching water data...")
     t2 = time.time()
 
-    water_gdf = (fetch_tiled_from_cli if snap_active else fetch_from_cli)(
-        tag_type='water',
-        south=fs, west=fw, north=fn, east=fe,
-        pbf_file=PBF_FILE
-    )
+    if USE_CLI:
+        # === 纯 osmium CLI 方式 ===
+        print("  Method: osmium extract → tags-filter → export")
+        water_gdf = fetch_from_cli(
+            tag_type='water',
+            south=south, west=west, north=north, east=east,
+            pbf_file=PBF_FILE
+        )
+        METHOD = "CLI"
+    else:
+        print("  ERROR: CLI tools not available!")
+        print("  This script requires osmium CLI to be installed.")
+        print("  Install: conda install -c conda-forge osmium-tool")
+        sys.exit(1)
 
     water_fetch_time = time.time() - t2
 
     if water_gdf is None or len(water_gdf) == 0:
-        print("  WARNING: No water features found, continuing without water")
-        water_gdf = None
-    else:
-        print(f"  Features: {len(water_gdf)}")
-        print(f"  Geometry types: {water_gdf.geometry.type.value_counts().to_dict()}")
+        print("  ERROR: No water features found!")
+        sys.exit(1)
 
-    print(f"  Time: {water_fetch_time:.1f}s")
+    print(f"  Features: {len(water_gdf)}")
+    print(f"  Geometry types: {water_gdf.geometry.type.value_counts().to_dict()}")
+    print(f"  Time: {water_fetch_time:.1f}s ({METHOD})")
 
     # 投影到 UTM
-    if water_gdf is not None and len(water_gdf) > 0:
-        water_gdf = project_geodataframe(water_gdf, utm_crs, origin, clip_bbox=utm_bbox)
+    water_gdf = project_geodataframe(water_gdf, utm_crs, origin, clip_bbox=utm_bbox)
 
     # 计算面积并筛选
+    def estimate_water_area(geom, row):
+        if geom.geom_type in ['Polygon', 'MultiPolygon']:
+            return geom.area
+        elif geom.geom_type in ['LineString', 'MultiLineString']:
+            waterway_type = row.get('waterway', 'river')
+            width = WATERWAY_WIDTHS.get(waterway_type, 60)
+            return geom.length * width
+        return 0
+
+    water_gdf['est_area'] = water_gdf.apply(lambda r: estimate_water_area(r.geometry, r), axis=1)
+
+    MAX_WATER = 500
+    if len(water_gdf) > MAX_WATER:
+        water_gdf = water_gdf.nlargest(MAX_WATER, 'est_area')
+        print(f"  Filtered to top {MAX_WATER} features")
+
+    # 显示命名水体
+    if 'name' in water_gdf.columns:
+        named = water_gdf['name'].dropna().unique()
+        print(f"  Named features ({len(named)}): {list(named[:10])}")
+
+    # =====================================================================
+    # Stage 2b: 水体补全 — 高德卫星 + 自适应 buffer（提前到地形切割之前）
+    # =====================================================================
+    print(f"\n[Stage 2b] Water supplement (Gaode + adaptive buffer)...")
+    t2b = time.time()
+
     if water_gdf is not None and len(water_gdf) > 0:
-        def estimate_water_area(geom, row):
-            if geom.geom_type in ['Polygon', 'MultiPolygon']:
-                return geom.area
-            elif geom.geom_type in ['LineString', 'MultiLineString']:
-                waterway_type = row.get('waterway', 'river')
-                width = WATERWAY_WIDTHS.get(waterway_type, 60)
-                return geom.length * width
-            return 0
+        from shapely.geometry import LineString as _LS, MultiLineString as _MLS
+        from shapely.geometry import Polygon as _Poly, MultiPolygon as _MPoly
 
-        water_gdf['est_area'] = water_gdf.apply(lambda r: estimate_water_area(r.geometry, r), axis=1)
+        # Extract existing polygons and linestrings from water_gdf (UTM)
+        _wl_polys = []
+        _wl_lines = []
+        for _, _row in water_gdf.iterrows():
+            _g = _row.geometry
+            if _g is None or _g.is_empty:
+                continue
+            if isinstance(_g, (_Poly, _MPoly)):
+                _polys = _g.geoms if isinstance(_g, _MPoly) else [_g]
+                _wl_polys.extend(p for p in _polys if not p.is_empty)
+            elif isinstance(_g, (_LS, _MLS)):
+                _ww = _row.get('waterway', 'river')
+                _lines = _g.geoms if isinstance(_g, _MLS) else [_g]
+                _wl_lines.extend((l, _ww) for l in _lines if not l.is_empty)
 
-        MAX_WATER = 500
-        if len(water_gdf) > MAX_WATER:
-            water_gdf = water_gdf.nlargest(MAX_WATER, 'est_area')
-            print(f"  Filtered to top {MAX_WATER} features")
-
-        if 'name' in water_gdf.columns:
-            named = water_gdf['name'].dropna().unique()
-            print(f"  Named features ({len(named)}): {list(named[:10])}")
+        if _wl_lines:
+            try:
+                from _TEXTURE_STYLE_OF_DEEPSEEK._water_supplement import supplement_wl_coverage
+                _enhanced = supplement_wl_coverage(
+                    _wl_polys, _wl_lines, (south, west, north, east),
+                    utm_crs=utm_crs, origin=origin,
+                )
+                _n_new = len(_enhanced) - len(_wl_polys)
+                if _n_new > 0:
+                    print(f"  Supplemented: {_n_new} new polygons from Gaode")
+                    # Replace water_gdf LineStrings with supplemented polygons
+                    import geopandas as gpd
+                    _new_rows = []
+                    for _p in _enhanced:
+                        if not _p.is_empty and _p.area > 0:
+                            _new_rows.append({'geometry': _p, 'waterway': 'river', 'name': 'supplemented'})
+                    if _new_rows:
+                        _suppl_gdf = gpd.GeoDataFrame(_new_rows, crs=water_gdf.crs)
+                        # Keep only Polygon rows from original + new supplemented
+                        _poly_mask = water_gdf.geometry.type.isin(['Polygon', 'MultiPolygon'])
+                        water_gdf = gpd.GeoDataFrame(
+                            pd.concat([water_gdf[_poly_mask], _suppl_gdf], ignore_index=True),
+                            crs=water_gdf.crs)
+                        print(f"  water_gdf updated: {len(water_gdf)} features (polygons only)")
+                else:
+                    print(f"  No new polygons from Gaode supplement")
+            except Exception as _e:
+                print(f"  Water supplement failed (non-fatal): {_e}")
+        else:
+            print(f"  No LineString rivers to supplement")
+    print(f"  Time: {time.time() - t2b:.1f}s")
 
     # =====================================================================
     # Stage 3: Fetch vegetation data (CLI only)
@@ -527,9 +441,9 @@ def main():
     print(f"\n[Stage 3] Fetching vegetation data...")
     t3 = time.time()
 
-    vegetation_gdf = (fetch_tiled_from_cli if snap_active else fetch_from_cli)(
+    vegetation_gdf = fetch_from_cli(
         tag_type='vegetation',
-        south=fs, west=fw, north=fn, east=fe,
+        south=south, west=west, north=north, east=east,
         pbf_file=PBF_FILE
     )
 
@@ -540,8 +454,10 @@ def main():
         print(f"  Geometry types: {vegetation_gdf.geometry.type.value_counts().to_dict()}")
         print(f"  Time: {veg_fetch_time:.1f}s")
 
+        # 投影到 UTM
         vegetation_gdf = project_geodataframe(vegetation_gdf, utm_crs, origin, clip_bbox=utm_bbox)
 
+        # 显示命名植被
         if 'name' in vegetation_gdf.columns:
             named_veg = vegetation_gdf['name'].dropna().unique()
             print(f"  Named features ({len(named_veg)}): {list(named_veg[:10])}")
@@ -555,9 +471,13 @@ def main():
     print(f"\n[Stage 3b] Fetching buildings data...")
     t3b = time.time()
 
-    buildings_gdf = (fetch_tiled_from_cli if snap_active else fetch_from_cli)(
-        tag_type='building',
-        south=fs, west=fw, north=fn, east=fe,
+    # MERGE 模式下高密度城市只需提取地标建筑（building_landmarks 过滤器），
+    # 避免加载全量建筑数据（巴黎 1.9M → ~几百个），节省 20+ 分钟
+    # 低密度城市（杭州等）自动使用全量 building，由 Stage 0c 决定
+    # _bldg_tag 已在 Stage 0c 自动设置
+    buildings_gdf = fetch_from_cli(
+        tag_type=_bldg_tag,
+        south=south, west=west, north=north, east=east,
         pbf_file=PBF_FILE
     )
 
@@ -566,8 +486,10 @@ def main():
         print(f"  Geometry types: {buildings_gdf.geometry.type.value_counts().to_dict()}")
         print(f"  Time: {time.time() - t3b:.1f}s")
 
+        # 投影到 UTM
         buildings_gdf = project_geodataframe(buildings_gdf, utm_crs, origin, clip_bbox=utm_bbox)
 
+        # 显示命名建筑
         if 'name' in buildings_gdf.columns:
             named_bld = buildings_gdf['name'].dropna().unique()
             print(f"  Named features ({len(named_bld)}): {list(named_bld[:10])}")
@@ -581,9 +503,9 @@ def main():
     print(f"\n[Stage 3c] Fetching roads data...")
     t3c = time.time()
 
-    roads_gdf = (fetch_tiled_from_cli if snap_active else fetch_from_cli)(
+    roads_gdf = fetch_from_cli(
         tag_type='road',
-        south=fs, west=fw, north=fn, east=fe,
+        south=south, west=west, north=north, east=east,
         pbf_file=PBF_FILE
     )
 
@@ -592,6 +514,7 @@ def main():
         print(f"  Geometry types: {roads_gdf.geometry.type.value_counts().to_dict()}")
         print(f"  Time: {time.time() - t3c:.1f}s")
 
+        # 投影到 UTM
         roads_gdf = project_geodataframe(roads_gdf, utm_crs, origin, clip_bbox=utm_bbox)
     else:
         print("  No road features found")
@@ -603,9 +526,9 @@ def main():
     print(f"\n[Stage 3d] Fetching landuse data...")
     t3d = time.time()
 
-    landuse_gdf = (fetch_tiled_from_cli if snap_active else fetch_from_cli)(
+    landuse_gdf = fetch_from_cli(
         tag_type='landuse',
-        south=fs, west=fw, north=fn, east=fe,
+        south=south, west=west, north=north, east=east,
         pbf_file=PBF_FILE
     )
 
@@ -618,137 +541,50 @@ def main():
         landuse_gdf = None
 
     # =====================================================================
-    # Stage 3e: Auto-parameter detection (optional)
-    # =====================================================================
-    auto_resolved = None  # will be set if --auto-params
-    style_overrides = {}  # from --params-json (画廊风格参数)
-    if cli_args.params_json:
-        with open(cli_args.params_json, 'r', encoding='utf-8') as f:
-            style_overrides = json.load(f)
-        if not cli_args.auto_params:
-            print("  [Stage 3e] --params-json 需基于规则引擎，自动启用 --auto-params")
-            cli_args.auto_params = True
-    if cli_args.auto_params:
-        print(f"\n[Stage 3e] Auto-parameter detection...")
-        t3e = time.time()
-
-        from _TEXTURE_STYLE_OF_DEEPSEEK.auto_params import (
-            detect_city_profile, resolve_params, save_decision_report,
-        )
-        from _TEXTURE_STYLE_OF_DEEPSEEK.auto_params.ai_art_direction import ai_art_direction
-        from _TEXTURE_STYLE_OF_DEEPSEEK.auto_params.preference_store import PreferenceStore
-        from _TEXTURE_STYLE_OF_DEEPSEEK import config as _cfg
-
-        # snap 模式下 profile 用量化框数据：同一网格内不同请求得到完全
-        # 一致的 auto 参数，保证 preprocess 缓存指纹稳定。
-        profile_area_km2 = snap_info["area_km2"] if snap_active else area_km2
-        profile_local_area_m2 = (snap_info["width_m"] * snap_info["height_m"]
-                                 if snap_active else width_m * height_m)
-        profile = detect_city_profile(
-            bbox_area_km2=profile_area_km2,
-            elevation_grid=elevation_grid_snap,
-            buildings_gdf=buildings_gdf,
-            roads_gdf=roads_gdf,
-            water_gdf=water_gdf,
-            vegetation_gdf=vegetation_gdf,
-            bbox_local_area_m2=profile_local_area_m2,
-        )
-
-        # Layer 2: AI art direction (optional, --art-direction flag)
-        ai_overrides = {}
-        if cli_args.art_direction:
-            # Pass reference PNGs from output dir if they exist
-            _ref_pngs = []
-            _ref_dir = os.path.join(OUTPUT_DIR, "..", "reference")
-            if os.path.isdir(_ref_dir):
-                _ref_pngs = [os.path.join(_ref_dir, f)
-                             for f in os.listdir(_ref_dir) if f.endswith(".png")]
-            art = ai_art_direction(profile, CITY_NAME,
-                                   reference_pngs=_ref_pngs or None)
-            if art and art.get("param_overrides"):
-                ai_overrides = art["param_overrides"]
-                print(f"  AI art direction: emphasis={art.get('emphasis', [])}, "
-                      f"style=\"{art.get('style_notes', '')}\"")
-                print(f"  AI param_overrides: {ai_overrides}")
-
-        # Layer 3: Preference bias (if enough history)
-        pref_store = PreferenceStore(
-            log_path=os.path.join(OUTPUT_DIR, "..", "preference_log.jsonl"))
-        pref_bias = pref_store.extract_bias(min_records=10)
-        if pref_bias:
-            print(f"  Preference bias ({pref_store.count} records): {pref_bias}")
-
-        # Merge overrides: user CLI > AI art > preference bias
-        merged_overrides = {}
-        merged_overrides.update(pref_bias)     # lowest priority
-        merged_overrides.update(ai_overrides)  # AI art direction
-        # Layer 4: 显式风格参数（--params-json，最高优先级；
-        #   bo_mode/aggregate_simplify_m 非 ResolvedParams 字段，
-        #   由 Stage 4.5 的 preprocess override 显式传参生效）
-        if style_overrides:
-            print(f"  Style overrides (--params-json): {style_overrides}")
-            merged_overrides.update(style_overrides)
-
-        auto_resolved = resolve_params(profile, user_overrides=merged_overrides or None)
-        save_decision_report(profile, auto_resolved, OUTPUT_DIR, CITY_NAME)
-
-        # Apply resolved params to config (runtime monkey-patch for downstream modules)
-        _cfg.Z_GAMMA = auto_resolved.z_gamma
-        _cfg.TERRAIN_THICKNESS_MM = auto_resolved.terrain_thickness_mm
-        _cfg.ELEVATION_SMOOTHING_SIGMA = auto_resolved.elevation_smoothing_sigma
-        # Also patch terrain3d.config (elevation.py reads from there)
-        from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d import config as _t3d_cfg
-        _t3d_cfg.ELEVATION_SMOOTHING_SIGMA = auto_resolved.elevation_smoothing_sigma
-        _cfg.BUILDING_V2_DENSITY_THRESHOLD = auto_resolved.building_density_threshold
-        _cfg.BUILDING_V2_COUNT_THRESHOLD = auto_resolved.building_count_threshold
-        _cfg.BUILDING_PRINT_LIMIT_M2 = auto_resolved.building_print_limit_m2
-        _cfg.BUILDING_V2_ROAD_TIER = auto_resolved.building_v2_road_tier
-        _cfg.BUILDING_V2_HOTSPOT_RELAX = auto_resolved.building_v2_hotspot_relax
-        _cfg.ROAD_WIDTH_MULTIPLIER = auto_resolved.road_width_multiplier
-        _cfg.VEGETATION_MIN_AREA_M2 = auto_resolved.vegetation_min_area_m2
-        _cfg.BUILDING_SIMPLIFY_TOL_M = auto_resolved.building_simplify_tol_m
-        _cfg.BUILDING_V2_LANDMARK_TOP_PERCENT = auto_resolved.building_v2_landmark_top_percent
-        _cfg.WATER_MIN_AREA_M2 = auto_resolved.water_min_area_m2
-        _cfg.BRICK_PERLIN_AMP = auto_resolved.brick_perlin_amp
-        _cfg.BRICK_CORNER_R_M = auto_resolved.brick_corner_r_m
-        # 建筑高度动态范围（_compress_height 函数级 import，补丁生效）
-        _cfg.BUILDING_HEIGHT_MAX_MM = auto_resolved.building_height_mm_max
-        _cfg.BUILDING_HEIGHT_MIN_MM = auto_resolved.building_height_mm_min
-        if auto_resolved.road_filter_tier is not None:
-            _cfg.ROAD_FILTER["large"] = auto_resolved.road_filter_tier
-
-        print(f"  Style: {auto_resolved.style}")
-        print(f"  Profile: relief={profile.relief_ratio}, water={profile.water_ratio:.2f}, "
-              f"density={profile.building_density:.0f}/km²")
-        print(f"  Key params: Z_GAMMA={auto_resolved.z_gamma}, "
-              f"flat_mode={auto_resolved.flat_mode}, "
-              f"road_tier={auto_resolved.building_v2_road_tier}, "
-              f"brick_amp={auto_resolved.brick_perlin_amp}")
-        print(f"  Time: {time.time() - t3e:.1f}s")
-
-    # =====================================================================
     # Stage 4: Build terrain mesh (obj_4: terrain + water hollow)
     # =====================================================================
     print(f"\n[Stage 4] Building terrain mesh (obj_4: terrain + water hollow)...")
     t4 = time.time()
 
-    if cli_args.draft:
-        # Draft 模式：跳过正式地形（GLB 用降采样 heightfield 自建）
-        print(f"  DRAFT mode: skipping full terrain build (GLB heightfield instead)")
-        terrain_solid = None
-    elif water_gdf is not None and len(water_gdf) > 0:
-        # Skip Manifold boolean water hollowing — it destroys terrain surface
-        # detail (527K→141K faces, radial artifacts, lake disappearance).
-        # Water is represented as a separate mesh layer instead.
-        print(f"  Skipping Manifold water hollow (preserves terrain detail)")
-        terrain_solid = build_deepseek_terrain(
-            elevation_grid, width_m, height_m, area_km2, scale, water_gdf
-        )
-    else:
-        terrain_solid = build_deepseek_terrain(
-            elevation_grid, width_m, height_m, area_km2, scale, water_gdf
-        )
-        print(f"  Terrain (no water data) faces: {len(terrain_solid.faces):,}")
+    # Cache key: based on elevation grid hash + scale + data feature counts
+    _elev_hash = hashlib.md5(elevation_grid.tobytes()).hexdigest()[:12] if elevation_grid is not None else 'none'
+    _n_water = len(water_gdf) if water_gdf is not None else 0
+    _n_roads = len(roads_gdf) if roads_gdf is not None else 0
+    _terrain_cache_key = {
+        'elev_hash': _elev_hash, 'scale': round(scale, 8),
+        'area_km2': round(area_km2, 2), 'width_m': round(width_m, 1),
+        'height_m': round(height_m, 1), 'n_water': _n_water, 'n_roads': _n_roads,
+    }
+
+    def _compute_terrain():
+        if water_gdf is not None and len(water_gdf) > 0:
+            try:
+                has_roads = roads_gdf is not None and len(roads_gdf) > 0
+                terrain_result = build_terrain_with_water_holes_manifold(
+                    elevation_grid, width_m, height_m, area_km2, scale,
+                    water_gdf,
+                    roads_gdf=roads_gdf if has_roads else None,
+                    enable_roads_fusion=has_roads,
+                    bridges_only=True,
+                )
+                _mesh = terrain_result["mesh"]
+                print(f"  Terrain (with water holes) faces: {len(_mesh.faces):,}")
+                print(f"  Watertight: {_mesh.is_watertight}")
+            except Exception as e:
+                print(f"  WARNING: Terrain with water holes failed: {e}")
+                print(f"  Falling back to basic terrain...")
+                _mesh = build_deepseek_terrain(
+                    elevation_grid, width_m, height_m, area_km2, scale, water_gdf
+                )
+        else:
+            _mesh = build_deepseek_terrain(
+                elevation_grid, width_m, height_m, area_km2, scale, water_gdf
+            )
+            print(f"  Terrain (no water data) faces: {len(_mesh.faces):,}")
+        return _mesh
+
+    terrain_solid = _pipeline_cache.get_or_compute(
+        'terrain_v1', _terrain_cache_key, _compute_terrain, label='terrain mesh')
 
     print(f"  Time: {time.time() - t4:.1f}s")
 
@@ -760,107 +596,21 @@ def main():
 
     bbox_local = (bbox_x_min, bbox_y_min, bbox_x_max, bbox_y_max)
 
-    # Build override kwargs from auto_resolved (if available)
-    _preprocess_overrides = {}
-    if auto_resolved is not None:
-        _preprocess_overrides["road_tier_override"] = auto_resolved.building_v2_road_tier
-        _preprocess_overrides["density_threshold_override"] = auto_resolved.building_density_threshold
-        _preprocess_overrides["count_threshold_override"] = auto_resolved.building_count_threshold
-        _preprocess_overrides["print_limit_m2_override"] = auto_resolved.building_print_limit_m2
-        if auto_resolved.flat_mode:
-            _preprocess_overrides["height_mode_override"] = "flat"
-    # 风格参数中的 config 级参数（模块顶层 import 吃不到补丁，必须显式传参）
-    if "bo_mode" in style_overrides:
-        _preprocess_overrides["bo_mode_override"] = str(style_overrides["bo_mode"])
-    if "aggregate_simplify_m" in style_overrides:
-        _preprocess_overrides["aggregate_simplify_m_override"] = float(
-            style_overrides["aggregate_simplify_m"])
+    # Cache key: based on input data sizes + key parameters
+    _n_bldg = len(buildings_gdf) if buildings_gdf is not None else 0
+    _n_veg = len(vegetation_gdf) if vegetation_gdf is not None else 0
+    _n_landuse = len(landuse_gdf) if landuse_gdf is not None else 0
+    _preprocess_cache_key = {
+        'n_bldg': _n_bldg, 'n_roads': _n_roads, 'n_water': _n_water,
+        'n_veg': _n_veg, 'n_landuse': _n_landuse,
+        'scale': round(scale, 8), 'area_km2': round(area_km2, 2),
+        'merge_mode': MERGE_BLOCK_LAYERS,
+        'narrow_threshold': cli_args.narrow_threshold,
+        'narrow_penalty': cli_args.narrow_penalty,
+    }
 
-    layers = None
-    if snap_active:
-        # ---- snap 模式：preprocess 在量化框坐标系计算，跨请求缓存复用 ----
-        # 命中后平移回本次精确坐标系并裁到精确 bbox。
-        from shapely.affinity import translate as _sh_translate
-        _snap_origin = snap_info["origin"]
-        _sxoff = origin[0] - _snap_origin[0]  # exact-local → snap-local
-        _syoff = origin[1] - _snap_origin[1]
-
-        def _gdf_to_snap(g):
-            if g is None or len(g) == 0:
-                return g
-            g2 = g.copy()
-            g2["geometry"] = g2["geometry"].apply(
-                lambda geom: _sh_translate(geom, xoff=_sxoff, yoff=_syoff))
-            return g2
-
-        _snap_utm_bbox = snap_info["utm_bbox"]
-        _snap_bbox_local = (_snap_utm_bbox[0] - _snap_origin[0],
-                            _snap_utm_bbox[1] - _snap_origin[1],
-                            _snap_utm_bbox[2] - _snap_origin[0],
-                            _snap_utm_bbox[3] - _snap_origin[1])
-        _scale_snap = compute_scale(snap_info["width_m"], snap_info["height_m"])
-        _hotspot_relax = (auto_resolved.building_v2_hotspot_relax
-                          if auto_resolved is not None
-                          else BUILDING_V2_HOTSPOT_RELAX)
-
-        _auto_fp = "none" if auto_resolved is None else json.dumps({
-            "road_tier": auto_resolved.building_v2_road_tier,
-            "density": auto_resolved.building_density_threshold,
-            "count": auto_resolved.building_count_threshold,
-            "print_limit": auto_resolved.building_print_limit_m2,
-            "flat": auto_resolved.flat_mode,
-            "hotspot_relax": auto_resolved.building_v2_hotspot_relax,
-        }, sort_keys=True)
-        _style_fp = json.dumps({
-            "bo_mode": style_overrides.get("bo_mode"),
-            "aggregate_simplify_m": style_overrides.get("aggregate_simplify_m"),
-        }, sort_keys=True)
-
-        _snap_cache = PipelineCache(
-            f"snap_{fs:.4f}_{fw:.4f}_{fn:.4f}_{fe:.4f}",
-            enabled=not cli_args.no_cache)
-
-        def _compute_layers_snap():
-            return preprocess_layers(
-                buildings_gdf=_gdf_to_snap(buildings_gdf),
-                roads_gdf=_gdf_to_snap(roads_gdf),
-                water_gdf=_gdf_to_snap(water_gdf),
-                vegetation_gdf=_gdf_to_snap(vegetation_gdf),
-                bbox_local=_snap_bbox_local,
-                scale=_scale_snap,
-                enable_hotspot=True,
-                hotspot_relax=_hotspot_relax,
-                area_km2=snap_info["area_km2"],
-                landuse_gdf=_gdf_to_snap(landuse_gdf),
-                narrow_threshold=cli_args.narrow_threshold,
-                narrow_penalty=cli_args.narrow_penalty,
-                bbox_wgs84=(fs, fw, fn, fe),
-                utm_crs=utm_crs,
-                origin=_snap_origin,
-                **_preprocess_overrides,
-            )
-
-        layers = _snap_cache.get_or_compute(
-            "preprocess_v1",
-            input_keys={
-                "snap_bbox": f"{fs:.4f},{fw:.4f},{fn:.4f},{fe:.4f}",
-                "auto": _auto_fp,
-                "style": _style_fp,
-                "narrow": f"{cli_args.narrow_threshold}/{cli_args.narrow_penalty}",
-                "veg": ENABLE_VEGETATION,
-                "block_base": ENABLE_BLOCK_BASE,
-                "merge": MERGE_BLOCK_LAYERS,
-            },
-            compute_fn=_compute_layers_snap,
-            label="preprocess(snap)",
-        )
-
-        # snap 坐标系 → 精确坐标系，并裁剪到用户精确 bbox
-        _dx = _snap_origin[0] - origin[0]
-        _dy = _snap_origin[1] - origin[1]
-        layers = _transform_layers_to_exact(layers, _dx, _dy, bbox_local)
-    else:
-        layers = preprocess_layers(
+    def _compute_preprocess():
+        return preprocess_layers(
             buildings_gdf=buildings_gdf,
             roads_gdf=roads_gdf,
             water_gdf=water_gdf,
@@ -868,9 +618,7 @@ def main():
             bbox_local=bbox_local,
             scale=scale,
             enable_hotspot=True,
-            hotspot_relax=(auto_resolved.building_v2_hotspot_relax
-                           if auto_resolved is not None
-                           else BUILDING_V2_HOTSPOT_RELAX),
+            hotspot_relax=BUILDING_V2_HOTSPOT_RELAX,
             area_km2=area_km2,
             landuse_gdf=landuse_gdf,
             narrow_threshold=cli_args.narrow_threshold,
@@ -878,19 +626,26 @@ def main():
             bbox_wgs84=(south, west, north, east),
             utm_crs=utm_crs,
             origin=origin,
-            **_preprocess_overrides,
+            merge_mode=MERGE_BLOCK_LAYERS,
         )
+
+    layers = _pipeline_cache.get_or_compute(
+        'preprocess_v1', _preprocess_cache_key, _compute_preprocess,
+        label='preprocess layers')
+
     print(f"  {layers.summary()}")
     print(f"  Time: {time.time() - t45:.1f}s")
 
     # =====================================================================
-    # Stage 4.6: Render PNG preview (optional, --png flag)
+    # Stage 4.6: Optional PNG previews from this script's exact 25km layers
     # =====================================================================
+    png_outputs = []
     if cli_args.png:
-        print(f"\n[Stage 4.6] Rendering PNG preview...")
+        print(f"\n[Stage 4.6] Rendering diagnostic PNG preview...")
         t46 = time.time()
         from _TEXTURE_STYLE_OF_DEEPSEEK.render_png import render_from_layers
-        png_path = os.path.join(OUTPUT_DIR, f"{CITY_NAME}_preview.png")
+
+        diagnostic_path = os.path.join(OUTPUT_DIR, f"{CITY_NAME}_preview.png")
         png_ctx = {
             "bbox_utm": utm_bbox,
             "origin": origin,
@@ -900,121 +655,35 @@ def main():
             "bbox_wgs84": (south, west, north, east),
         }
         render_from_layers(
-            layers, png_ctx, png_path,
+            layers,
+            png_ctx,
+            diagnostic_path,
             city_name=CITY_NAME,
             water_gdf=water_gdf,
             landuse_gdf=landuse_gdf,
         )
+        png_outputs.append(diagnostic_path)
+        print(f"  Diagnostic PNG: {diagnostic_path}")
         print(f"  Time: {time.time() - t46:.1f}s")
 
-    # =====================================================================
-    # Stage 4.65: 画廊级漂亮俯视图（--review-png）
-    # 与 Stage 4.6 的诊断图不同：无文字标注、超采样抗锯齿、带山体阴影，
-    # 就是风格画廊用的那张图（aesthetic/review_render.py）。
-    # =====================================================================
-    if getattr(cli_args, "review_png", False):
-        print(f"\n[Stage 4.65] Rendering gallery-grade preview...")
+    if cli_args.review_png:
+        print(f"\n[Stage 4.65] Rendering clean review PNGs...")
         t465 = time.time()
-        try:
-            from aesthetic.review_render import render_review_bundle
-            _rw = (auto_resolved.road_width_multiplier
-                   if auto_resolved is not None else 1.0)
-            bundle = render_review_bundle(
-                layers, {"bbox_local": bbox_local}, _rw,
-                OUTPUT_DIR, CITY_NAME)
-            print(f"  topdown: {bundle.get('topdown')}")
-            print(f"  Time: {time.time() - t465:.1f}s")
-        except Exception as e:
-            print(f"  WARNING: gallery preview failed: {type(e).__name__}: {e}")
+        from aesthetic.review_render import render_review_bundle
 
-    # =====================================================================
-    # Stage 4.8: Draft GLB 快速预览（--draft：导出后提前退出）
-    # =====================================================================
-    if cli_args.draft:
-        print(f"\n[Stage 4.8] Exporting draft GLB preview...")
-        t48 = time.time()
-        from _TEXTURE_STYLE_OF_DEEPSEEK.render_glb import render_glb_preview
-        glb_path = os.path.join(OUTPUT_DIR, f"{CITY_NAME}_draft.glb")
-        # --marker: lat/lon → 本地米（与图层同一 UTM 投影 + origin 平移）
-        marker_local = []
-        if cli_args.marker_points:
-            from pyproj import Transformer
-            _tf = Transformer.from_crs("EPSG:4326", utm_crs, always_xy=True)
-            for _lat, _lon in cli_args.marker_points:
-                _mx, _my = _tf.transform(_lon, _lat)
-                marker_local.append((_mx - origin[0], _my - origin[1]))
-        render_glb_preview(
+        bundle = render_review_bundle(
             layers,
-            {"bbox_local": bbox_local, "scale": scale,
-             "bbox_wgs84": (south, west, north, east),
-             "utm_crs": utm_crs, "origin": origin},
-            glb_path,
-            elevation_grid=elevation_grid,
-            markers=marker_local or None,
-            water_gdf=water_gdf,
+            {"bbox_local": bbox_local},
+            1.0,
+            OUTPUT_DIR,
+            CITY_NAME,
         )
-        glb_size = os.path.getsize(glb_path) / (1024 * 1024)
-        total_time = time.time() - t_start
-        print(f"\n{'=' * 70}")
-        print(f"  DRAFT Summary — {CITY_NAME}")
-        print(f"  Output: {glb_path} ({glb_size:.2f} MB)")
-        print(f"  Total time: {total_time:.1f}s (draft; full 3MF skipped)")
-        print(f"{'=' * 70}\n")
-        return
-
-    # =====================================================================
-    # Stage 4.7: AI vision review — advisory (optional, --ai-review + --png)
-    # NOTE: 评审结果记录到 trajectory，参数调整影响下游 builder（buildings v3
-    #       的 BRICK_* 为函数级 import 可生效），但不重渲 PNG（render_png
-    #       不消费这些参数，重渲是无效操作）。完整闭环需重跑 preprocess。
-    # =====================================================================
-    if cli_args.ai_review and cli_args.png and auto_resolved is not None:
-        print(f"\n[Stage 4.7] AI vision review (advisory)...")
-        t47 = time.time()
-        from _TEXTURE_STYLE_OF_DEEPSEEK.auto_params.ai_review import ai_review_png
-        png_path = os.path.join(OUTPUT_DIR, f"{CITY_NAME}_preview.png")
-        if os.path.exists(png_path):
-            adjusted_params, review_result = ai_review_png(
-                png_path, profile, auto_resolved,
-                city_name=CITY_NAME, max_rounds=3)
-            if review_result.overall > 0:
-                print(f"  AI score: {review_result.overall}/5")
-                print(f"  Issues: {review_result.issues}")
-                if adjusted_params is not auto_resolved:
-                    # Re-apply adjusted params (affects downstream builders
-                    # that use function-level imports, e.g. BRICK_* in v3)
-                    auto_resolved = adjusted_params
-                    _cfg.Z_GAMMA = auto_resolved.z_gamma
-                    _cfg.BRICK_PERLIN_AMP = auto_resolved.brick_perlin_amp
-                    _cfg.BRICK_CORNER_R_M = auto_resolved.brick_corner_r_m
-                    _cfg.ROAD_WIDTH_MULTIPLIER = auto_resolved.road_width_multiplier
-                    print(f"  Params adjusted by AI review (effective in downstream builders)")
-                    # Re-save decision report with adjusted params (P1-5)
-                    save_decision_report(profile, auto_resolved, OUTPUT_DIR,
-                                         CITY_NAME + "_ai_adjusted")
-
-                # Trajectory logging (P1-5: 逐轮记录参数/分数)
-                _trajectory_path = os.path.join(OUTPUT_DIR, "..", "trajectory.jsonl")
-                try:
-                    import json as _json
-                    _traj_record = {
-                        "city": CITY_NAME,
-                        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                        "score": review_result.overall,
-                        "issues": review_result.issues,
-                        "params": auto_resolved.to_dict(),
-                        "png_path": png_path,
-                    }
-                    with open(_trajectory_path, "a", encoding="utf-8") as _tf:
-                        _tf.write(_json.dumps(_traj_record, ensure_ascii=False) + "\n")
-                    print(f"  Trajectory logged: {_trajectory_path}")
-                except Exception as _te:
-                    print(f"  Trajectory log failed (non-fatal): {_te}")
-            else:
-                print(f"  AI review skipped (no API key or parse error)")
-        else:
-            print(f"  PNG not found, skipping AI review")
-        print(f"  Time: {time.time() - t47:.1f}s")
+        for key in ("topdown", "height"):
+            path = bundle.get(key)
+            if path:
+                png_outputs.append(path)
+                print(f"  {key.capitalize()} PNG: {path}")
+        print(f"  Time: {time.time() - t465:.1f}s")
 
     # =====================================================================
     # Stage 5: Build buildings (v3 — preprocessed polygons)
@@ -1026,6 +695,7 @@ def main():
     landmarks_mesh = None
     terrain_solid_no_buildings = terrain_solid
     if MERGE_BLOCK_LAYERS:
+        # 2-layer 模式：BO 不单独建 mesh，合入 block_base 统一出
         print(f"  MERGE_BLOCK_LAYERS=True: BO 将合入 block_base，此处只建 landmarks")
         if layers.BL:
             try:
@@ -1035,7 +705,7 @@ def main():
                 if isinstance(bldg_result, dict):
                     landmarks_mesh = bldg_result.get("landmarks")
                     n_lm = len(landmarks_mesh.faces) if landmarks_mesh is not None else 0
-                    print(f"  Landmarks mesh: {n_lm:,} faces")
+                    print(f"  Landmarks mesh: {n_lm:,} faces (E5 暖砂石)")
                 else:
                     print(f"  No landmarks generated")
             except Exception as e:
@@ -1050,8 +720,8 @@ def main():
                 buildings_mesh = bldg_result.get("buildings")
                 n_lm = len(landmarks_mesh.faces) if landmarks_mesh is not None else 0
                 n_amb = len(buildings_mesh.faces) if buildings_mesh is not None else 0
-                print(f"  Landmarks mesh: {n_lm:,} faces")
-                print(f"  Buildings mesh: {n_amb:,} faces")
+                print(f"  Landmarks mesh: {n_lm:,} faces (E5 暖砂石)")
+                print(f"  Buildings mesh: {n_amb:,} faces (E1 灰，街区填充)")
             else:
                 print(f"  No buildings generated (all filtered out)")
         except Exception as e:
@@ -1109,7 +779,7 @@ def main():
 
     vegetation_mesh = None
     if not ENABLE_VEGETATION:
-        print(f"  Vegetation DISABLED via --no-vegetation")
+        print(f"  Vegetation DISABLED via ENABLE_VEGETATION flag")
     elif layers.VL or layers.VO:
         try:
             vegetation_mesh = build_deepseek_vegetation_v3(
@@ -1132,7 +802,7 @@ def main():
 
     block_base_mesh = None
     if not ENABLE_BLOCK_BASE:
-        print(f"  BlockBase DISABLED via --no-block-base")
+        print(f"  BlockBase DISABLED via ENABLE_BLOCK_BASE flag")
     elif layers.block_base:
         try:
             merged_polys = list(layers.block_base)
@@ -1142,7 +812,7 @@ def main():
                 merged_polys.extend(layers.BO)
                 if merged_classes is not None:
                     merged_classes.extend(["unclassified"] * len(layers.BO))
-                merge_thickness = 0.625
+                merge_thickness = 0.625  # 合并模式用 BO 高度，比 0.3mm 更有存在感
                 print(f"  MERGE: block_base({len(layers.block_base)}) + BO({len(layers.BO)}) "
                       f"= {len(merged_polys)} polys, thickness={merge_thickness}mm")
             block_base_mesh = build_deepseek_block_base_v3(
@@ -1160,7 +830,7 @@ def main():
     print(f"  Time: {time.time() - t85:.1f}s")
 
     # =====================================================================
-    # Stage 9: Export 3MF
+    # Stage 9: Export 3MF（buildings 拆 landmarks + ambient 两个 sub-mesh，分色）
     # =====================================================================
     print(f"\n[Stage 9] Preparing and exporting 3MF...")
     t9 = time.time()
@@ -1169,12 +839,12 @@ def main():
 
     meshes = {
         'terrain': terrain_solid,
-        'buildings': buildings_mesh,
-        'landmarks': landmarks_mesh,
+        'buildings': buildings_mesh,    # block_fill 街区填充 (E1 灰)
+        'landmarks': landmarks_mesh,    # 地标个体 (E5 暖砂石)
         'roads': roads_mesh,
         'water': water_mesh,
         'vegetation': vegetation_mesh,
-        'block_base': block_base_mesh,
+        'block_base': block_base_mesh,  # PNG layer 1.5 暖米色城市底 (E6)
     }
 
     print(f"\n  Mesh stats:")
@@ -1195,18 +865,7 @@ def main():
         print(f"    Vegetation - Vertices: {len(vegetation_mesh.vertices)}, Faces: {len(vegetation_mesh.faces)}")
         print(f"    Vegetation - is_watertight: {vegetation_mesh.is_watertight}")
         print(f"    Vegetation - Bounds: X[{vb[0][0]:.1f}, {vb[1][0]:.1f}] Y[{vb[0][1]:.1f}, {vb[1][1]:.1f}] Z[{vb[0][2]:.1f}, {vb[1][2]:.1f}] mm")
-
-    # Debug: export each mesh as separate OBJ
-    if cli_args.debug_obj:
-        print(f"\n  [DEBUG] Exporting individual OBJ files...")
-        debug_dir = os.path.join(OUTPUT_DIR, "debug_obj")
-        os.makedirs(debug_dir, exist_ok=True)
-        for name, mesh in meshes.items():
-            if mesh is not None:
-                obj_path = os.path.join(debug_dir, f"{name}.obj")
-                mesh.export(obj_path)
-                print(f"    {name}: {len(mesh.faces):,} faces -> {obj_path}")
-        print(f"  [DEBUG] OBJ files in: {debug_dir}")
+        print(f"    Vegetation - Size: {vb[1][0]-vb[0][0]:.1f} x {vb[1][1]-vb[0][1]:.1f} x {vb[1][2]-vb[0][2]:.1f} mm")
 
     # Export 3MF
     from datetime import datetime
@@ -1227,8 +886,9 @@ def main():
     # =====================================================================
     total_time = time.time() - t_start
     print(f"\n{'=' * 70}")
-    print(f"  Pipeline Summary — {CITY_NAME}")
+    print(f"  Pipeline Summary")
     print(f"{'=' * 70}")
+    print(f"  Method: {METHOD}")
     print(f"  Area: {area_km2:.1f} km², Scale: {scale:.6f} mm/m")
     print(f"  Terrain faces: {len(terrain_solid.faces):,}")
     print(f"  Water faces: {len(water_mesh.faces):,}" if water_mesh is not None else "  Water: None")
@@ -1236,22 +896,7 @@ def main():
     print(f"  Buildings faces: {len(buildings_mesh.faces):,}" if buildings_mesh is not None else "  Buildings: None")
     print(f"  Roads faces: {len(roads_mesh.faces):,}" if roads_mesh is not None else "  Roads: None")
     print(f"  Output: {output_path} ({file_size:.2f} MB)")
+    for png_path in png_outputs:
+        print(f"  PNG: {png_path}")
     print(f"  Total time: {total_time:.1f}s")
     print(f"{'=' * 70}\n")
-
-    # =====================================================================
-    # Post: Preference recording hint (auto-params mode)
-    # =====================================================================
-    if auto_resolved is not None and cli_args.png:
-        png_path_final = os.path.join(OUTPUT_DIR, f"{CITY_NAME}_preview.png")
-        print(f"  [preference] To record your judgment on this output:")
-        print(f"    python -c \"from _TEXTURE_STYLE_OF_DEEPSEEK.auto_params.preference_store import "
-              f"PreferenceStore, PreferenceRecord; "
-              f"s=PreferenceStore('output/preference_log.jsonl'); "
-              f"s.record(PreferenceRecord(city='{CITY_NAME}', "
-              f"params={auto_resolved.to_dict()}, "
-              f"png_path='{png_path_final}', verdict='accept'))\"")
-
-
-if __name__ == "__main__":
-    main()

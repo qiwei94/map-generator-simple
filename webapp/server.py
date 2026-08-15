@@ -4,7 +4,7 @@ from __future__ import annotations
 
 轻量 FastAPI 后端，不 import 重管线（geopandas/trimesh），只做三件事：
 1. 扫描 output/ 下已有产物（画廊、draft GLB、3MF、param_decision）
-2. 以子进程方式触发 generate_city.py（draft / full），异步跟踪任务
+2. 以子进程方式触发 generate_city_legacy.py（通用 draft / full），异步跟踪任务
 3. 托管前端静态页 + 产物文件
 
 启动：python webapp/server.py  （默认 0.0.0.0:8787，手机同局域网可访问）
@@ -40,7 +40,7 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 JOB_LOG_DIR = ROOT / "tmp" / "webapp_jobs"
 JOB_LOG_DIR.mkdir(parents=True, exist_ok=True)
 
-# 与 generate_city.py PRESETS 保持一致（轻量副本，避免 import 重管线）
+# 与 generate_city_legacy.py PRESETS 保持一致（轻量副本，避免 import 重管线）
 PRESETS = {
     "westlake": {
         "title": "杭州 · 西湖",
@@ -979,7 +979,7 @@ def api_generate(req: GenerateRequest):
         pbf = st["pbf"]
         city = _custom_slug(bbox)
         city_title = req.area.name.strip() or "自定义区域"
-        base_cmd = [sys.executable, "generate_city.py",
+        base_cmd = [sys.executable, "generate_city_legacy.py",
                     "--bbox", f"{s},{w},{n},{e}", "--pbf", pbf,
                     "--city", city, "--auto-params"]
         # 记录区域信息，刷新后前端仍能展示
@@ -992,7 +992,7 @@ def api_generate(req: GenerateRequest):
     elif req.city in PRESETS:
         city = req.city
         city_title = PRESETS[city]["title"]
-        base_cmd = [sys.executable, "generate_city.py", "--preset", city,
+        base_cmd = [sys.executable, "generate_city_legacy.py", "--preset", city,
                     "--auto-params"]
     elif req.city in _landmark_presets():
         # 景点目录城市：用 bbox + pbf 路径（与自定义区域相同）
@@ -1007,7 +1007,7 @@ def api_generate(req: GenerateRequest):
         pbf = st["pbf"]
         city = req.city
         city_title = lm_info["title"]
-        base_cmd = [sys.executable, "generate_city.py",
+        base_cmd = [sys.executable, "generate_city_legacy.py",
                     "--bbox", f"{s},{w},{n},{e}", "--pbf", pbf,
                     "--city", city, "--auto-params"]
         area_dir = OUTPUT_DIR / city
