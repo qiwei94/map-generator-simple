@@ -123,6 +123,18 @@ def build_parser():
         metavar='MM',
         help='退让圈内侧的建筑覆盖筛选过渡带宽度（默认 1.5mm）',
     )
+    parser.add_argument(
+        '--city',
+        default='westlake_cli',
+        metavar='NAME',
+        help='输出文件名前缀（默认 westlake_cli）',
+    )
+    parser.add_argument(
+        '--output-dir',
+        default='output/westlake_cli',
+        metavar='PATH',
+        help='输出目录（默认 output/westlake_cli）',
+    )
     return parser
 
 
@@ -145,8 +157,8 @@ if __name__ == "__main__":
     # 西湖 25km 区域
     LAT1, LON1 = 30.13, 120.01
     LAT2, LON2 = 30.36, 120.29
-    CITY_NAME = "westlake_cli"
-    OUTPUT_DIR = "output/westlake_cli"
+    CITY_NAME = cli_args.city.strip() or "westlake_cli"
+    OUTPUT_DIR = cli_args.output_dir
 
     # Sub-mesh on/off
     ENABLE_VEGETATION = False

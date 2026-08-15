@@ -21,6 +21,16 @@ def test_png_flags_can_be_enabled_together():
     assert args.review_png is True
 
 
+def test_web_can_override_output_identity():
+    args = build_parser().parse_args([
+        "--city", "westlake_quality_flat",
+        "--output-dir", "output/westlake_quality_flat",
+    ])
+
+    assert args.city == "westlake_quality_flat"
+    assert args.output_dir == "output/westlake_quality_flat"
+
+
 def test_historical_entry_uses_the_official_parser():
     args = compatibility_parser().parse_args(["--png"])
 

@@ -168,8 +168,31 @@ class GenerateRequest(BaseModel):
     city: str = ""
     mode: str = "draft"  # draft | full
     style: str | None = None  # 画廊风格名（可选，带参生成）
+    generation_profile: str = "classic"
     area: CustomArea | None = None    # 自定义区域（与 city 二选一）
     markers: list[list[float]] = []   # [[lat, lon], ...] 标注点（附近最高处染红）
+
+
+GENERATION_PROFILES = {
+    "classic": {
+        "label": "经典通用",
+        "description": "支持所有区域与快速 3D 预览，使用通用城市管线。",
+        "scope": "all",
+        "draft": True,
+    },
+    "quality_flat": {
+        "label": "西湖质量 · 平整填充",
+        "description": "当前高质量西湖管线，采用平整街区填充与 2mm 边缘退让。",
+        "scope": "westlake",
+        "draft": False,
+    },
+    "quality_textured": {
+        "label": "西湖质量 · 纹理填充",
+        "description": "当前高质量西湖管线，保留不同地块的语义起伏。",
+        "scope": "westlake",
+        "draft": False,
+    },
+}
 
 
 # 面向用户的异常分类：内部日志不外露，失败时只返回其中一类
@@ -231,6 +254,7 @@ def _job_public(job: dict, include_log: bool = False) -> dict:
         "city_title": job.get("city_title") or job["city"],
         "mode": job["mode"],
         "style": job.get("style"),
+        "generation_profile": job.get("generation_profile", "classic"),
         "status": job["status"],
         "elapsed_s": round(elapsed, 1),
     }
@@ -959,8 +983,33 @@ def api_generate(req: GenerateRequest):
     if req.mode not in ("draft", "full"):
         raise HTTPException(400, f"未知模式: {req.mode}")
 
+    profile = req.generation_profile.strip() or "classic"
+    if profile not in GENERATION_PROFILES:
+        raise HTTPException(400, f"未知生成方式: {profile}")
+
+    quality_profile = profile in ("quality_flat", "quality_textured")
+    if quality_profile:
+        if req.area is not None or req.city != "westlake":
+            raise HTTPException(400, "西湖质量模式目前只支持‘杭州 · 西湖’预设")
+        if req.mode != "full":
+            raise HTTPException(400, "西湖质量模式直接生成正式 3MF，不提供快速 draft")
+        if req.style:
+            raise HTTPException(400, "西湖质量模式使用已验证的固定视觉参数，不叠加旧画廊风格")
+
+        block_mode = "flat" if profile == "quality_flat" else "textured"
+        city = f"westlake_{profile}"
+        city_title = f"杭州 · 西湖（{GENERATION_PROFILES[profile]['label']}）"
+        base_cmd = [
+            sys.executable, "generate_city.py",
+            "--city", city,
+            "--output-dir", str(OUTPUT_DIR / city),
+            "--block-base-mode", block_mode,
+            "--block-base-edge-retreat-mm", "2",
+            "--png", "--review-png",
+        ]
+
     # ── 目标解析：预设城市 / 景点目录 / 自定义区域 ──
-    if req.area is not None:
+    elif req.area is not None:
         bbox = req.area.bbox
         if len(bbox) != 4:
             raise HTTPException(400, "bbox 需为 [south, west, north, east]")
@@ -1025,17 +1074,21 @@ def api_generate(req: GenerateRequest):
     job_id = uuid.uuid4().hex[:8]
     log_path = JOB_LOG_DIR / f"{job_id}_{city}_{req.mode}.log"
     # draft 也出 2D 图：诊断图（带图例统计）+ 画廊级俯视图（无文字）
-    cmd = base_cmd + ["--png", "--review-png"]
-    if req.mode == "draft":
-        cmd.append("--draft")
+    if quality_profile:
+        cmd = base_cmd
+    else:
+        cmd = base_cmd + ["--png", "--review-png"]
+        if req.mode == "draft":
+            cmd.append("--draft")
 
     # 标注点（照片 GPS 点）：draft GLB 将其附近最高处染红
-    for mk in req.markers:
-        if len(mk) == 2:
-            cmd += ["--marker", f"{mk[0]},{mk[1]}"]
+    if not quality_profile:
+        for mk in req.markers:
+            if len(mk) == 2:
+                cmd += ["--marker", f"{mk[0]},{mk[1]}"]
 
     # 画廊风格参数 → 落盘 JSON → --params-json（管线内最高优先级覆盖）
-    if req.style:
+    if req.style and not quality_profile:
         meta = _load_gallery(city)
         if not meta or req.style not in meta.get("styles", {}):
             raise HTTPException(400, f"{city} 无风格: {req.style}")
@@ -1052,7 +1105,8 @@ def api_generate(req: GenerateRequest):
     if WORKER_MODE:
         # ── Worker 模式：入队等本机 worker 拉取，不本地起进程 ──
         job = {"id": job_id, "city": city, "city_title": city_title,
-               "mode": req.mode, "style": req.style, "exec": "worker",
+               "mode": req.mode, "style": req.style,
+               "generation_profile": profile, "exec": "worker",
                "log_path": str(log_path), "status": "pending",
                "started": time.time(), "ended": None,
                "spec": {"cmd": cmd, "cwd": str(ROOT), "env_extra": {
@@ -1061,14 +1115,16 @@ def api_generate(req: GenerateRequest):
         with JOBS_LOCK:
             JOBS[job_id] = job
             _save_jobs()
-        return {"job_id": job_id, "city": city, "queued": True}
+        return {"job_id": job_id, "city": city,
+                "generation_profile": profile, "queued": True}
 
     # ── 本地模式：直接起子进程 ──
     log_f = open(log_path, "w", encoding="utf-8")
     proc = subprocess.Popen(cmd, cwd=str(ROOT), stdout=log_f,
                             stderr=subprocess.STDOUT, env=env)
     job = {"id": job_id, "city": city, "city_title": city_title,
-           "mode": req.mode, "style": req.style, "exec": "local",
+           "mode": req.mode, "style": req.style,
+           "generation_profile": profile, "exec": "local",
            "proc": proc,
            "log_path": str(log_path), "status": "running",
            "started": time.time(), "ended": None}
@@ -1076,7 +1132,13 @@ def api_generate(req: GenerateRequest):
         JOBS[job_id] = job
         _save_jobs()
     threading.Thread(target=_watch_job, args=(job,), daemon=True).start()
-    return {"job_id": job_id, "city": city}
+    return {"job_id": job_id, "city": city,
+            "generation_profile": profile}
+
+
+@app.get("/api/generation-profiles")
+def api_generation_profiles():
+    return {"profiles": GENERATION_PROFILES}
 
 
 @app.get("/api/jobs/{job_id}")
