@@ -104,6 +104,21 @@ STUDIO_PORT=9000 python webapp/server.py   # 自定义端口
 pytest tests/ -m "not slow"        # 离线套件（网络用例标 slow 默认跳过）
 ```
 
+### 5. 西湖 25KM CLI 与 PNG 预览
+
+专用西湖脚本可在生成 3MF 的同一次运行中输出彩色诊断图、干净俯视图和高度图：
+
+```bash
+python real_back_up_westlake_cli.py \
+  --elevation-file /path/to/westlake_dem.tif \
+  --png \
+  --review-png
+```
+
+所有产物写入 `output/westlake_cli/`。`--png` 输出
+`westlake_cli_preview.png`；`--review-png` 输出
+`westlake_cli_topdown.png` 和 `westlake_cli_height.png`。
+
 ---
 
 ## 计算与部署架构（实测结论）

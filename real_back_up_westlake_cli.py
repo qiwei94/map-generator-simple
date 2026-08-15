@@ -42,10 +42,9 @@ from _TEXTURE_STYLE_OF_DEEPSEEK._process_lock import acquire_lock
 from _TEXTURE_STYLE_OF_DEEPSEEK.exporter import export_deepseek_3mf, split_terrain_mesh
 from _TEXTURE_STYLE_OF_DEEPSEEK.config import compute_scale, WATERWAY_WIDTHS, TERRAIN_GRID, get_area_class, BUILDING_V2_HOTSPOT_RELAX
 
-if __name__ == "__main__":
-    # ---------------------------------------------------------------------------
-    # CLI 参数
-    # ---------------------------------------------------------------------------
+
+def build_parser():
+    """Build the CLI parser separately so its public options are testable."""
     parser = argparse.ArgumentParser(
         description="使用 osmium CLI 管线生成西湖 3MF 模型"
     )
@@ -86,7 +85,26 @@ if __name__ == "__main__":
         default=False,
         help='禁用管线缓存，强制重新计算所有阶段'
     )
-    cli_args = parser.parse_args()
+    parser.add_argument(
+        '--png',
+        action='store_true',
+        default=False,
+        help='输出彩色图层诊断预览 PNG'
+    )
+    parser.add_argument(
+        '--review-png',
+        action='store_true',
+        default=False,
+        help='输出干净俯视 PNG 和建筑高度 PNG'
+    )
+    return parser
+
+
+if __name__ == "__main__":
+    # ---------------------------------------------------------------------------
+    # CLI 参数
+    # ---------------------------------------------------------------------------
+    cli_args = build_parser().parse_args()
 
     # PBF 文件
     PBF_FILE = os.path.join(_project_root, 'pbf_cache', 'zhejiang-latest.osm.pbf')
@@ -619,6 +637,55 @@ if __name__ == "__main__":
     print(f"  Time: {time.time() - t45:.1f}s")
 
     # =====================================================================
+    # Stage 4.6: Optional PNG previews from this script's exact 25km layers
+    # =====================================================================
+    png_outputs = []
+    if cli_args.png:
+        print(f"\n[Stage 4.6] Rendering diagnostic PNG preview...")
+        t46 = time.time()
+        from _TEXTURE_STYLE_OF_DEEPSEEK.render_png import render_from_layers
+
+        diagnostic_path = os.path.join(OUTPUT_DIR, f"{CITY_NAME}_preview.png")
+        png_ctx = {
+            "bbox_utm": utm_bbox,
+            "origin": origin,
+            "width_m": width_m,
+            "height_m": height_m,
+            "utm_crs": utm_crs,
+            "bbox_wgs84": (south, west, north, east),
+        }
+        render_from_layers(
+            layers,
+            png_ctx,
+            diagnostic_path,
+            city_name=CITY_NAME,
+            water_gdf=water_gdf,
+            landuse_gdf=landuse_gdf,
+        )
+        png_outputs.append(diagnostic_path)
+        print(f"  Diagnostic PNG: {diagnostic_path}")
+        print(f"  Time: {time.time() - t46:.1f}s")
+
+    if cli_args.review_png:
+        print(f"\n[Stage 4.65] Rendering clean review PNGs...")
+        t465 = time.time()
+        from aesthetic.review_render import render_review_bundle
+
+        bundle = render_review_bundle(
+            layers,
+            {"bbox_local": bbox_local},
+            1.0,
+            OUTPUT_DIR,
+            CITY_NAME,
+        )
+        for key in ("topdown", "height"):
+            path = bundle.get(key)
+            if path:
+                png_outputs.append(path)
+                print(f"  {key.capitalize()} PNG: {path}")
+        print(f"  Time: {time.time() - t465:.1f}s")
+
+    # =====================================================================
     # Stage 5: Build buildings (v3 — preprocessed polygons)
     # =====================================================================
     print(f"\n[Stage 5] Building buildings (v3)...")
@@ -829,6 +896,7 @@ if __name__ == "__main__":
     print(f"  Buildings faces: {len(buildings_mesh.faces):,}" if buildings_mesh is not None else "  Buildings: None")
     print(f"  Roads faces: {len(roads_mesh.faces):,}" if roads_mesh is not None else "  Roads: None")
     print(f"  Output: {output_path} ({file_size:.2f} MB)")
+    for png_path in png_outputs:
+        print(f"  PNG: {png_path}")
     print(f"  Total time: {total_time:.1f}s")
     print(f"{'=' * 70}\n")
-
