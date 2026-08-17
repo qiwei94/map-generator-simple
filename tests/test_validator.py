@@ -127,3 +127,34 @@ class TestValidate3mf:
         result = validate_3mf(out)
         v8 = next(rule for rule in result["rules"] if rule["id"] == "V8")
         assert bool(v8["passed"])
+
+    def test_sloped_closed_vegetation_passes_printability_rule(self, tmp_path):
+        from _TEXTURE_STYLE_OF_DEEPSEEK.exporter import export_deepseek_3mf
+
+        terrain = trimesh.creation.box(extents=[196, 176, 4])
+        vegetation = trimesh.creation.box(extents=[20, 20, 0.2])
+        vegetation.vertices[:, 2] += vegetation.vertices[:, 0] * 0.02 + 2.1
+        out = str(tmp_path / "sloped-vegetation.3mf")
+        export_deepseek_3mf({"terrain": terrain, "vegetation": vegetation}, out)
+
+        result = validate_3mf(out)
+        v12 = next(rule for rule in result["rules"] if rule["id"] == "V12")
+        assert bool(v12["passed"])
+        assert "nonmanifold_edges=0" in v12["detail"]
+
+    def test_open_vegetation_reports_boundary_edges(self, tmp_path):
+        from _TEXTURE_STYLE_OF_DEEPSEEK.exporter import export_deepseek_3mf
+
+        terrain = trimesh.creation.box(extents=[196, 176, 4])
+        vegetation = trimesh.Trimesh(
+            vertices=[[0, 0, 2.1], [10, 0, 2.2], [0, 10, 2.3]],
+            faces=[[0, 1, 2]], process=False,
+        )
+        out = str(tmp_path / "open-vegetation.3mf")
+        export_deepseek_3mf({"terrain": terrain, "vegetation": vegetation}, out)
+
+        result = validate_3mf(out)
+        v12 = next(rule for rule in result["rules"] if rule["id"] == "V12")
+        assert not bool(v12["passed"])
+        assert "boundary_edges=3" in v12["detail"]
+        assert any(warning.startswith("V12:") for warning in result["warnings"])

@@ -406,18 +406,42 @@ def validate_3mf(filepath: str) -> Dict[str, any]:
         "detail": f"Z span: {vegetation_z_span:.2f}mm",
     })
 
-    # ---- V12: Vegetation faces are flat (each lies in a single Z plane) ----
+    # ---- V12: Vegetation is finite, in bounds, and closed edge-manifold ----
     if vegetation_obj and len(vegetation_obj["faces"]) > 0:
         v = vegetation_obj["vertices"]
         f = vegetation_obj["faces"]
-        face_z_spans = np.abs(v[f][:, :, 2].max(axis=1) - v[f][:, :, 2].min(axis=1))
-        v12_ok = (face_z_spans < 0.1).mean() >= 0.9
+        finite_ok = bool(np.isfinite(v).all())
+        edges = np.sort(np.vstack((f[:, [0, 1]], f[:, [1, 2]], f[:, [2, 0]])),
+                        axis=1)
+        _, edge_counts = np.unique(edges, axis=0, return_counts=True)
+        boundary_edges = int((edge_counts == 1).sum())
+        nonmanifold_edges = int((edge_counts > 2).sum())
+        closed_edge_manifold = boundary_edges == 0 and nonmanifold_edges == 0
+        if terrain_obj is not None and len(terrain_obj["vertices"]) > 0:
+            terrain_v = terrain_obj["vertices"]
+            xy_epsilon = 0.05
+            in_bounds = bool(
+                v[:, 0].min() >= terrain_v[:, 0].min() - xy_epsilon
+                and v[:, 0].max() <= terrain_v[:, 0].max() + xy_epsilon
+                and v[:, 1].min() >= terrain_v[:, 1].min() - xy_epsilon
+                and v[:, 1].max() <= terrain_v[:, 1].max() + xy_epsilon
+            )
+        else:
+            in_bounds = True
+        v12_ok = finite_ok and closed_edge_manifold and in_bounds
+        v12_detail = (
+            f"finite={finite_ok}, in_bounds={in_bounds}, "
+            f"boundary_edges={boundary_edges}, "
+            f"nonmanifold_edges={nonmanifold_edges}"
+        )
     else:
         v12_ok = True
+        v12_detail = "not applicable"
     results["rules"].append({
         "id": "V12",
-        "name": "Vegetation faces are flat (>=90% single-Z-plane)",
+        "name": "Vegetation is finite, in bounds, and closed edge-manifold",
         "passed": v12_ok,
+        "detail": v12_detail,
     })
 
     # Aggregate results

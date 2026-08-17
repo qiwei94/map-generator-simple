@@ -403,6 +403,63 @@ from _TEXTURE_STYLE_OF_DEEPSEEK.block_base import _densify_ring
 _MAX_VEG_GRID_POINTS = 6000
 
 
+def _split_point_touching_topology(
+    points: np.ndarray,
+    faces: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Duplicate vertices between triangle islands that only touch at a point.
+
+    A top surface can contain two edge-disconnected islands which reuse one
+    vertex.  Adding side walls then makes the vertical edge at that vertex
+    incident to four faces.  Splitting by shared-edge connectivity preserves
+    the exact geometry while giving every shell independent vertex indices.
+    """
+    faces = np.asarray(faces, dtype=np.int32)
+    points = np.asarray(points, dtype=np.float64)
+    if len(faces) < 2:
+        return points, faces
+
+    parents = np.arange(len(faces), dtype=np.int32)
+
+    def find(index: int) -> int:
+        while parents[index] != index:
+            parents[index] = parents[parents[index]]
+            index = int(parents[index])
+        return index
+
+    def union(left: int, right: int) -> None:
+        left_root, right_root = find(left), find(right)
+        if left_root != right_root:
+            parents[right_root] = left_root
+
+    edge_owner: dict = {}
+    for face_index, (a, b, c) in enumerate(faces):
+        for start, end in ((a, b), (b, c), (c, a)):
+            edge = (min(int(start), int(end)), max(int(start), int(end)))
+            owner = edge_owner.setdefault(edge, face_index)
+            if owner != face_index:
+                union(face_index, owner)
+
+    groups: dict = {}
+    for face_index in range(len(faces)):
+        groups.setdefault(find(face_index), []).append(face_index)
+    if len(groups) == 1:
+        return points, faces
+
+    split_points = []
+    split_faces = []
+    offset = 0
+    for indices in groups.values():
+        component_faces = faces[np.asarray(indices, dtype=np.int32)]
+        used = np.unique(component_faces)
+        remap = np.full(len(points), -1, dtype=np.int32)
+        remap[used] = np.arange(len(used), dtype=np.int32) + offset
+        split_points.append(points[used])
+        split_faces.append(remap[component_faces])
+        offset += len(used)
+    return np.vstack(split_points), np.vstack(split_faces)
+
+
 def _polygon_to_draped_mesh(
     poly: Polygon,
     terrain_mesh: trimesh.Trimesh,
@@ -460,6 +517,8 @@ def _polygon_to_draped_mesh(
                     return None
                 all_pts = np.array(verts_2d, dtype=np.float64)
                 faces_top = np.array(faces_tri, dtype=np.int32)
+                all_pts, faces_top = _split_point_touching_topology(
+                    all_pts, faces_top)
                 n_total = len(all_pts)
                 # Sample terrain Z
                 tz = sample_terrain_z(terrain_mesh, all_pts[:, 0], all_pts[:, 1])
@@ -536,6 +595,10 @@ def _polygon_to_draped_mesh(
         faces_top = simplices[centroid_mask].astype(np.int32)
         if len(faces_top) == 0:
             return None
+
+    # Point-touching islands need independent indices before side walls are
+    # added; otherwise their shared vertical edge becomes non-manifold.
+    all_pts, faces_top = _split_point_touching_topology(all_pts, faces_top)
 
     # Per-vertex terrain Z sampling
     n_total = len(all_pts)

@@ -212,6 +212,22 @@ class TestWaterV3:
 class TestVegetationV3:
     """Tests for build_deepseek_vegetation_v3."""
 
+    def test_point_touching_triangle_islands_get_independent_vertices(self):
+        from _TEXTURE_STYLE_OF_DEEPSEEK.vegetation_exclusion import (
+            _split_point_touching_topology,
+        )
+
+        points = np.array([
+            [0, 0], [1, 0], [0, 1], [-1, 0], [0, -1],
+        ], dtype=np.float64)
+        faces = np.array([[0, 1, 2], [0, 3, 4]], dtype=np.int32)
+
+        split_points, split_faces = _split_point_touching_topology(
+            points, faces)
+
+        assert len(split_points) == 6
+        assert set(split_faces[0]).isdisjoint(set(split_faces[1]))
+
     def test_empty_input_returns_none(self):
         """空输入返回 None。"""
         from _TEXTURE_STYLE_OF_DEEPSEEK.vegetation_exclusion import (
