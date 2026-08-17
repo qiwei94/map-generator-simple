@@ -319,7 +319,17 @@ def _job_stage_label(job: dict, log_tail: str) -> str:
 
 def _job_duration_hint(job: dict) -> str:
     if job.get("mode") == "styles":
-        return "首次生成通常需要 8–12 分钟；相同区域会直接复用"
+        bbox = job.get("bbox") or []
+        if len(bbox) == 4:
+            south, west, north, east = bbox
+            mid_lat = math.radians((south + north) / 2.0)
+            area_km2 = ((north - south) * 111.32 *
+                        (east - west) * 111.32 * math.cos(mid_lat))
+            if area_km2 >= 100:
+                return "大范围首次生成通常需要 20–40 分钟；相同区域会直接复用"
+            if area_km2 >= 50:
+                return "较大范围首次生成通常需要 12–25 分钟；相同区域会直接复用"
+        return "首次生成通常需要 8–15 分钟；相同区域会直接复用"
     if job.get("mode") == "draft":
         if job.get("fast_draft"):
             return "复用风格数据后通常约 1–3 分钟；复杂山水区域可能更久"

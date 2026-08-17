@@ -185,7 +185,15 @@ def test_style_job_progress_uses_real_gallery_markers(tmp_path):
 
     assert public["progress_pct"] == 64
     assert public["stage_label"] == "正在提取绿地与地表信息"
-    assert "8–12 分钟" in public["duration_hint"]
+    assert "8–15 分钟" in public["duration_hint"]
+
+
+def test_style_duration_hint_scales_with_selected_area():
+    small = {"mode": "styles", "bbox": [48.838, 2.3125, 48.8833, 2.3807]}
+    large = {"mode": "styles", "bbox": [48.7906, 2.2229, 48.9262, 2.4277]}
+
+    assert "8–15 分钟" in server._job_duration_hint(small)
+    assert "20–40 分钟" in server._job_duration_hint(large)
 
 
 @pytest.mark.parametrize(("completed_marker", "progress", "label"), [

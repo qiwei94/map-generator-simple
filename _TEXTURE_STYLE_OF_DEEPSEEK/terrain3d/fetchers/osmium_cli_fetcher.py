@@ -858,7 +858,7 @@ class OsmiumCLIFetcher:
         smart_label = ' -s smart' if is_water else ''
         logger.info(f"Step 1: {osmium_path} extract -b {bbox_str}{smart_label}")
         print(f"  [Step 1/{n_steps}] osmium extract (clipping area){' (smart mode)' if is_water else ''}...")
-        print(f"           Command: osmium extract -b {bbox_str}{smart_label} {pbf_file} -o {area_pbf} --overwrite")
+        print(f"           Command: {osmium_path} extract -b {bbox_str}{smart_label} {pbf_file} -o {area_pbf} --overwrite")
         t1 = time.time()
         result1 = None
         for attempt in range(3):
@@ -898,7 +898,7 @@ class OsmiumCLIFetcher:
 
         logger.info(f"Step 2: {osmium_path} tags-filter {filter_expr}")
         print(f"  [Step 2/{n_steps}] osmium tags-filter (filtering {tag_type} features)...")
-        print(f"           Command: osmium tags-filter {area_pbf} {filter_expr} -o {filtered_pbf} --overwrite")
+        print(f"           Command: {osmium_path} tags-filter {area_pbf} {filter_expr} -o {filtered_pbf} --overwrite")
         t2 = time.time()
         result2 = subprocess.run(cmd2, capture_output=True, timeout=300, creationflags=flags)
         elapsed2 = time.time() - t2
@@ -932,7 +932,7 @@ class OsmiumCLIFetcher:
 
         logger.info(f"Step 3: {osmium_path} export -f geojson")
         print(f"  [Step 3/{n_steps}] osmium export (converting to GeoJSON)...")
-        print(f"           Command: osmium export {filtered_pbf} -o {raw_geojson} -f geojson --overwrite")
+        print(f"           Command: {osmium_path} export {filtered_pbf} -o {raw_geojson} -f geojson --overwrite")
         t3 = time.time()
         # The portable Python-backed osmium fallback is much slower than the
         # native C++ tool on dense extracts. Scale the export budget with the
@@ -1116,7 +1116,7 @@ class OsmiumCLIFetcher:
 
         logger.info(f"Step 2: {osmium_path} export -f geojson")
         print(f"  [Step 2/3] osmium export (converting to GeoJSON)...")
-        print(f"           Command: osmium export {filtered_pbf} -o {full_geojson} -f geojson --overwrite")
+        print(f"           Command: {osmium_path} export {filtered_pbf} -o {full_geojson} -f geojson --overwrite")
         t2 = time.time()
         result2 = subprocess.run(cmd2, capture_output=True, timeout=120, creationflags=flags)
         elapsed2 = time.time() - t2
