@@ -813,7 +813,27 @@ body { background: var(--bg); color: var(--ink); }
   .hero-specs strong { font-size: 12px; }
   .hero-visual figcaption strong { font-size: 19px; }
   .card { padding: 22px 18px; }
+  #step1 { width: 100%; align-self: stretch; }
   .leaflet-map { height: 390px; }
   .profile-picker { grid-template-columns: 1fr; }
   .topbar .brand h1 { font-size: 16px; }
+}
+
+/* Tablet / narrow desktop: the location chooser needs reading width.
+   Keeping it beside the map below 1100px creates a ~300px card where the
+   two tab labels and long search examples break into awkward columns. */
+@media (min-width: 768px) and (max-width: 1099px) {
+  #main { grid-template-columns: minmax(0, 1fr); }
+  #step1, #step2 { grid-column: 1 / -1; }
+  #step1 { width: 100%; }
+  .s1-tabs { max-width: 640px; }
+  .s1-panel, .preset-details { max-width: 760px; }
+}
+
+/* Small tablets also need the product story to stack; two editorial columns
+   at this width leave neither copy nor the real-output image enough room. */
+@media (min-width: 768px) and (max-width: 899px) {
+  .product-hero { grid-template-columns: 1fr; }
+  .hero-copy { min-height: 520px; }
+  .hero-visual { min-height: 520px; }
 }
