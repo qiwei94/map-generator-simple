@@ -916,7 +916,9 @@ def _extract_roads(
                 continue
 
             # Subtract BL footprint
-            if bl_union is not None and line.intersects(bl_union):
+            # Keep the prepared geometry on the left-hand side so GEOS can
+            # actually reuse its spatial index for every road predicate.
+            if bl_union is not None and bl_union.intersects(line):
                 try:
                     diff = line.difference(bl_union)
                     if diff.is_empty:
