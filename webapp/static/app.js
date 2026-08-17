@@ -612,9 +612,18 @@ $("lmInput").oninput = () => {
 };
 $("lmInput").onfocus = () => {
   // 聚焦且未输入时，展示预取的可生成目录（发现入口）
-  if (!$("lmInput").value.trim() && lmCatalogCache) {
-    renderLmResults(lmCatalogCache);
+  if ($("lmInput").value.trim()) return;
+  if (window.location.protocol === "file:") {
+    renderLmResults([], "当前是静态文件预览，景点目录需要通过网页服务打开");
+    return;
   }
+  if (lmCatalogCache !== null) {
+    renderLmResults(lmCatalogCache);
+    return;
+  }
+  // 修复启动竞态：预取尚未完成时用户先聚焦，不能一直显示空白。
+  renderLmResults([], "正在载入景点目录…");
+  lmSearch("", true);
 };
 document.addEventListener("click", (e) => {
   if (!e.target.closest(".lm-search")) $("lmResults").hidden = true;
@@ -1625,7 +1634,9 @@ $("lightboxClose").onclick = closeLightbox;
 syncSize();
 window.addEventListener("load", async () => {
   initMap();
-  lmSearch("", false);   // 预取目录缓存，不弹下拉
+  if (window.location.protocol !== "file:") {
+    lmSearch("", false);   // 预取目录缓存，不弹下拉
+  }
   await restoreSession();  // 恢复上次会话
   syncGenerationProfileAvailability();
   // 任务链接 ?job=xxx → 自动找回该任务
@@ -1634,6 +1645,11 @@ window.addEventListener("load", async () => {
 });
 
 loadCities().catch((e) => {
+  if (window.location.protocol === "file:") {
+    const input = $("lmInput");
+    input.placeholder = "静态预览不含景点数据，请通过网页服务打开";
+    return;
+  }
   document.body.insertAdjacentHTML("beforeend",
-    `<div style="color:#d97762;text-align:center;padding:20px">加载失败: ${e.message}</div>`);
+    `<div style="color:#d97762;text-align:center;padding:20px">景点目录加载失败: ${e.message}</div>`);
 });
