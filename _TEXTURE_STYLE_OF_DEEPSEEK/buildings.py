@@ -19,10 +19,13 @@ from typing import List, Tuple
 import numpy as np
 import trimesh
 import manifold3d
-from shapely.geometry import LineString, MultiLineString, MultiPolygon, Polygon, box
+from shapely.geometry import (
+    GeometryCollection, LineString, MultiLineString, MultiPolygon, Polygon, box,
+)
 from shapely.ops import polygonize, unary_union
 from shapely.strtree import STRtree
-from shapely import concave_hull as _shapely_concave_hull
+from shapely import concave_hull as _shapely_concave_hull, make_valid
+from shapely.errors import GEOSException
 import geopandas as gpd
 
 from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.processors.terrain import sample_terrain_z
@@ -296,6 +299,35 @@ def _aggregate_in_blocks(small_polys: List[Polygon],
     if not small_polys or not blocks:
         return []
 
+    def _safe_union(polys):
+        try:
+            return unary_union(polys)
+        except GEOSException:
+            repaired = []
+            for geom in polys:
+                try:
+                    repaired.append(geom if geom.is_valid else make_valid(geom))
+                except GEOSException:
+                    continue
+            try:
+                return unary_union(repaired) if repaired else GeometryCollection()
+            except GEOSException:
+                return GeometryCollection()
+
+    def _safe_intersection(left, right):
+        try:
+            return left.intersection(right)
+        except GEOSException:
+            try:
+                safe_left = left if left.is_valid else make_valid(left)
+                safe_right = right if right.is_valid else make_valid(right)
+                return safe_left.intersection(safe_right)
+            except GEOSException:
+                try:
+                    return left.buffer(0).intersection(right.buffer(0))
+                except GEOSException:
+                    return GeometryCollection()
+
     centroids = [p.centroid for p in small_polys]
     block_tree = STRtree(blocks)
 
@@ -354,25 +386,28 @@ def _aggregate_in_blocks(small_polys: List[Polygon],
                 shape = block
             else:
                 buffered = [p.buffer(bldg_buffer_m, join_style=2) for p in block_polys]
-                shape = unary_union(buffered).intersection(block)
+                shape = _safe_intersection(_safe_union(buffered), block)
         elif mode == "buffered_union":
             buffered = [p.buffer(bldg_buffer_m, join_style=2) for p in block_polys]
-            shape = unary_union(buffered).intersection(block)
+            shape = _safe_intersection(_safe_union(buffered), block)
         elif mode == "convex_hull":
-            shape = unary_union(block_polys).convex_hull.intersection(block)
+            shape = _safe_intersection(_safe_union(block_polys).convex_hull,
+                                       block)
         elif mode == "concave_hull":
             try:
                 hull = _shapely_concave_hull(
-                    unary_union(block_polys), ratio=concave_ratio, allow_holes=False
+                    _safe_union(block_polys), ratio=concave_ratio,
+                    allow_holes=False
                 )
-                shape = hull.intersection(block)
+                shape = _safe_intersection(hull, block)
             except Exception:
                 buffered = [p.buffer(bldg_buffer_m, join_style=2) for p in block_polys]
-                shape = unary_union(buffered).intersection(block)
+                shape = _safe_intersection(_safe_union(buffered), block)
         elif mode == "oriented_bbox":
-            shape = unary_union(block_polys).minimum_rotated_rectangle.intersection(block)
+            shape = _safe_intersection(
+                _safe_union(block_polys).minimum_rotated_rectangle, block)
         else:  # 'union'
-            shape = unary_union(block_polys).intersection(block)
+            shape = _safe_intersection(_safe_union(block_polys), block)
 
         if shape.is_empty:
             continue

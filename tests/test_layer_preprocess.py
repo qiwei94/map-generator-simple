@@ -22,6 +22,7 @@ from _TEXTURE_STYLE_OF_DEEPSEEK._layer_preprocess import (
     _filter_by_area,
     LayerPolygons,
 )
+from _TEXTURE_STYLE_OF_DEEPSEEK.buildings import _aggregate_in_blocks
 
 
 # ---------------------------------------------------------------------------
@@ -120,6 +121,24 @@ class TestSubtract:
         assert result
         assert all(poly.is_valid for poly in result)
         assert all(not poly.is_empty for poly in result)
+
+
+def test_oriented_block_aggregation_repairs_invalid_block():
+    """巴黎式非法街区不能让 oriented_bbox 风格整体退出。"""
+    invalid_block = Polygon([
+        (0, 0), (10, 10), (0, 10), (10, 0), (0, 0),
+    ])
+    building = box(4.5, 7.5, 5.5, 8.5)
+    assert not invalid_block.is_valid
+    assert invalid_block.contains(building.centroid)
+
+    result = _aggregate_in_blocks(
+        [building], [invalid_block], mode="oriented_bbox",
+        print_limit_m2=0.0, simplify_m=0.0,
+    )
+
+    assert result
+    assert all(poly.is_valid for poly in result)
 
 
 # ---------------------------------------------------------------------------
