@@ -7,6 +7,7 @@ import geopandas as gpd
 import pytest
 import shutil
 import os
+import sys
 from shapely.geometry import Point
 
 from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.osmium_cli_fetcher import (
@@ -137,6 +138,18 @@ class TestOsmiumBinaryOverride:
 
         assert fetcher.osmium_available
         assert fetcher._get_tool_path("osmium") == executable
+        assert fetcher._get_osmium_command() == [executable]
+
+    def test_portable_backend_uses_active_python(self, monkeypatch):
+        monkeypatch.delenv("OSMIUM_BIN", raising=False)
+        monkeypatch.setenv("PATH", "")
+
+        fetcher = OsmiumCLIFetcher()
+        command = fetcher._get_osmium_command()
+
+        assert fetcher.osmium_available
+        assert command[0] == sys.executable
+        assert command[1].endswith("tools/osmium_pyosmium.py")
 
     @pytest.mark.skipif(os.name == "nt", reason="POSIX executable bit")
     def test_portable_osmium_entry_is_executable(self):

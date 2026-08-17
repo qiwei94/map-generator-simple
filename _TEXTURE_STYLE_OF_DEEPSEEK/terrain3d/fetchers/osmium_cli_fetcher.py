@@ -12,6 +12,7 @@
 import logging
 import os
 import subprocess
+import sys
 import tempfile
 from typing import Dict, Optional
 
@@ -157,6 +158,12 @@ class OsmiumCLIFetcher:
                     [override, '--version'], capture_output=True, timeout=5)
                 return result.returncode == 0
 
+            if tool_name == 'osmium':
+                command = self._get_osmium_command()
+                result = subprocess.run(
+                    command + ['--version'], capture_output=True, timeout=10)
+                return result.returncode == 0
+
             if self.conda_env_path:
                 # Try both Scripts and Library/bin directories
                 conda_dirs = [
@@ -227,6 +234,42 @@ class OsmiumCLIFetcher:
                 return result.returncode == 0
         except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
             return False
+
+    def _get_osmium_command(self) -> list:
+        """Resolve native osmium or the bundled pyosmium backend.
+
+        The bundled entry must run under the *current* Python interpreter.
+        Relying on ``#!/usr/bin/env python3`` can select a system Python which
+        does not have pyosmium even though the active pipeline environment does.
+        """
+        override = os.environ.get('OSMIUM_BIN')
+        if override and os.path.isfile(override) and os.access(override, os.X_OK):
+            return [override]
+
+        candidate = self._get_tool_path('osmium')
+        if candidate != 'osmium':
+            return [candidate]
+
+        import shutil
+        native = shutil.which('osmium')
+        bundled_entry = os.path.abspath(os.path.join(
+            os.path.dirname(__file__), '..', '..', '..', 'tools', 'osmium'))
+        bundled_backend = os.path.join(os.path.dirname(bundled_entry),
+                                       'osmium_pyosmium.py')
+        if native and os.path.realpath(native) != os.path.realpath(bundled_entry):
+            return [native]
+
+        try:
+            import osmium  # noqa: F401 - availability probe for current Python
+        except ImportError:
+            if native:
+                return [native]
+            return ['osmium']
+        if os.path.isfile(bundled_backend):
+            return [sys.executable, bundled_backend]
+        if native:
+            return [native]
+        return ['osmium']
     
     def _get_tool_path(self, tool_name: str) -> str:
         """获取工具的完整路径"""
@@ -763,19 +806,19 @@ class OsmiumCLIFetcher:
         else:
             flags = 0
 
-        osmium_path = self._get_tool_path('osmium')
+        osmium_command = self._get_osmium_command()
 
         # 判断是否使用 relation-first 管线
         use_relation_first = tag_type in self.RELATION_FIRST_TYPES
 
         if use_relation_first:
             return self._run_relation_first_pipeline(
-                osmium_path, pbf_file, tag_type, south, west, north, east,
+                osmium_command, pbf_file, tag_type, south, west, north, east,
                 output_path, temp_dir, base_name, flags
             )
         else:
             return self._run_standard_pipeline(
-                osmium_path, pbf_file, tag_type, south, west, north, east,
+                osmium_command, pbf_file, tag_type, south, west, north, east,
                 output_path, temp_dir, base_name, flags
             )
 
@@ -830,7 +873,7 @@ class OsmiumCLIFetcher:
         return True
 
     def _run_standard_pipeline(
-        self, osmium_path, pbf_file, tag_type, south, west, north, east,
+        self, osmium_command, pbf_file, tag_type, south, west, north, east,
         output_path, temp_dir, base_name, flags
     ) -> bool:
         """标准管线：extract → tags-filter → export → (ogr2ogr clip for water)"""
@@ -843,8 +886,9 @@ class OsmiumCLIFetcher:
         # Step 1: bbox 裁剪（水体用 -s smart 保留跨 bbox 的完整 way/relation）
         area_pbf = os.path.join(temp_dir, f"{base_name}_area.pbf")
 
+        osmium_label = ' '.join(osmium_command)
         cmd1 = [
-            osmium_path, 'extract',
+            *osmium_command, 'extract',
             '-b', bbox_str,
         ]
         if is_water:
@@ -856,9 +900,9 @@ class OsmiumCLIFetcher:
         ])
 
         smart_label = ' -s smart' if is_water else ''
-        logger.info(f"Step 1: {osmium_path} extract -b {bbox_str}{smart_label}")
+        logger.info(f"Step 1: {osmium_label} extract -b {bbox_str}{smart_label}")
         print(f"  [Step 1/{n_steps}] osmium extract (clipping area){' (smart mode)' if is_water else ''}...")
-        print(f"           Command: {osmium_path} extract -b {bbox_str}{smart_label} {pbf_file} -o {area_pbf} --overwrite")
+        print(f"           Command: {osmium_label} extract -b {bbox_str}{smart_label} {pbf_file} -o {area_pbf} --overwrite")
         t1 = time.time()
         result1 = None
         for attempt in range(3):
@@ -889,16 +933,16 @@ class OsmiumCLIFetcher:
             return False
 
         cmd2 = [
-            osmium_path, 'tags-filter',
+            *osmium_command, 'tags-filter',
             area_pbf,
         ] + filter_expr.split() + [
             '-o', filtered_pbf,
             '--overwrite'
         ]
 
-        logger.info(f"Step 2: {osmium_path} tags-filter {filter_expr}")
+        logger.info(f"Step 2: {osmium_label} tags-filter {filter_expr}")
         print(f"  [Step 2/{n_steps}] osmium tags-filter (filtering {tag_type} features)...")
-        print(f"           Command: {osmium_path} tags-filter {area_pbf} {filter_expr} -o {filtered_pbf} --overwrite")
+        print(f"           Command: {osmium_label} tags-filter {area_pbf} {filter_expr} -o {filtered_pbf} --overwrite")
         t2 = time.time()
         result2 = subprocess.run(cmd2, capture_output=True, timeout=300, creationflags=flags)
         elapsed2 = time.time() - t2
@@ -923,16 +967,16 @@ class OsmiumCLIFetcher:
             raw_geojson = output_path
 
         cmd3 = [
-            osmium_path, 'export',
+            *osmium_command, 'export',
             filtered_pbf,
             '-o', raw_geojson,
             '-f', 'geojson',
             '--overwrite'
         ]
 
-        logger.info(f"Step 3: {osmium_path} export -f geojson")
+        logger.info(f"Step 3: {osmium_label} export -f geojson")
         print(f"  [Step 3/{n_steps}] osmium export (converting to GeoJSON)...")
-        print(f"           Command: {osmium_path} export {filtered_pbf} -o {raw_geojson} -f geojson --overwrite")
+        print(f"           Command: {osmium_label} export {filtered_pbf} -o {raw_geojson} -f geojson --overwrite")
         t3 = time.time()
         # The portable Python-backed osmium fallback is much slower than the
         # native C++ tool on dense extracts. Scale the export budget with the
@@ -1026,7 +1070,7 @@ class OsmiumCLIFetcher:
         return True
 
     def _run_relation_first_pipeline(
-        self, osmium_path, pbf_file, tag_type, south, west, north, east,
+        self, osmium_command, pbf_file, tag_type, south, west, north, east,
         output_path, temp_dir, base_name, flags
     ) -> bool:
         """Relation-first 管线：tags-filter → export → ogr2ogr clip
@@ -1044,8 +1088,9 @@ class OsmiumCLIFetcher:
 
         # Step 1a: extract 裁剪区域（避免对完整国家 PBF 做 tags-filter 触发 zlib buffer error）
         area_pbf = os.path.join(temp_dir, f"{base_name}_{tag_type}_area.pbf")
+        osmium_label = ' '.join(osmium_command)
         cmd_extract = [
-            osmium_path, 'extract',
+            *osmium_command, 'extract',
             '-b', bbox_str,
             '-s', 'smart',
             pbf_file,
@@ -1053,7 +1098,7 @@ class OsmiumCLIFetcher:
             '--overwrite'
         ]
 
-        logger.info(f"Step 1a: {osmium_path} extract -b {bbox_str}")
+        logger.info(f"Step 1a: {osmium_label} extract -b {bbox_str}")
         print(f"  [Step 1/3] osmium extract → tags-filter (extract area then filter {tag_type})...")
         print(f"           Extract: osmium extract -b {bbox_str} -s smart {pbf_file}")
         t1 = time.time()
@@ -1079,7 +1124,7 @@ class OsmiumCLIFetcher:
         # Step 1b: tags-filter 在裁切后的小文件上（不会触发 buffer error）
         filtered_pbf = os.path.join(temp_dir, f"{base_name}_{tag_type}_full.pbf")
         cmd1 = [
-            osmium_path, 'tags-filter',
+            *osmium_command, 'tags-filter',
             area_pbf,
         ] + filter_expr.split() + [
             '-o', filtered_pbf,
@@ -1107,16 +1152,16 @@ class OsmiumCLIFetcher:
         full_geojson = os.path.join(temp_dir, f"{base_name}_{tag_type}_full.geojson")
 
         cmd2 = [
-            osmium_path, 'export',
+            *osmium_command, 'export',
             filtered_pbf,
             '-o', full_geojson,
             '-f', 'geojson',
             '--overwrite'
         ]
 
-        logger.info(f"Step 2: {osmium_path} export -f geojson")
+        logger.info(f"Step 2: {osmium_label} export -f geojson")
         print(f"  [Step 2/3] osmium export (converting to GeoJSON)...")
-        print(f"           Command: {osmium_path} export {filtered_pbf} -o {full_geojson} -f geojson --overwrite")
+        print(f"           Command: {osmium_label} export {filtered_pbf} -o {full_geojson} -f geojson --overwrite")
         t2 = time.time()
         result2 = subprocess.run(cmd2, capture_output=True, timeout=120, creationflags=flags)
         elapsed2 = time.time() - t2
@@ -1228,8 +1273,8 @@ def sample_building_density(
     """
     import re, shutil, time as _time
     fetcher = get_cli_fetcher()
-    osmium_path = fetcher._get_tool_path('osmium')
-    if not osmium_path:
+    osmium_command = fetcher._get_osmium_command()
+    if not fetcher.osmium_available:
         return {'count_est': 0, 'area_km2': 0, 'density': 0, 'should_filter': False}
 
     t0 = _time.time()
@@ -1242,19 +1287,19 @@ def sample_building_density(
     try:
         # Step 1: osmium extract (bbox clip)
         subprocess.run([
-            osmium_path, 'extract',
+            *osmium_command, 'extract',
             '-b', f'{west},{south},{east},{north}', '-s', 'smart',
             pbf_file, '-o', area_pbf, '--overwrite'
         ], capture_output=True, timeout=120, check=True, creationflags=flags)
         # Step 2: osmium tags-filter (building only)
         subprocess.run([
-            osmium_path, 'tags-filter',
+            *osmium_command, 'tags-filter',
             area_pbf, 'nwr/building',
             '-o', bldg_pbf, '--overwrite'
         ], capture_output=True, timeout=60, check=True, creationflags=flags)
         # Step 3: osmium fileinfo -e (text format) → parse "Number of ways"
         info = subprocess.run([
-            osmium_path, 'fileinfo', '-e', bldg_pbf
+            *osmium_command, 'fileinfo', '-e', bldg_pbf
         ], capture_output=True, text=True, timeout=30, creationflags=flags)
         if info.returncode == 0:
             # Parse "Number of ways: 36118" from text output
