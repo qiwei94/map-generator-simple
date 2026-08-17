@@ -24,6 +24,7 @@ from aesthetic.presets import CityPreset, register_preset
 from aesthetic.rerun_harness import CityHarness
 from aesthetic.review_render import render_review_bundle
 from _TEXTURE_STYLE_OF_DEEPSEEK.render_glb import render_glb_preview
+from _TEXTURE_STYLE_OF_DEEPSEEK.design_spec import write_design_spec
 
 
 def _args():
@@ -120,10 +121,7 @@ def main() -> int:
             "water_polygons": len(layers.WL) + len(layers.WO),
         },
     }
-    (out_dir / "design_spec.json").write_text(
-        json.dumps(design_spec, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    write_design_spec(out_dir, design_spec)
     print(f"[fast-draft] done in {time.time() - started:.1f}s: {glb_path}")
     return 0
 

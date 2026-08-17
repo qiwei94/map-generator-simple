@@ -39,6 +39,9 @@ from _TEXTURE_STYLE_OF_DEEPSEEK.vegetation_exclusion import build_deepseek_veget
 from _TEXTURE_STYLE_OF_DEEPSEEK.block_base import build_deepseek_block_base_v3
 from _TEXTURE_STYLE_OF_DEEPSEEK._layer_preprocess import preprocess_layers
 from _TEXTURE_STYLE_OF_DEEPSEEK.exporter import export_deepseek_3mf, split_terrain_mesh
+from _TEXTURE_STYLE_OF_DEEPSEEK.design_spec import (
+    build_design_spec, layer_evidence, write_design_spec,
+)
 from _TEXTURE_STYLE_OF_DEEPSEEK.config import compute_scale, WATERWAY_WIDTHS, TERRAIN_GRID, get_area_class, BUILDING_V2_HOTSPOT_RELAX
 
 # ---------------------------------------------------------------------------
@@ -621,6 +624,7 @@ def main():
     # Stage 3e: Auto-parameter detection (optional)
     # =====================================================================
     auto_resolved = None  # will be set if --auto-params
+    profile = None
     style_overrides = {}  # from --params-json (画廊风格参数)
     if cli_args.params_json:
         with open(cli_args.params_json, 'r', encoding='utf-8') as f:
@@ -1214,6 +1218,46 @@ def main():
     _timestamp = datetime.now().strftime("%m%d_%H%M")
     output_path = os.path.join(OUTPUT_DIR, f"full_{CITY_NAME}{_suffix}_{_timestamp}.3mf")
     export_deepseek_3mf(meshes, output_path)
+
+    # DesignSpec is an audit sidecar for the exact exported artifact.  It is
+    # intentionally written only after a successful 3MF export and does not
+    # participate in geometry generation.
+    _source_features = {
+        "buildings": len(buildings_gdf) if buildings_gdf is not None else 0,
+        "roads": len(roads_gdf) if roads_gdf is not None else 0,
+        "water": len(water_gdf) if water_gdf is not None else 0,
+        "vegetation": len(vegetation_gdf) if vegetation_gdf is not None else 0,
+        "landuse": len(landuse_gdf) if landuse_gdf is not None else 0,
+    }
+    _resolved_params = auto_resolved.to_dict() if auto_resolved is not None else {}
+    _decisions = (auto_resolved.reasons if auto_resolved is not None else {})
+    _profile = profile.to_dict() if profile is not None else {}
+    _block_base_enabled = not cli_args.no_block_base
+    _design_spec = build_design_spec(
+        city=CITY_NAME,
+        bbox_wgs84=(south, west, north, east),
+        artifact_path=output_path,
+        params={**_resolved_params, **style_overrides},
+        decisions=_decisions,
+        profile=_profile,
+        source_features=_source_features,
+        printable_features=layer_evidence(layers),
+        block_base={
+            "requested_mode": "textured" if _block_base_enabled else "off",
+            "resolved_mode": "textured" if _block_base_enabled else "off",
+            "policy_version": "legacy-explicit-v1",
+            "reason": ("enabled by the selected legacy visual profile"
+                       if _block_base_enabled else "explicitly disabled by CLI"),
+            "metrics": {
+                "polygon_count": len(layers.block_base),
+                "osm_quality": _profile.get("osm_quality"),
+                "building_density_per_km2": _profile.get("building_density"),
+            },
+            "thresholds": {},
+        },
+    )
+    _design_spec_path = write_design_spec(OUTPUT_DIR, _design_spec)
+    print(f"  DesignSpec: {_design_spec_path}")
 
     file_size = os.path.getsize(output_path) / (1024 * 1024)
     print(f"\n  Exported: {output_path}")
