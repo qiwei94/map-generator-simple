@@ -1563,6 +1563,14 @@ function renderDownloads() {
     a.innerHTML = '<span class="dl-name">🖼 旅程纪念平面图 PNG（高清）</span><span class="meta">查看</span>';
     dls.appendChild(a);
   }
+  if (art.design_spec) {
+    const a = document.createElement("a");
+    a.className = "dl-item";
+    a.href = art.design_spec.url;
+    a.download = art.design_spec.name || "design_spec.json";
+    a.innerHTML = '<span class="dl-name">⚙️ Design Spec（生成参数与验收证据）</span><span class="meta">JSON</span>';
+    dls.appendChild(a);
+  }
 }
 
 function fmtDuration(s) {

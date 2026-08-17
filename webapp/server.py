@@ -608,7 +608,7 @@ def _scan_artifacts(city: str) -> dict:
     d = OUTPUT_DIR / city
     art = {"models_3mf": [], "draft_glb": None, "preview_png": None,
            "topdown_png": None, "height_png": None,
-           "param_decision": None}
+           "param_decision": None, "design_spec": None}
     if not d.is_dir():
         return art
     for p in sorted(d.glob("*.3mf"), key=lambda p: p.stat().st_mtime,
@@ -651,6 +651,12 @@ def _scan_artifacts(city: str) -> dict:
             art["param_decision"] = json.loads(pd.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             pass
+    ds = d / "design_spec.json"
+    if ds.exists():
+        art["design_spec"] = {
+            "url": f"/files/{city}/{ds.name}",
+            "name": ds.name,
+        }
     return art
 
 
