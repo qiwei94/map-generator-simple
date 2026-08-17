@@ -272,7 +272,15 @@ def _job_progress(job: dict, log_tail: str) -> tuple[int, str]:
     if status == "failed":
         return int(job.get("progress_pct", 0)), "生成未完成"
 
-    if job.get("mode") == "styles":
+    if job.get("fast_draft"):
+        stages = (
+            ("[glb] exported:", 97, "正在整理可旋转预览"),
+            ("[postcheck] PASS", 92, "正在检查图层与地形接触关系"),
+            ("[glb] block_base:", 76, "正在构建轻量 3D 图层"),
+            ("[cache HIT] preprocess", 62, "已复用风格图层，准备 3D 预览"),
+            ("[fast-draft] reopening", 18, "正在载入刚才选定的风格数据"),
+        )
+    elif job.get("mode") == "styles":
         stages = (
             ("contact sheet:", 98, "正在整理四种风格方案"),
             ("/minimal]", 95, "正在渲染第 4 种风格"),
@@ -313,6 +321,8 @@ def _job_duration_hint(job: dict) -> str:
     if job.get("mode") == "styles":
         return "首次生成通常需要 8–12 分钟；相同区域会直接复用"
     if job.get("mode") == "draft":
+        if job.get("fast_draft"):
+            return "复用风格数据后通常约 1–3 分钟；复杂山水区域可能更久"
         return "通常需要 5–15 分钟"
     if job.get("generation_profile") in ("quality_flat", "quality_textured"):
         return "精细模型通常需要 20–45 分钟"
@@ -1206,6 +1216,7 @@ def api_generate(req: GenerateRequest):
         raise HTTPException(400, f"未知生成方式: {profile}")
 
     quality_profile = profile in ("quality_flat", "quality_textured")
+    fast_draft_context = None
     if quality_profile:
         if req.area is not None or req.city != "westlake":
             raise HTTPException(400, "精细模型目前只支持‘杭州 · 西湖’预设")
@@ -1246,6 +1257,7 @@ def api_generate(req: GenerateRequest):
         pbf = st["pbf"]
         city = _custom_slug(bbox)
         city_title = req.area.name.strip() or "自定义区域"
+        fast_draft_context = {"bbox": bbox, "pbf": pbf}
         base_cmd = [sys.executable, "generate_city_legacy.py",
                     "--bbox", f"{s},{w},{n},{e}", "--pbf", pbf,
                     "--city", city, "--auto-params"]
@@ -1274,6 +1286,7 @@ def api_generate(req: GenerateRequest):
         pbf = st["pbf"]
         city = req.city
         city_title = lm_info["title"]
+        fast_draft_context = {"bbox": bbox, "pbf": pbf}
         base_cmd = [sys.executable, "generate_city_legacy.py",
                     "--bbox", f"{s},{w},{n},{e}", "--pbf", pbf,
                     "--city", city, "--auto-params"]
@@ -1311,15 +1324,37 @@ def api_generate(req: GenerateRequest):
 
     # 画廊风格参数 → 落盘 JSON → --params-json（管线内最高优先级覆盖）
     params_path = None
+    gallery_meta = None
     if req.style and not quality_profile:
-        meta = _load_gallery(city)
-        if not meta or req.style not in meta.get("styles", {}):
+        gallery_meta = _load_gallery(city)
+        if not gallery_meta or req.style not in gallery_meta.get("styles", {}):
             raise HTTPException(400, f"{city} 无风格: {req.style}")
-        params = meta["styles"][req.style].get("params", {})
+        params = gallery_meta["styles"][req.style].get("params", {})
         params_path = JOB_LOG_DIR / f"{job_id}_params.json"
         params_path.write_text(json.dumps(params, ensure_ascii=False, indent=2),
                                encoding="utf-8")
         cmd += ["--params-json", str(params_path)]
+
+    # 用户刚完成风格画廊时，快速预览直接复用同一个 CityHarness cache。
+    # 这条路径不再提取 draft 不消费的 landuse，也不重复生成诊断 PNG。
+    fast_draft = bool(
+        req.mode == "draft" and req.style and fast_draft_context
+        and gallery_meta and params_path
+    )
+    if fast_draft:
+        fast_bbox = fast_draft_context["bbox"]
+        cmd = [
+            sys.executable, "tools/generate_gallery_draft.py",
+            "--bbox", ",".join(str(value) for value in fast_bbox),
+            "--pbf", fast_draft_context["pbf"],
+            "--city", city,
+            "--prototype", gallery_meta.get("prototype", "landscape"),
+            "--scene-type", gallery_meta.get("scene_type", "urban"),
+            "--params-json", str(params_path),
+        ]
+        for mk in req.markers:
+            if len(mk) == 2:
+                cmd += ["--marker", f"{mk[0]},{mk[1]}"]
 
     env = os.environ.copy()
     env["PYTHONIOENCODING"] = "utf-8"
@@ -1331,6 +1366,7 @@ def api_generate(req: GenerateRequest):
         job = {"id": job_id, "city": city, "city_title": city_title,
                "mode": req.mode, "style": req.style,
                "generation_profile": profile, "exec": "worker",
+               "fast_draft": fast_draft,
                "request_key": request_key,
                "log_path": str(log_path), "status": "pending",
                "started": time.time(), "ended": None,
@@ -1350,6 +1386,7 @@ def api_generate(req: GenerateRequest):
     job = {"id": job_id, "city": city, "city_title": city_title,
            "mode": req.mode, "style": req.style,
            "generation_profile": profile, "exec": "local",
+           "fast_draft": fast_draft,
            "request_key": request_key,
            "log_path": str(log_path), "status": "starting",
            "started": time.time(), "ended": None}

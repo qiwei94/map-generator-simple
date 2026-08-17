@@ -62,6 +62,36 @@ def test_classic_profile_keeps_legacy_entry():
     assert "--draft" in job["spec"]["cmd"]
 
 
+def test_custom_draft_reuses_selected_gallery_cache(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "OUTPUT_DIR", tmp_path / "output")
+    monkeypatch.setattr(server, "_pbf_status", lambda bbox: {
+        "state": "local", "pbf": "pbf_cache/zhejiang-latest.osm.pbf",
+        "region": "zhejiang", "fetch": None,
+    })
+    monkeypatch.setattr(server, "_load_gallery", lambda city: {
+        "prototype": "landscape",
+        "scene_type": "water_landscape",
+        "styles": {"baseline": {"params": {
+            "road_width_multiplier": 2.0,
+        }}},
+    })
+
+    response = server.api_generate(server.GenerateRequest(
+        mode="draft", style="baseline", generation_profile="classic",
+        area=server.CustomArea(
+            bbox=[29.5372, 118.89, 29.6728, 119.045], name="千岛湖"),
+    ))
+
+    job = _queued_job(response)
+    cmd = job["spec"]["cmd"]
+    assert cmd[1] == "tools/generate_gallery_draft.py"
+    assert "--scene-type" in cmd
+    assert cmd[cmd.index("--scene-type") + 1] == "water_landscape"
+    assert "--png" not in cmd
+    assert job["fast_draft"] is True
+    assert "1–3 分钟" in server._job_duration_hint(job)
+
+
 @pytest.mark.parametrize(
     "generation_request",
     [

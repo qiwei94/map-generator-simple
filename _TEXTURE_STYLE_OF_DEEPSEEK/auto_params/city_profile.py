@@ -173,7 +173,12 @@ def _detect_water_ratio(water_gdf, bbox_area_m2: float) -> float:
     if not polygon_mask.any():
         return 0.0
 
-    water_area = water_gdf.loc[polygon_mask, "geometry"].area.sum()
+    # Multiple sources can overlap (OSM + secondary imagery). Summing areas
+    # double-counts those overlaps and can turn a lake into >100% coverage.
+    from shapely.ops import unary_union
+    geoms = [g for g in water_gdf.loc[polygon_mask, "geometry"]
+             if g is not None and not g.is_empty]
+    water_area = unary_union(geoms).area if geoms else 0.0
     return min(1.0, water_area / bbox_area_m2)
 
 
