@@ -478,9 +478,20 @@ async function confirmArea() {
     state.job = { id: r.job_id, mode: "styles", city: r.slug, slug: r.slug };
     state.pendingArea = { bbox, slug: r.slug };
     $("jobPanel").hidden = false;
-    $("jobStatus").textContent = "生成 4 种风格的平面图中";
+    $("jobStatus").textContent = r.cached
+      ? "已找到该区域的现成结果"
+      : (r.reused ? "相同区域正在生成，已接入现有任务" : "生成 4 种风格的平面图中");
     $("jobStatus").className = "pill";
-    $("galleryHint").textContent = "正在生成…约 1 分钟";
+    $("galleryHint").textContent = r.cached
+      ? "正在载入…"
+      : (r.reused
+        ? "已接入相同区域的生成任务，完成后会自动显示"
+        : "正在分析地图并生成 4 种风格，预计 8–12 分钟，请耐心等待");
+    renderJobProgress({
+      progress_pct: r.cached ? 100 : 2,
+      duration_hint: "首次生成通常需要 8–12 分钟；相同区域会直接复用",
+    });
+    showJobToken(r.job_id);
     lockView();   // 任务已开始，锁定取景框
     pollJob();
   } catch (err) {
@@ -1145,14 +1156,14 @@ function syncGenerationProfileAvailability() {
 
   const quality = state.generationProfile !== "classic";
   $("profileNote").textContent = available
-    ? "西湖质量模式已开放：直接生成当前高质量 25km 正式模型；平整与纹理输出相互独立。"
-    : "质量模式仅在“杭州 · 西湖”预设中开放；其他区域继续使用经典通用模式。";
+    ? "精细模型已开放：直接生成 25km 正式模型；两种街区表现会分别保存。"
+    : "精细模型暂在“杭州 · 西湖”开放；其他区域使用标准生成。";
   $("profileNote").classList.toggle("available", available);
   $("btnDraft").disabled = !!state.job || quality;
-  $("btnDraft").title = quality ? "质量模式直接生成正式 3MF" : "";
+  $("btnDraft").title = quality ? "精细模型直接生成正式文件" : "";
   $("fullModeHint").textContent = quality
-    ? `${state.generationProfile === "quality_flat" ? "平整填充" : "纹理填充"} · 3MF + PNG`
-    : "经典通用 · 3MF + PNG";
+    ? `${state.generationProfile === "quality_flat" ? "平整街区" : "地块起伏"} · 模型 + 预览图`
+    : "标准生成 · 模型 + 预览图";
 }
 
 $("profilePicker").addEventListener("change", (event) => {
@@ -1170,7 +1181,7 @@ $("profilePicker").addEventListener("change", (event) => {
 function buildRequest(mode) {
   const body = { mode, generation_profile: state.generationProfile };
   if (mode === "draft" && state.generationProfile !== "classic") {
-    throw new Error("西湖质量模式直接生成正式打印文件，不提供快速预览");
+    throw new Error("精细模型直接生成正式打印文件，不提供快速预览");
   }
   if (state.target.kind === "preset") {
     body.city = state.target.city;
@@ -1213,10 +1224,20 @@ async function startJob(mode) {
       ? ` · ${body.markers.length} 处标注` : "";
     const styleLabel = body.style && state.gallery
       ? ` · ${state.gallery.styles[body.style].label}` : "";
-    $("jobStatus").textContent =
-      (mode === "draft" ? "生成 3D 预览中" : "生成打印模型中") + styleLabel + extra;
+    const baseStatus = resp.cached
+      ? "已找到相同配置的现成模型"
+      : (resp.reused
+        ? "相同配置正在生成，已接入现有任务"
+        : (mode === "draft" ? "生成 3D 预览中" : "生成打印模型中"));
+    $("jobStatus").textContent = baseStatus + styleLabel + extra;
     $("jobStatus").className = "pill";
     $("jobStage").textContent = "正在准备地图与高程数据";
+    renderJobProgress({
+      progress_pct: resp.cached ? 100 : 2,
+      duration_hint: mode === "draft"
+        ? "通常需要 5–15 分钟"
+        : "正式模型通常需要 15–40 分钟",
+    });
     showJobToken(resp.job_id);
     setBusy(true);
     pollJob();
@@ -1255,11 +1276,25 @@ async function fetchPbf(region) {
   }
 }
 
+function renderJobProgress(job) {
+  const pct = Math.max(0, Math.min(100, Math.round(job.progress_pct || 0)));
+  const progress = $("jobProgress");
+  progress.setAttribute("aria-valuenow", String(pct));
+  $("jobProgressBar").style.width = `${pct}%`;
+  $("jobProgressText").textContent = pct >= 100
+    ? "已完成"
+    : `阶段进度（估算）${pct}%`;
+  $("jobEstimate").textContent = job.duration_hint
+    ? `${job.duration_hint} · 可复制任务链接稍后回来`
+    : "正在估算耗时，请耐心等待";
+}
+
 async function pollJob() {
   if (!state.job) return;
   try {
     const j = await fetchJSON(`/api/jobs/${state.job.id}`);
     $("jobElapsed").textContent = fmtDuration(j.elapsed_s);
+    renderJobProgress(j);
     // 运行日志不外露；只展示友好状态，失败时显示归类后的异常提示
     const hint = $("jobHint");
     renderQualityChecks(j.quality_checks || []);
@@ -1363,13 +1398,28 @@ function parseJobToken(input) {
 function showJobToken(job_id) {
   $("jobTokenRow").hidden = false;
   $("jobToken").textContent = job_id;
+  $("jobLookup").value = job_id;
+  const taskUrl = new URL(location.href);
+  taskUrl.searchParams.set("job", job_id);
+  history.replaceState({}, "", taskUrl);
   $("btnCopyJob").onclick = () => {
-    const url = `${location.origin}${location.pathname}?job=${job_id}`;
+    const url = taskUrl.toString();
     const done = () => { $("btnCopyJob").textContent = "已复制✓";
       setTimeout(() => { $("btnCopyJob").textContent = "复制链接"; }, 1500); };
+    const fallbackCopy = () => {
+      const input = document.createElement("textarea");
+      input.value = url;
+      input.style.position = "fixed";
+      input.style.opacity = "0";
+      document.body.appendChild(input);
+      input.select();
+      document.execCommand("copy");
+      input.remove();
+      done();
+    };
     if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(url).then(done);
-    } else { done(); }
+      navigator.clipboard.writeText(url).then(done).catch(fallbackCopy);
+    } else { fallbackCopy(); }
   };
 }
 

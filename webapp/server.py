@@ -158,6 +158,8 @@ app = FastAPI(title="Map Relief Studio")
 # ---------------------------------------------------------------------------
 JOBS: dict = {}
 JOBS_LOCK = threading.Lock()
+JOB_SUBMIT_LOCK = threading.Lock()
+_ACTIVE_JOB_STATUSES = {"starting", "pending", "running"}
 
 
 class CustomArea(BaseModel):
@@ -176,20 +178,20 @@ class GenerateRequest(BaseModel):
 
 GENERATION_PROFILES = {
     "classic": {
-        "label": "经典通用",
-        "description": "支持所有区域与快速 3D 预览，使用通用城市管线。",
+        "label": "标准生成",
+        "description": "适用于所有区域，可先生成快速 3D 预览。",
         "scope": "all",
         "draft": True,
     },
     "quality_flat": {
-        "label": "西湖质量 · 平整填充",
-        "description": "当前高质量西湖管线，采用平整街区填充与 2mm 边缘退让。",
+        "label": "精细模型 · 平整街区",
+        "description": "街区轮廓清晰克制，并与道路、岸线保持自然留白。",
         "scope": "westlake",
         "draft": False,
     },
     "quality_textured": {
-        "label": "西湖质量 · 纹理填充",
-        "description": "当前高质量西湖管线，保留不同地块的语义起伏。",
+        "label": "精细模型 · 地块起伏",
+        "description": "保留不同地块的细微高低变化，触感更丰富。",
         "scope": "westlake",
         "draft": False,
     },
@@ -254,30 +256,67 @@ def _read_job_log_tail(job: dict, max_bytes: int = 20_000) -> str:
         return ""
 
 
-def _job_stage_label(job: dict, log_tail: str) -> str:
-    if job.get("status") == "pending":
-        return "等待计算节点接单"
-    if job.get("status") == "done":
-        return "模型与交付文件已经生成"
-    if job.get("status") == "failed":
-        return "生成未完成"
+def _job_progress(job: dict, log_tail: str) -> tuple[int, str]:
+    """Estimate coarse progress from real pipeline markers.
 
-    stages = (
-        ("Exported:", "正在整理与验证交付文件"),
-        ("[Stage 5", "正在构建可打印模型几何"),
-        ("[Stage 4.8]", "正在生成可旋转 3D 预览"),
-        ("[Stage 4.65]", "正在渲染高清俯视图"),
-        ("[Stage 4.6]", "正在渲染图层诊断图"),
-        ("[Stage 4.5]", "正在整理道路、建筑与水体图层"),
-        ("[Stage 4]", "正在构建地形与水体结构"),
-        ("[Stage 3", "正在读取城市地图要素"),
-        ("[Stage 2", "正在提取区域地图数据"),
-        ("[Stage 1", "正在准备高程数据"),
-    )
-    for marker, label in stages:
+    Percentages deliberately move in broad stages: they communicate that the
+    process is alive without pretending we can measure geometry work exactly.
+    """
+    status = job.get("status")
+    if status in ("starting", "pending"):
+        return 2, "等待计算节点开始处理"
+    if status == "done":
+        label = ("风格方案已经生成" if job.get("mode") == "styles"
+                 else "模型与交付文件已经生成")
+        return 100, label
+    if status == "failed":
+        return int(job.get("progress_pct", 0)), "生成未完成"
+
+    if job.get("mode") == "styles":
+        stages = (
+            ("contact sheet:", 98, "正在整理四种风格方案"),
+            ("/minimal]", 95, "正在渲染第 4 种风格"),
+            ("/dense_detail]", 92, "正在渲染第 3 种风格"),
+            ("/block_fill]", 89, "正在渲染第 2 种风格"),
+            ("/baseline]", 86, "正在渲染第 1 种风格"),
+            ("[harness] prepared", 82, "地图要素已整理，准备渲染风格"),
+            ("[Tile Cache] vegetation:", 64, "正在提取绿地与地表信息"),
+            ("[Tile Cache] water:", 44, "正在提取湖泊与河流信息"),
+            ("[Tile Cache] road:", 25, "正在提取道路网络"),
+            ("[Tile Cache] building:", 8, "正在提取建筑与街区"),
+            ("[area-gallery]", 4, "正在准备所选区域的地图数据"),
+        )
+    else:
+        stages = (
+            ("Exported:", 97, "正在整理与验证交付文件"),
+            ("[Stage 5", 90, "正在构建可打印模型几何"),
+            ("[Stage 4.8]", 83, "正在生成可旋转 3D 预览"),
+            ("[Stage 4.65]", 76, "正在渲染高清俯视图"),
+            ("[Stage 4.6]", 70, "正在渲染图层诊断图"),
+            ("[Stage 4.5]", 62, "正在整理道路、建筑与水体图层"),
+            ("[Stage 4]", 50, "正在构建地形与水体结构"),
+            ("[Stage 3", 35, "正在读取城市地图要素"),
+            ("[Stage 2", 20, "正在提取区域地图数据"),
+            ("[Stage 1", 10, "正在准备高程数据"),
+        )
+    for marker, progress, label in stages:
         if marker in log_tail:
-            return label
-    return "正在准备地图与高程数据"
+            return progress, label
+    return 3, "正在准备地图与高程数据"
+
+
+def _job_stage_label(job: dict, log_tail: str) -> str:
+    return _job_progress(job, log_tail)[1]
+
+
+def _job_duration_hint(job: dict) -> str:
+    if job.get("mode") == "styles":
+        return "首次生成通常需要 8–12 分钟；相同区域会直接复用"
+    if job.get("mode") == "draft":
+        return "通常需要 5–15 分钟"
+    if job.get("generation_profile") in ("quality_flat", "quality_textured"):
+        return "精细模型通常需要 20–45 分钟"
+    return "正式模型通常需要 15–40 分钟"
 
 
 def _job_quality_warnings(log_tail: str) -> list[str]:
@@ -335,6 +374,7 @@ def _job_public(job: dict, include_log: bool = False) -> dict:
     失败时返回分类后的 error_code/error_msg，不返回原始日志。
     """
     elapsed = (job.get("ended") or time.time()) - job["started"]
+    public_status = "pending" if job["status"] == "starting" else job["status"]
     out = {
         "id": job["id"],
         "city": job["city"],
@@ -342,11 +382,14 @@ def _job_public(job: dict, include_log: bool = False) -> dict:
         "mode": job["mode"],
         "style": job.get("style"),
         "generation_profile": job.get("generation_profile", "classic"),
-        "status": job["status"],
+        "status": public_status,
         "elapsed_s": round(elapsed, 1),
     }
     log_tail = _read_job_log_tail(job)
-    out["stage_label"] = _job_stage_label(job, log_tail)
+    progress_pct, stage_label = _job_progress(job, log_tail)
+    out["stage_label"] = stage_label
+    out["progress_pct"] = progress_pct
+    out["duration_hint"] = _job_duration_hint(job)
     quality_warnings = _job_quality_warnings(log_tail)
     if quality_warnings:
         out["quality_warnings"] = quality_warnings
@@ -397,8 +440,75 @@ _COVERAGE_STATE_DIRTY = threading.Event()
 
 def _city_running(city: str) -> bool:
     with JOBS_LOCK:
-        return any(j["city"] == city and j["status"] == "running"
+        return any(j["city"] == city and
+                   j["status"] in _ACTIVE_JOB_STATUSES
                    for j in JOBS.values())
+
+
+def _request_key(kind: str, payload: dict) -> str:
+    """Return a stable identity for one shareable generation request."""
+    raw = json.dumps({"kind": kind, **payload}, ensure_ascii=False,
+                     sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
+
+
+def _job_artifacts_available(job: dict) -> bool:
+    """Only reuse a completed job while its expected output still exists."""
+    city = job["city"]
+    if job.get("mode") == "styles":
+        return bool(_load_gallery(city))
+    artifacts = _scan_artifacts(city)
+    if job.get("mode") == "draft":
+        return bool(artifacts["draft_glb"] or artifacts["preview_png"])
+    return bool(artifacts["models_3mf"])
+
+
+def _claim_or_reuse_job(job: dict) -> tuple[dict, bool, bool]:
+    """Atomically claim a city output slot or reuse an identical request.
+
+    Returns ``(job, reused, cached)``. Identical concurrent callers share one
+    job id; an identical completed request is returned from disk. A different
+    request for the same output directory must wait so two processes cannot
+    overwrite each other's artifacts.
+    """
+    city = job["city"]
+    request_key = job["request_key"]
+    output_group = "styles" if job.get("mode") == "styles" else "model"
+    with JOB_SUBMIT_LOCK:
+        with JOBS_LOCK:
+            city_jobs = sorted(
+                (existing for existing in JOBS.values()
+                 if existing.get("city") == city and
+                 ("styles" if existing.get("mode") == "styles" else
+                  "model") == output_group),
+                key=lambda existing: existing.get("started", 0),
+                reverse=True,
+            )
+            active = next(
+                (existing for existing in city_jobs
+                 if existing.get("status") in _ACTIVE_JOB_STATUSES),
+                None,
+            )
+            if active is not None:
+                if active.get("request_key") == request_key:
+                    return active, True, False
+                raise HTTPException(
+                    409, "该区域正在使用另一组参数生成，请等待当前任务完成",
+                )
+
+            latest_done = next(
+                (existing for existing in city_jobs
+                 if existing.get("status") == "done"),
+                None,
+            )
+            if (latest_done is not None and
+                    latest_done.get("request_key") == request_key and
+                    _job_artifacts_available(latest_done)):
+                return latest_done, True, True
+
+            JOBS[job["id"]] = job
+            _save_jobs()
+    return job, False, False
 
 
 def _fetch_running(region: str) -> bool:
@@ -460,7 +570,7 @@ def _load_jobs():
     except (OSError, json.JSONDecodeError):
         return
     for jid, j in data.items():
-        if j.get("status") == "running":
+        if j.get("status") in ("starting", "running"):
             if j.get("exec") == "worker":
                 j["status"] = "pending"
             else:
@@ -975,9 +1085,10 @@ def api_styles(req: StylesRequest):
         raise HTTPException(422, "该区域即将开放，敬请期待")
 
     slug = req.slug.strip() if req.slug.strip() else _custom_slug(bbox)
-    if _city_running(slug):
-        raise HTTPException(409, "该区域正在处理中")
-
+    request_key = _request_key("styles", {
+        "bbox": [round(value, 7) for value in bbox],
+        "prototype": req.prototype,
+    })
     job_id = uuid.uuid4().hex[:8]
     log_path = JOB_LOG_DIR / f"{job_id}_styles_{slug}.log"
     cmd = [sys.executable, "tools/gen_area_gallery.py",
@@ -988,36 +1099,58 @@ def api_styles(req: StylesRequest):
 
     env = os.environ.copy()
     env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUNBUFFERED"] = "1"
     env["PATH"] = str(ROOT / "tools") + os.pathsep + env.get("PATH", "")
 
     if WORKER_MODE:
         job = {"id": job_id, "city": slug,
                "city_title": req.name.strip() or "自定义区域",
                "mode": "styles", "style": None, "exec": "worker",
+               "request_key": request_key, "prototype": req.prototype,
+               "bbox": bbox,
                "log_path": str(log_path), "status": "pending",
                "started": time.time(), "ended": None,
                "spec": {"cmd": cmd, "cwd": str(ROOT), "env_extra": {
                    "PYTHONIOENCODING": "utf-8",
+                   "PYTHONUNBUFFERED": "1",
                    "PATH": env["PATH"]}}}
-        with JOBS_LOCK:
-            JOBS[job_id] = job
-            _save_jobs()
-        return {"job_id": job_id, "slug": slug, "queued": True}
+        claimed, reused, cached = _claim_or_reuse_job(job)
+        return {"job_id": claimed["id"], "slug": slug,
+                "queued": claimed["status"] == "pending",
+                "reused": reused, "cached": cached}
 
-    log_f = open(log_path, "w", encoding="utf-8")
-    proc = subprocess.Popen(cmd, cwd=str(ROOT), stdout=log_f,
-                            stderr=subprocess.STDOUT, env=env)
     job = {"id": job_id, "city": slug,
            "city_title": req.name.strip() or "自定义区域",
            "mode": "styles", "style": None, "exec": "local",
-           "proc": proc,
-           "log_path": str(log_path), "status": "running",
+           "request_key": request_key, "prototype": req.prototype,
+           "bbox": bbox,
+           "log_path": str(log_path), "status": "starting",
            "started": time.time(), "ended": None}
+    claimed, reused, cached = _claim_or_reuse_job(job)
+    if reused:
+        return {"job_id": claimed["id"], "slug": slug,
+                "queued": claimed["status"] in ("starting", "pending"),
+                "reused": True, "cached": cached}
+
+    try:
+        with open(log_path, "w", encoding="utf-8") as log_f:
+            proc = subprocess.Popen(cmd, cwd=str(ROOT), stdout=log_f,
+                                    stderr=subprocess.STDOUT, env=env)
+    except (OSError, subprocess.SubprocessError):
+        with JOBS_LOCK:
+            job["status"] = "failed"
+            job["ended"] = time.time()
+            job["error_code"] = "render_failed"
+            job["error_msg"] = "生成任务无法启动，请稍后重试"
+            _save_jobs()
+        raise HTTPException(500, "生成任务无法启动，请稍后重试")
     with JOBS_LOCK:
-        JOBS[job_id] = job
+        job["proc"] = proc
+        job["status"] = "running"
         _save_jobs()
     threading.Thread(target=_watch_job, args=(job,), daemon=True).start()
-    return {"job_id": job_id, "slug": slug}
+    return {"job_id": job_id, "slug": slug,
+            "reused": False, "cached": False}
 
 
 @app.get("/api/geocode")
@@ -1075,11 +1208,11 @@ def api_generate(req: GenerateRequest):
     quality_profile = profile in ("quality_flat", "quality_textured")
     if quality_profile:
         if req.area is not None or req.city != "westlake":
-            raise HTTPException(400, "西湖质量模式目前只支持‘杭州 · 西湖’预设")
+            raise HTTPException(400, "精细模型目前只支持‘杭州 · 西湖’预设")
         if req.mode != "full":
-            raise HTTPException(400, "西湖质量模式直接生成正式 3MF，不提供快速 draft")
+            raise HTTPException(400, "精细模型直接生成正式文件，不提供快速预览")
         if req.style:
-            raise HTTPException(400, "西湖质量模式使用已验证的固定视觉参数，不叠加旧画廊风格")
+            raise HTTPException(400, "精细模型使用已验证的固定视觉参数，不叠加画廊风格")
 
         block_mode = "flat" if profile == "quality_flat" else "textured"
         city = f"westlake_{profile}"
@@ -1153,9 +1286,13 @@ def api_generate(req: GenerateRequest):
     else:
         raise HTTPException(400, f"未知城市: {req.city}")
 
-    if _city_running(city):
-        raise HTTPException(409, f"{city_title} 已有任务在运行")
-
+    request_key = _request_key("generate", {
+        "city": city,
+        "mode": req.mode,
+        "style": req.style,
+        "generation_profile": profile,
+        "markers": req.markers,
+    })
     job_id = uuid.uuid4().hex[:8]
     log_path = JOB_LOG_DIR / f"{job_id}_{city}_{req.mode}.log"
     # draft 也出 2D 图：诊断图（带图例统计）+ 画廊级俯视图（无文字）
@@ -1173,6 +1310,7 @@ def api_generate(req: GenerateRequest):
                 cmd += ["--marker", f"{mk[0]},{mk[1]}"]
 
     # 画廊风格参数 → 落盘 JSON → --params-json（管线内最高优先级覆盖）
+    params_path = None
     if req.style and not quality_profile:
         meta = _load_gallery(city)
         if not meta or req.style not in meta.get("styles", {}):
@@ -1185,6 +1323,7 @@ def api_generate(req: GenerateRequest):
 
     env = os.environ.copy()
     env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUNBUFFERED"] = "1"
     env["PATH"] = str(ROOT / "tools") + os.pathsep + env.get("PATH", "")
 
     if WORKER_MODE:
@@ -1192,33 +1331,57 @@ def api_generate(req: GenerateRequest):
         job = {"id": job_id, "city": city, "city_title": city_title,
                "mode": req.mode, "style": req.style,
                "generation_profile": profile, "exec": "worker",
+               "request_key": request_key,
                "log_path": str(log_path), "status": "pending",
                "started": time.time(), "ended": None,
                "spec": {"cmd": cmd, "cwd": str(ROOT), "env_extra": {
                    "PYTHONIOENCODING": "utf-8",
+                   "PYTHONUNBUFFERED": "1",
                    "PATH": env["PATH"]}}}
-        with JOBS_LOCK:
-            JOBS[job_id] = job
-            _save_jobs()
-        return {"job_id": job_id, "city": city,
-                "generation_profile": profile, "queued": True}
+        claimed, reused, cached = _claim_or_reuse_job(job)
+        if reused and params_path is not None:
+            params_path.unlink(missing_ok=True)
+        return {"job_id": claimed["id"], "city": city,
+                "generation_profile": profile,
+                "queued": claimed["status"] == "pending",
+                "reused": reused, "cached": cached}
 
     # ── 本地模式：直接起子进程 ──
-    log_f = open(log_path, "w", encoding="utf-8")
-    proc = subprocess.Popen(cmd, cwd=str(ROOT), stdout=log_f,
-                            stderr=subprocess.STDOUT, env=env)
     job = {"id": job_id, "city": city, "city_title": city_title,
            "mode": req.mode, "style": req.style,
            "generation_profile": profile, "exec": "local",
-           "proc": proc,
-           "log_path": str(log_path), "status": "running",
+           "request_key": request_key,
+           "log_path": str(log_path), "status": "starting",
            "started": time.time(), "ended": None}
+    claimed, reused, cached = _claim_or_reuse_job(job)
+    if reused:
+        if params_path is not None:
+            params_path.unlink(missing_ok=True)
+        return {"job_id": claimed["id"], "city": city,
+                "generation_profile": profile,
+                "queued": claimed["status"] in ("starting", "pending"),
+                "reused": True, "cached": cached}
+
+    try:
+        with open(log_path, "w", encoding="utf-8") as log_f:
+            proc = subprocess.Popen(cmd, cwd=str(ROOT), stdout=log_f,
+                                    stderr=subprocess.STDOUT, env=env)
+    except (OSError, subprocess.SubprocessError):
+        with JOBS_LOCK:
+            job["status"] = "failed"
+            job["ended"] = time.time()
+            job["error_code"] = "render_failed"
+            job["error_msg"] = "生成任务无法启动，请稍后重试"
+            _save_jobs()
+        raise HTTPException(500, "生成任务无法启动，请稍后重试")
     with JOBS_LOCK:
-        JOBS[job_id] = job
+        job["proc"] = proc
+        job["status"] = "running"
         _save_jobs()
     threading.Thread(target=_watch_job, args=(job,), daemon=True).start()
     return {"job_id": job_id, "city": city,
-            "generation_profile": profile}
+            "generation_profile": profile,
+            "reused": False, "cached": False}
 
 
 @app.get("/api/generation-profiles")

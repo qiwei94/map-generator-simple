@@ -179,6 +179,20 @@ body {
 .pill.failed { background: rgba(217,119,98,.15); color: var(--danger); }
 .pill.done { background: rgba(224,164,88,.15); color: var(--accent); }
 #jobElapsed { font-size: 11px; color: var(--ink-dim); }
+.job-progress {
+  height: 8px; margin-top: 12px; overflow: hidden;
+  background: var(--bg-elev); border: 1px solid var(--line);
+}
+.job-progress span {
+  display: block; width: 0; height: 100%; background: var(--accent);
+  transition: width .55s ease;
+}
+.job-progress-meta {
+  display: flex; justify-content: space-between; gap: 16px;
+  margin-top: 7px; color: var(--ink-dim); font-size: 11px; line-height: 1.45;
+}
+#jobProgressText { color: var(--ink); white-space: nowrap; }
+.job-progress-meta span:last-child { text-align: right; }
 .job-token {
   display: flex; align-items: center; gap: 8px;
   margin-bottom: 8px; font-size: 12px; color: var(--ink-dim);
