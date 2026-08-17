@@ -443,21 +443,64 @@ def _split_point_touching_topology(
     groups: dict = {}
     for face_index in range(len(faces)):
         groups.setdefault(find(face_index), []).append(face_index)
-    if len(groups) == 1:
-        return points, faces
+    if len(groups) > 1:
+        split_points = []
+        split_faces = []
+        offset = 0
+        for indices in groups.values():
+            component_faces = faces[np.asarray(indices, dtype=np.int32)]
+            used = np.unique(component_faces)
+            remap = np.full(len(points), -1, dtype=np.int32)
+            remap[used] = np.arange(len(used), dtype=np.int32) + offset
+            split_points.append(points[used])
+            split_faces.append(remap[component_faces])
+            offset += len(used)
+        points = np.vstack(split_points)
+        faces = np.vstack(split_faces)
 
-    split_points = []
-    split_faces = []
-    offset = 0
-    for indices in groups.values():
-        component_faces = faces[np.asarray(indices, dtype=np.int32)]
-        used = np.unique(component_faces)
-        remap = np.full(len(points), -1, dtype=np.int32)
-        remap[used] = np.arange(len(used), dtype=np.int32) + offset
-        split_points.append(points[used])
-        split_faces.append(remap[component_faces])
-        offset += len(used)
-    return np.vstack(split_points), np.vstack(split_faces)
+    # A single globally connected island can still pinch at a boundary vertex
+    # (a figure-eight topology).  Split independent local face fans even when
+    # those fans reconnect somewhere else in the polygon.
+    mutable_points = points.tolist()
+    mutable_faces = faces.copy()
+    for vertex_index in range(len(points)):
+        incident = np.flatnonzero(np.any(mutable_faces == vertex_index, axis=1))
+        if len(incident) < 2:
+            continue
+        local_parents = {int(face_index): int(face_index)
+                         for face_index in incident}
+
+        def local_find(face_index: int) -> int:
+            while local_parents[face_index] != face_index:
+                local_parents[face_index] = local_parents[
+                    local_parents[face_index]]
+                face_index = local_parents[face_index]
+            return face_index
+
+        neighbor_owner = {}
+        for face_index in incident:
+            face_index = int(face_index)
+            neighbors = mutable_faces[face_index][
+                mutable_faces[face_index] != vertex_index]
+            for neighbor in neighbors:
+                neighbor = int(neighbor)
+                owner = neighbor_owner.setdefault(neighbor, face_index)
+                left, right = local_find(face_index), local_find(owner)
+                if left != right:
+                    local_parents[right] = left
+
+        fans = {}
+        for face_index in incident:
+            fans.setdefault(local_find(int(face_index)), []).append(
+                int(face_index))
+        for fan_faces in list(fans.values())[1:]:
+            duplicate = len(mutable_points)
+            mutable_points.append(points[vertex_index].tolist())
+            for face_index in fan_faces:
+                mutable_faces[face_index][
+                    mutable_faces[face_index] == vertex_index] = duplicate
+
+    return np.asarray(mutable_points, dtype=np.float64), mutable_faces
 
 
 def _polygon_to_draped_mesh(

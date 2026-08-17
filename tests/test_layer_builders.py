@@ -228,6 +228,26 @@ class TestVegetationV3:
         assert len(split_points) == 6
         assert set(split_faces[0]).isdisjoint(set(split_faces[1]))
 
+    def test_local_boundary_pinch_is_split_even_when_faces_reconnect(self):
+        from _TEXTURE_STYLE_OF_DEEPSEEK.vegetation_exclusion import (
+            _split_point_touching_topology,
+        )
+
+        points = np.array([
+            [0, 0], [1, 0], [0, 1], [-1, 0], [0, -1],
+        ], dtype=np.float64)
+        # The first two triangles meet only at vertex 0, while the final two
+        # make the complete face set edge-connected away from that pinch.
+        faces = np.array([
+            [0, 1, 2], [0, 3, 4], [1, 3, 2], [2, 3, 4],
+        ], dtype=np.int32)
+
+        split_points, split_faces = _split_point_touching_topology(
+            points, faces)
+
+        assert len(split_points) == 6
+        assert split_faces[0, 0] != split_faces[1, 0]
+
     def test_empty_input_returns_none(self):
         """空输入返回 None。"""
         from _TEXTURE_STYLE_OF_DEEPSEEK.vegetation_exclusion import (
