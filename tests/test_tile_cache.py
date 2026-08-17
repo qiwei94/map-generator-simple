@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 import geopandas as gpd
 import pytest
+import shutil
 from shapely.geometry import Point
 
 from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.osmium_cli_fetcher import (
@@ -56,6 +57,85 @@ class TestDedupeFeatures:
         merged = pd.concat([g1, g2], ignore_index=True)
         out = OsmiumCLIFetcher._dedupe_features(merged)
         assert len(out) == 3
+
+
+class TestFullFrameRefreshDecision:
+    def test_refreshes_when_half_or_more_tiles_are_missing(self):
+        assert OsmiumCLIFetcher._should_refresh_full_frame(16, 20)
+
+    def test_refreshes_when_missing_rectangle_covers_frame(self):
+        assert OsmiumCLIFetcher._should_refresh_full_frame(
+            2, 9,
+            missing_bbox=(48.74, 2.19, 48.96, 2.46),
+            frame_bbox=(48.75, 2.20, 48.95, 2.45),
+        )
+
+    def test_keeps_sparse_reuse_for_one_or_small_edge_miss(self):
+        assert not OsmiumCLIFetcher._should_refresh_full_frame(
+            1, 20,
+            missing_bbox=(48.74, 2.19, 48.81, 2.26),
+            frame_bbox=(48.75, 2.20, 48.95, 2.45),
+        )
+        assert not OsmiumCLIFetcher._should_refresh_full_frame(
+            2, 20,
+            missing_bbox=(48.74, 2.19, 48.81, 2.31),
+            frame_bbox=(48.75, 2.20, 48.95, 2.45),
+        )
+
+
+class TestCacheColumnPruning:
+    def test_keeps_model_fields_and_drops_export_only_tags(self):
+        gdf = gpd.GeoDataFrame({
+            "osm_type": ["way"],
+            "osm_id": [42],
+            "building": ["cathedral"],
+            "building:levels": [5],
+            "name": ["Notre-Dame"],
+            "wikidata": ["Q2981"],
+            "height_source": ["temporary"],
+            "contact:facebook": [None],
+            "payment:bitcoin": [None],
+            "geometry": [Point(2.35, 48.85)],
+        }, crs="EPSG:4326")
+
+        out = OsmiumCLIFetcher._prune_cache_columns(gdf, "building")
+
+        assert list(out.columns) == [
+            "osm_type", "osm_id", "building", "building:levels",
+            "name", "wikidata", "geometry",
+        ]
+        assert out.crs == gdf.crs
+        assert "contact:facebook" not in out
+        assert "payment:bitcoin" not in out
+
+    def test_cache_reader_projects_columns_before_returning(self, tmp_path):
+        path = tmp_path / "tile.geojson"
+        gdf = gpd.GeoDataFrame({
+            "osm_type": ["way"],
+            "osm_id": [7],
+            "highway": ["primary"],
+            "contact:facebook": ["unused"],
+            "geometry": [Point(2.35, 48.85)],
+        }, crs="EPSG:4326")
+        gdf.to_file(path, driver="GeoJSON")
+
+        out = OsmiumCLIFetcher._try_read_geojson_cache(path, "road")
+
+        assert list(out.columns) == [
+            "osm_type", "osm_id", "highway", "geometry",
+        ]
+
+
+class TestOsmiumBinaryOverride:
+    def test_explicit_binary_wins_over_portable_path(self, monkeypatch):
+        executable = shutil.which("true")
+        assert executable is not None
+        monkeypatch.setenv("OSMIUM_BIN", executable)
+
+        fetcher = OsmiumCLIFetcher()
+
+        assert fetcher.osmium_available
+        assert fetcher._get_tool_path("osmium") == executable
 
 
 class TestStitchTileGrids:

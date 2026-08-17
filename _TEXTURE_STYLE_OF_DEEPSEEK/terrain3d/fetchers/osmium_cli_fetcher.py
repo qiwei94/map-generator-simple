@@ -27,6 +27,24 @@ DEFAULT_PBF_DIR = os.path.join(os.path.dirname(__file__), '..', '..', '..', 'pbf
 class OsmiumCLIFetcher:
     """使用 osmium CLI 获取 OSM 数据"""
 
+    # osmium export emits sparse properties, but GeoPandas expands their union
+    # into a dense table.  Writing that table back to per-tile GeoJSON repeats
+    # every null-valued regional tag for every feature.  In dense extracts this
+    # turned a ~150 MB Paris frame into 500-800 MB *per tile*.  Keep the fields
+    # consumed by filtering, height estimation, landmark classification and
+    # layer builders; geometry is appended separately by _prune_cache_columns.
+    _CACHE_COLUMNS = (
+        'osm_type', 'osm_id',
+        'building', 'building:part', 'height', 'building:height',
+        'building:levels', 'building:levels:underground', 'min_height',
+        'name', 'name:en', 'wikidata', 'wikipedia', 'historic', 'heritage',
+        'tourism', 'amenity', 'man_made', 'tower:type', 'religion',
+        'government', 'military', 'museum',
+        'highway', 'bridge', 'tunnel', 'covered', 'layer', 'width',
+        'natural', 'water', 'waterway', 'landuse', 'leisure', 'boundary',
+        'railway', 'intermittent',
+    )
+
     # 标准标签过滤表达式（使用 nwr = node/way/relation）
     # 适用于建筑、道路、植被等普通要素
     TAG_FILTERS = {
@@ -129,6 +147,16 @@ class OsmiumCLIFetcher:
     def _check_tool(self, tool_name: str) -> bool:
         """检查命令行工具是否可用"""
         try:
+            override = (os.environ.get('OSMIUM_BIN')
+                        if tool_name == 'osmium' else None)
+            if override:
+                if not os.path.isfile(override) or not os.access(override, os.X_OK):
+                    logger.warning("OSMIUM_BIN is not executable: %s", override)
+                    return False
+                result = subprocess.run(
+                    [override, '--version'], capture_output=True, timeout=5)
+                return result.returncode == 0
+
             if self.conda_env_path:
                 # Try both Scripts and Library/bin directories
                 conda_dirs = [
@@ -202,6 +230,11 @@ class OsmiumCLIFetcher:
     
     def _get_tool_path(self, tool_name: str) -> str:
         """获取工具的完整路径"""
+        override = (os.environ.get('OSMIUM_BIN')
+                    if tool_name == 'osmium' else None)
+        if override and os.path.isfile(override) and os.access(override, os.X_OK):
+            return override
+
         if self.conda_env_path:
             # Try both Scripts and Library/bin directories
             conda_dirs = [
@@ -383,13 +416,34 @@ class OsmiumCLIFetcher:
     # 合并时靠 osm_type+osm_id 去重。
     _TILE_BUFFER_DEG = 0.002
 
-    @staticmethod
-    def _try_read_geojson_cache(path):
+    @classmethod
+    def _prune_cache_columns(cls, gdf, tag_type=None):
+        """Drop export-only tag columns before a frame can inflate memory/cache.
+
+        The whitelist is deliberately a shared superset for every layer.  This
+        keeps cache files compatible across feature types while retaining every
+        field used by downstream filters, height enrichment and landmark rules.
+        """
+        if gdf is None:
+            return gdf
+        keep = [column for column in cls._CACHE_COLUMNS
+                if column in gdf.columns]
+        if 'geometry' in gdf.columns:
+            keep.append('geometry')
+        return gdf.loc[:, keep].copy()
+
+    @classmethod
+    def _try_read_geojson_cache(cls, path, tag_type=None):
         """读 GeoJSON 缓存：合法（含空集合）返回 GeoDataFrame，损坏/不存在返回 None。"""
         if not os.path.exists(path) or os.path.getsize(path) == 0:
             return None
         try:
-            return gpd.read_file(path)
+            # Column projection happens inside the GDAL reader, before a dense
+            # pandas table is allocated.  This is essential when opening old
+            # Paris tiles whose schemas contain thousands of mostly-null tags.
+            return cls._prune_cache_columns(
+                gpd.read_file(path, columns=list(cls._CACHE_COLUMNS)),
+                tag_type)
         except Exception:
             return None
 
@@ -415,6 +469,29 @@ class OsmiumCLIFetcher:
         d = os.path.join(project_root, 'cache', 'tiles', tag_type)
         os.makedirs(d, exist_ok=True)
         return os.path.join(d, f"{ix}_{iy}.geojson")
+
+    @staticmethod
+    def _should_refresh_full_frame(missing_count, total_count,
+                                   missing_bbox=None, frame_bbox=None):
+        """Return True when reusing sparse tiles would cost more memory than a refresh.
+
+        A merged extraction already spans the bounding rectangle of every missing
+        tile.  When that rectangle covers the requested frame, or at least half
+        the frame is missing, loading the existing GeoJSON tiles first only keeps
+        duplicate feature sets alive during the split/concat step.  Dense cities
+        can turn that duplication into multi-gigabyte RSS spikes.
+        """
+        if missing_count < 2 or total_count <= 0:
+            return False
+        if missing_count * 2 >= total_count:
+            return True
+        if missing_bbox is None or frame_bbox is None:
+            return False
+        ms, mw, mn, me = missing_bbox
+        fs, fw, fn, fe = frame_bbox
+        eps = 1e-10
+        return (ms <= fs + eps and mw <= fw + eps and
+                mn >= fn - eps and me >= fe - eps)
 
     @staticmethod
     def _atomic_write_gdf(gdf, path):
@@ -474,7 +551,7 @@ class OsmiumCLIFetcher:
         full_path = os.path.join(
             project_tmp,
             f"osmium_{tag_type}_{fs:.4f}_{fw:.4f}_{fn:.4f}_{fe:.4f}.geojson")
-        gdf = self._try_read_geojson_cache(full_path)
+        gdf = self._try_read_geojson_cache(full_path, tag_type)
         if gdf is not None:
             print(f"  [CLI Pipeline] Using cached GeoJSON (full-frame): {full_path}")
             if len(gdf) == 0:
@@ -483,19 +560,66 @@ class OsmiumCLIFetcher:
             print(f"  [CLI Pipeline] Loaded {len(gdf)} features from cache\n")
             return self._enrich_building_heights(gdf, tag_type, fs, fw, fn, fe)
 
-        # 2) 瓦片路径
+        # 2) 瓦片路径。先只看文件是否存在，不立刻把所有 GeoJSON 读进
+        # 内存。巴黎等高密城市的单瓦片可达数百 MB；若大部分瓦片缺失，
+        # 后面本来就要做一次近似整框提取，提前加载旧瓦片会造成数倍峰值。
         ix0, iy0, ix1, iy1 = tile_range(fs, fw, fn, fe, step)
-        frames, missing = [], []
+        cached_paths, missing = [], []
         for iy in range(iy0, iy1 + 1):
             for ix in range(ix0, ix1 + 1):
                 tp = self._tile_cache_path(tag_type, ix, iy)
-                tgdf = self._try_read_geojson_cache(tp)
-                if tgdf is not None:
-                    frames.append(tgdf)
-                    print(f"  [Tile Cache] HIT {tag_type} tile ({ix},{iy}): "
-                          f"{len(tgdf)} features")
+                if os.path.exists(tp) and os.path.getsize(tp) > 0:
+                    cached_paths.append((ix, iy, tp))
                 else:
                     missing.append((ix, iy, tp))
+
+        total_tiles = len(cached_paths) + len(missing)
+        if cached_paths and missing:
+            buf = self._TILE_BUFFER_DEG
+            ms = min(tile_bbox(ix, iy, step)[0] for ix, iy, _ in missing) - buf
+            mw = min(tile_bbox(ix, iy, step)[1] for ix, iy, _ in missing) - buf
+            mn = max(tile_bbox(ix, iy, step)[2] for ix, iy, _ in missing) + buf
+            me = max(tile_bbox(ix, iy, step)[3] for ix, iy, _ in missing) + buf
+            if self._should_refresh_full_frame(
+                    len(missing), total_tiles, (ms, mw, mn, me),
+                    (fs, fw, fn, fe)):
+                print(f"  [Tile Cache] {tag_type}: {len(missing)}/{total_tiles} "
+                      "tiles missing; full-frame refresh avoids duplicate RSS")
+                tmp_out = full_path + f".tmp{os.getpid()}"
+                try:
+                    ok = self._run_osmium_pipeline(
+                        pbf_file, tag_type, fs, fw, fn, fe, tmp_out)
+                    if ok:
+                        os.replace(tmp_out, full_path)
+                    elif os.path.exists(tmp_out):
+                        os.remove(tmp_out)
+                except Exception:
+                    if os.path.exists(tmp_out):
+                        os.remove(tmp_out)
+                    raise
+                if not ok:
+                    return gpd.GeoDataFrame()
+                gdf = self._prune_cache_columns(
+                    gpd.read_file(full_path,
+                                  columns=list(self._CACHE_COLUMNS)),
+                    tag_type)
+                self._split_to_tiles(gdf, tag_type,
+                                     ix0, iy0, ix1, iy1, step)
+                print(f"  [Tile Cache] {tag_type}: {len(gdf)} features, "
+                      "full-frame refresh split done\n")
+                return self._enrich_building_heights(
+                    gdf, tag_type, fs, fw, fn, fe)
+
+        # Only now load reusable tiles. Corrupt files are downgraded to misses.
+        frames = []
+        for ix, iy, tp in cached_paths:
+            tgdf = self._try_read_geojson_cache(tp, tag_type)
+            if tgdf is not None:
+                frames.append(tgdf)
+                print(f"  [Tile Cache] HIT {tag_type} tile ({ix},{iy}): "
+                      f"{len(tgdf)} features")
+            else:
+                missing.append((ix, iy, tp))
 
         if frames and not missing:
             merged = pd.concat(frames, ignore_index=True) \
@@ -524,7 +648,9 @@ class OsmiumCLIFetcher:
                 raise
             if not ok:
                 return gpd.GeoDataFrame()
-            gdf = gpd.read_file(full_path)
+            gdf = self._prune_cache_columns(
+                gpd.read_file(full_path, columns=list(self._CACHE_COLUMNS)),
+                tag_type)
             self._split_to_tiles(gdf, tag_type, ix0, iy0, ix1, iy1, step)
             print(f"  [Tile Cache] {tag_type}: {len(gdf)} features, "
                   f"split into tiles done\n")
@@ -547,7 +673,10 @@ class OsmiumCLIFetcher:
                 ok = self._run_osmium_pipeline(
                     pbf_file, tag_type, us, uw, un, ue, tmp_out)
                 if ok:
-                    mgdf = gpd.read_file(tmp_out)
+                    mgdf = self._prune_cache_columns(
+                        gpd.read_file(tmp_out,
+                                      columns=list(self._CACHE_COLUMNS)),
+                        tag_type)
                     # 按瓦片拆分缓存（仅覆盖缺失瓦片，不碰已有文件）；
                     # 跨界要素由合并框完整提取，无需 buffer 重叠。
                     from shapely.geometry import box
@@ -805,7 +934,13 @@ class OsmiumCLIFetcher:
         print(f"  [Step 3/{n_steps}] osmium export (converting to GeoJSON)...")
         print(f"           Command: osmium export {filtered_pbf} -o {raw_geojson} -f geojson --overwrite")
         t3 = time.time()
-        result3 = subprocess.run(cmd3, capture_output=True, timeout=120, creationflags=flags)
+        # The portable Python-backed osmium fallback is much slower than the
+        # native C++ tool on dense extracts. Scale the export budget with the
+        # filtered PBF size instead of killing a healthy export at 120 seconds.
+        export_timeout = max(120, min(600, int(filtered_size / 64) + 60))
+        result3 = subprocess.run(
+            cmd3, capture_output=True, timeout=export_timeout,
+            creationflags=flags)
         elapsed3 = time.time() - t3
 
         if result3.returncode != 0:

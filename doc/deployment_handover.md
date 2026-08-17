@@ -59,6 +59,7 @@
 - 图层瓦片：`cache/tiles/{layer}/{ix}_{iy}.geojson`（每瓦片 0.05°，提取时带 ~200m buffer 保证跨界要素完整）；合并时按 `osm_type+osm_id` 去重（pyosmium shim 的 export 已输出 osm_id；无 id 时降级几何指纹）。
 - 高程瓦片：`cache/grids/tiles/elevtile_{ix}_{iy}_61.npy`，查询时拼接（共享边界去重）后重采样裁剪到精确框；平滑在拼接后整框做，无瓦片接缝。
 - 取数策略：全框缓存命中→直接返回；瓦片全缺→全框提取一次（单次全量 PBF 读，最快）+ 拆入瓦片；部分缺失→只提取缺失瓦片（缺 ≥2 块时合并成一次提取再拆，避免 relation-first 水体逐瓦片重复全量扫 PBF）。
+- 高密城市保护（2026-08-18）：当缺失瓦片达半数或缺失框已覆盖整个请求框时，直接整框刷新，不先加载旧的超大 GeoJSON；瓦片缓存仅保留模型管线实际使用的 OSM 字段，避免每个要素重复上千个 `null` 标签列。
 - 写入均原子（tmp + os.replace），并发安全。
 - 实测（B，跨双网格线框 ~8km）：首次全框提取后，另一量化框共享瓦片的偏移请求 **~53s**（图层瓦片全 HIT，仅 preprocess 首算）。
 
@@ -124,6 +125,8 @@ uptime ; free -h ; df -h /
 - 公网 `118.31.184.240`，私网 `172.16.164.54`
 - 磁盘已在线扩容到 120G（`growpart /dev/vda 3` + `resize2fs /dev/vda3`）。**全量 75G 数据已 rsync 到 B 本地盘**（走内网），不再走 NFS。
 - Python 环境：`/usr/local/python3.9/`（从 A 整体拷贝）。`/opt/pyshim/python3` → 软链到 python3.9；`tools/osmium` 必须 `chmod +x`。
+- 原生 osmium：`/opt/osmium-native/bin/osmium` 1.19.1（Miniforge/conda-forge 独立环境）。`studio.service.d/osmium.conf` 设置 `OSMIUM_BIN`，程序优先使用该绝对路径；不可用时仍保留 `tools/osmium` Python 回退。国内机器可从清华 conda-forge 镜像安装，官方 conda 源在 B 上曾连接超时。
+- 内存保护：`/swapfile-mapgen` 4G，由 `mapgen-swap.service` 开机启用；它只是峰值保险，不代替修复内存放大。
 - 项目：`/root/map-generator-simple`。
   - `pbf_cache` 软链 → `/root/map-cache/pbf_cache`（本地）
   - **`dem_cache` 软链 → `/root/map-cache/dem_cache`（本地）** ← **极其关键，见已知问题#1**
@@ -183,6 +186,7 @@ ssh -J root@8.136.0.235 root@172.16.164.54
 6. ~~水体 relation 全丢（西湖等消失、水体图层空）~~ 已修（2026-08-10）：`tools/osmium_pyosmium.py` 三连缺陷——① tags-filter 只认 `nwr/xxx` 前缀、跳过 `natural=water` 裸表达式；② tags-filter 未挂节点坐标索引导致 way 无几何；③ pybind11 bug 使 `create_multipolygon` 对所有 relation 抛异常被吞。已改为裸表达式按 nwr 解析、挂 locations 索引落盘 `.nli`、relation 几何手工组装（area PBF 建 way 索引→拼环→inner 按包含分配）。**修后需清一次脏水体缓存**：`rm -rf cache/tiles/water cache/pipeline/snap_*`。修后实测：西湖冷框 ~407s（含水体首提），偏移框 **~51s**。
 7. ~~B 缺 rasterio 导致 amap 卫星水面静默为空（钱塘江变细线）~~ 已修（2026-08-12）：`requirements.txt` 声明的 rasterio 从未在 B 安装，`_vectorize_mask` 的 `import rasterio` 抛异常被吞 → 瓦片能取、矢量化返回 []。已 `pip install rasterio`（阿里云镜像，1.4.3）。同次修复：supplement 防误检门（面积上限/重叠率）误杀大河面，新增“中心线证据门”豁免。**教训：B 装新依赖后无需清缓存（amap 缓存按 bbox 命名，首次成功提取后才落盘）**。
 8. ~~钱塘江中间突兀细蓝线~~ 已修（2026-08-12，7ede6e2）：`supplement_wl_coverage` 在 uncovered 为空时提前 return。而 `wl_polygons` 里本来就含河流中心线的细缓冲带，中心线必然被自己的细带覆盖 → uncovered 恒空 → amap 真实宽江面永远进不了 WL，图上只剩 66m 细蓝带。已移除提前 return，无条件走 Gaode 补面评估。同次：PNG 渲染 WL 层改为画 union 后几何（30b122d），否则细带深色描边仍在江面中间留下细线。
+9. ~~巴黎风格图生成被 OOM 强杀~~ 已修（2026-08-18）：16/20 瓦片缺失时旧逻辑会先读取 4 个 360-870MB 的旧瓦片，再保留整框提取与拆分副本，进程 RSS 达 15GB 后被内核杀死。现已改为大范围缺失直接整框刷新、GeoJSON 字段白名单、动态 export 超时，并安装原生 osmium。验收时必须同时记录峰值 RSS、要素数和真实输出，不得只看进程退出码。
 
 ## 六、常用运维命令（在 B 上）
 
