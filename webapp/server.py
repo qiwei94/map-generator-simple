@@ -283,11 +283,11 @@ def _job_progress(job: dict, log_tail: str) -> tuple[int, str]:
     elif job.get("mode") == "styles":
         stages = (
             ("contact sheet:", 98, "正在整理四种风格方案"),
-            ("/minimal]", 95, "正在渲染第 4 种风格"),
-            ("/dense_detail]", 92, "正在渲染第 3 种风格"),
-            ("/block_fill]", 89, "正在渲染第 2 种风格"),
-            ("/baseline]", 86, "正在渲染第 1 种风格"),
-            ("[harness] prepared", 82, "地图要素已整理，准备渲染风格"),
+            ("/minimal]", 97, "四种风格已经渲染完成"),
+            ("/dense_detail]", 95, "正在渲染第 4 种风格"),
+            ("/block_fill]", 92, "正在渲染第 3 种风格"),
+            ("/baseline]", 89, "正在渲染第 2 种风格"),
+            ("[harness] prepared", 86, "正在渲染第 1 种风格"),
             ("[Tile Cache] vegetation:", 64, "正在提取绿地与地表信息"),
             ("[Tile Cache] water:", 44, "正在提取湖泊与河流信息"),
             ("[Tile Cache] road:", 25, "正在提取道路网络"),

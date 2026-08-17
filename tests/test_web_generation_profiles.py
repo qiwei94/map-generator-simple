@@ -186,3 +186,33 @@ def test_style_job_progress_uses_real_gallery_markers(tmp_path):
     assert public["progress_pct"] == 64
     assert public["stage_label"] == "正在提取绿地与地表信息"
     assert "8–12 分钟" in public["duration_hint"]
+
+
+@pytest.mark.parametrize(("completed_marker", "progress", "label"), [
+    ("[custom/baseline] score=5.0", 89, "正在渲染第 2 种风格"),
+    ("[custom/block_fill] score=5.0", 92, "正在渲染第 3 种风格"),
+    ("[custom/dense_detail] score=5.0", 95, "正在渲染第 4 种风格"),
+    ("[custom/minimal] score=5.0", 97, "四种风格已经渲染完成"),
+])
+def test_style_progress_reports_next_style_after_completed_marker(
+        tmp_path, completed_marker, progress, label):
+    log_path = tmp_path / "styles.log"
+    log_path.write_text(
+        f"[harness] prepared in 1.0s\n  {completed_marker}\n",
+        encoding="utf-8",
+    )
+    job = {
+        "id": "stylejob",
+        "city": "custom_test",
+        "city_title": "巴黎",
+        "mode": "styles",
+        "status": "running",
+        "started": 1.0,
+        "ended": None,
+        "log_path": str(log_path),
+    }
+
+    public = server._job_public(job)
+
+    assert public["progress_pct"] == progress
+    assert public["stage_label"] == label
