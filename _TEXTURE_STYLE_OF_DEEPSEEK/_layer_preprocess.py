@@ -163,6 +163,10 @@ def _subtract(polys: List[Polygon], minus_geom) -> List[Polygon]:
             safe_minus = None
     if safe_minus is None or safe_minus.is_empty:
         return list(polys)
+    try:
+        prepare(safe_minus)
+    except GEOSException:
+        pass
 
     out = []
     for p in polys:
@@ -170,7 +174,10 @@ def _subtract(polys: List[Polygon], minus_geom) -> List[Polygon]:
             continue
         try:
             source = p if p.is_valid else make_valid(p)
-            if not source.intersects(safe_minus):
+            # safe_minus is reused for every source polygon. Keep the prepared
+            # cutter on the left so GEOS reuses its spatial index instead of
+            # rebuilding work for thousands of city/vegetation blocks.
+            if not safe_minus.intersects(source):
                 out.extend(_parts(source))
                 continue
             out.extend(_parts(source.difference(safe_minus)))
