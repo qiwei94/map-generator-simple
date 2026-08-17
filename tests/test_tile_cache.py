@@ -6,6 +6,7 @@ import pandas as pd
 import geopandas as gpd
 import pytest
 import shutil
+import os
 from shapely.geometry import Point
 
 from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.osmium_cli_fetcher import (
@@ -136,6 +137,14 @@ class TestOsmiumBinaryOverride:
 
         assert fetcher.osmium_available
         assert fetcher._get_tool_path("osmium") == executable
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX executable bit")
+    def test_portable_osmium_entry_is_executable(self):
+        portable = os.path.abspath(os.path.join(
+            os.path.dirname(__file__), "..", "tools", "osmium"))
+
+        assert os.path.isfile(portable)
+        assert os.access(portable, os.X_OK)
 
 
 class TestStitchTileGrids:
