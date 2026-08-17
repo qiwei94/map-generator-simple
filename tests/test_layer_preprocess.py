@@ -108,6 +108,19 @@ class TestSubtract:
         # a2 被跳过，a1 被减去
         assert result[0].area < 100.0
 
+    def test_subtract_repairs_self_intersection_instead_of_aborting(self):
+        """OSM 自交环不应让整个风格图因 TopologyException 失败。"""
+        bow_tie = Polygon([
+            (0, 0), (10, 10), (0, 10), (10, 0), (0, 0),
+        ])
+        assert not bow_tie.is_valid
+
+        result = _subtract([bow_tie], box(4, 4, 6, 6))
+
+        assert result
+        assert all(poly.is_valid for poly in result)
+        assert all(not poly.is_empty for poly in result)
+
 
 # ---------------------------------------------------------------------------
 # _filter_by_area

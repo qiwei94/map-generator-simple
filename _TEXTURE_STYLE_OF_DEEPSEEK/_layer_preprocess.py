@@ -22,6 +22,8 @@ from typing import List, Tuple, Dict, Optional, Set
 import numpy as np
 import pandas as pd
 import geopandas as gpd
+from shapely import make_valid
+from shapely.errors import GEOSException
 from shapely.geometry import (
     LineString,
     MultiLineString,
@@ -130,22 +132,59 @@ def _subtract(polys: List[Polygon], minus_geom) -> List[Polygon]:
     """
     if minus_geom is None or minus_geom.is_empty:
         return list(polys)
+
+    def _parts(geom):
+        if geom is None or geom.is_empty:
+            return []
+        if isinstance(geom, Polygon):
+            if geom.is_valid:
+                return [geom]
+            try:
+                return _parts(make_valid(geom))
+            except GEOSException:
+                return []
+        if hasattr(geom, "geoms"):
+            out_parts = []
+            for child in geom.geoms:
+                out_parts.extend(_parts(child))
+            return out_parts
+        return []
+
+    # Repair a bad union once instead of triggering the same GEOS failure for
+    # every city block. OSM free holes and self-intersections are common enough
+    # that subtraction must treat them as data quality, not a fatal style error.
+    safe_minus = minus_geom
+    try:
+        if not safe_minus.is_valid:
+            safe_minus = make_valid(safe_minus)
+    except GEOSException:
+        try:
+            safe_minus = safe_minus.buffer(0)
+        except GEOSException:
+            safe_minus = None
+    if safe_minus is None or safe_minus.is_empty:
+        return list(polys)
+
     out = []
     for p in polys:
         if not isinstance(p, Polygon) or p.is_empty:
             continue
-        if not p.intersects(minus_geom):
-            out.append(p)
-            continue
-        diff = p.difference(minus_geom)
-        if diff.is_empty:
-            continue
-        if isinstance(diff, Polygon):
-            out.append(diff)
-        elif hasattr(diff, "geoms"):
-            for g in diff.geoms:
-                if isinstance(g, Polygon) and not g.is_empty:
-                    out.append(g)
+        try:
+            source = p if p.is_valid else make_valid(p)
+            if not source.intersects(safe_minus):
+                out.extend(_parts(source))
+                continue
+            out.extend(_parts(source.difference(safe_minus)))
+        except GEOSException:
+            # Last-resort zero-buffer repair. If GEOS still cannot subtract,
+            # retain the repaired source polygon: a small visual overlap is
+            # preferable to aborting the entire gallery style.
+            try:
+                source = p.buffer(0)
+                cutter = safe_minus.buffer(0)
+                out.extend(_parts(source.difference(cutter)))
+            except GEOSException:
+                out.extend(_parts(p))
     return out
 
 
