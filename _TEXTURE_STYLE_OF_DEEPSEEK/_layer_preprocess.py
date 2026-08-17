@@ -1305,6 +1305,19 @@ def _compute_block_base(
 # B.1.4: 主入口
 # ---------------------------------------------------------------------------
 
+def _effective_road_tier(requested: Optional[int], area_km2: float) -> int:
+    """Apply a printable-scale ceiling to city-block road detail.
+
+    Tier 5 adds footways, paths, steps and tracks.  At large-area model scales
+    those lines are narrower than the real-world nozzle footprint, yet they can
+    make polygonization process hundreds of thousands of extra segments.
+    """
+    tier = requested if requested is not None else 5
+    if get_area_class(area_km2) == "large":
+        return min(tier, 4)
+    return tier
+
+
 def preprocess_layers(
     buildings_gdf: gpd.GeoDataFrame,
     roads_gdf: gpd.GeoDataFrame,
@@ -1369,7 +1382,12 @@ def preprocess_layers(
 
     # ---- Step 2: city blocks ----
     t2 = time.time()
-    effective_road_tier = road_tier_override if road_tier_override is not None else 5
+    requested_road_tier = road_tier_override if road_tier_override is not None else 5
+    effective_road_tier = _effective_road_tier(
+        requested_road_tier, area_km2)
+    if effective_road_tier != requested_road_tier:
+        print(f"[preprocess] road_tier capped {requested_road_tier} → "
+              f"{effective_road_tier} for printable large-area detail")
     wgdf = water_gdf if water_gdf is not None and len(water_gdf) > 0 else None
     if roads_gdf is not None and len(roads_gdf) > 0:
         city_blocks = _build_city_blocks(roads_gdf, wgdf, road_tier=effective_road_tier, bbox_local=bbox_local)

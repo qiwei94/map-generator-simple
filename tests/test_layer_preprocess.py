@@ -22,6 +22,7 @@ from _TEXTURE_STYLE_OF_DEEPSEEK._layer_preprocess import (
     _subtract,
     _filter_by_area,
     _extract_roads,
+    _effective_road_tier,
     LayerPolygons,
 )
 from _TEXTURE_STYLE_OF_DEEPSEEK.buildings import _aggregate_in_blocks
@@ -178,6 +179,12 @@ def test_extract_roads_filters_large_area_before_geometry_work():
 
     assert len(result) == 1
     assert result[0][1] == "primary"
+
+
+def test_large_area_caps_unprintable_footway_block_detail():
+    assert _effective_road_tier(5, area_km2=100) == 4
+    assert _effective_road_tier(4, area_km2=100) == 4
+    assert _effective_road_tier(5, area_km2=25) == 5
 
 
 # ---------------------------------------------------------------------------
