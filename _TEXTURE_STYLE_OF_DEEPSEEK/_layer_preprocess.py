@@ -22,7 +22,7 @@ from typing import List, Tuple, Dict, Optional, Set
 import numpy as np
 import pandas as pd
 import geopandas as gpd
-from shapely import make_valid
+from shapely import make_valid, prepare
 from shapely.errors import GEOSException
 from shapely.geometry import (
     LineString,
@@ -40,7 +40,6 @@ from _TEXTURE_STYLE_OF_DEEPSEEK._landmark import (
     LandmarkCategory,
     is_vegetation_landmark,
     is_water_landmark,
-    is_road_landmark,
     compute_top_percent_threshold,
     compute_hotspot_block_ids,
 )
@@ -840,33 +839,76 @@ def _extract_roads(
     area_class = get_area_class(area_km2)
     highway_filter = ROAD_FILTER.get(area_class, None)
 
-    # Build BL union for subtraction
+    # Filter before Python iteration.  Dense cities can contain hundreds of
+    # thousands of road features; GeoDataFrame.iterrows() materializes one
+    # pandas Series per feature and dominated gallery generation time.
+    work = roads_gdf
+    if highway_filter is not None:
+        highway_values = work["highway"] if "highway" in work.columns else None
+        if highway_values is None:
+            n_skip_filter = len(work)
+            work = work.iloc[0:0]
+        else:
+            keep = highway_values.isin(highway_filter)
+            n_skip_filter = int((~keep).sum())
+            work = work.loc[keep]
+    else:
+        n_skip_filter = 0
+
+    # Build and prepare the BL union for repeated spatial predicates.  Shapely
+    # preparation is in-place and makes the intersects test substantially
+    # cheaper without changing the subsequent difference geometry.
     bl_union = None
     if BL_polys:
         try:
             bl_union = unary_union(BL_polys)
+            prepare(bl_union)
         except Exception:
             pass
 
     result: List[Tuple[LineString, str, bool]] = []
-    n_skip_filter = 0
     n_skip_short = 0
     n_subtracted = 0
 
-    for _, row in roads_gdf.iterrows():
-        highway = row.get("highway", "residential")
-        if highway_filter is not None and highway not in highway_filter:
-            n_skip_filter += 1
-            continue
+    def _column(name: str, default=None):
+        if name in work.columns:
+            return work[name].to_numpy(copy=False)
+        return np.full(len(work), default, dtype=object)
 
-        geom = row.geometry
+    geometries = work.geometry.to_numpy(copy=False)
+    highways = _column("highway", "residential")
+    names = _column("name")
+    bridges = _column("bridge")
+    wikidata_values = _column("wikidata")
+    wikipedia_values = _column("wikipedia")
+
+    def _is_bridge_landmark(name, highway, bridge, wikidata, wikipedia) -> bool:
+        # Equivalent to is_road_landmark(), kept scalar and allocation-free for
+        # the hot loop.  Missing values are deliberately rejected first.
+        if pd.isna(name) or pd.isna(highway) or pd.isna(bridge):
+            return False
+        if bridge in ("no", "0"):
+            return False
+        if highway in {"footway", "path", "steps", "track", "cycleway",
+                       "service", "pedestrian", "bridleway", "corridor"}:
+            return False
+        if pd.notna(wikidata) or pd.notna(wikipedia):
+            return True
+        return any(token in str(name) for token in
+                   ("大桥", "Bridge", "Viaduct", "高架", "立交"))
+
+    for geom, highway, name, bridge, wikidata, wikipedia in zip(
+        geometries, highways, names, bridges, wikidata_values, wikipedia_values,
+    ):
         if geom is None or geom.is_empty:
             continue
         if not isinstance(geom, (LineString, MultiLineString)):
             continue
 
         lines = geom.geoms if isinstance(geom, MultiLineString) else [geom]
-        is_bridge = is_road_landmark(row)
+        is_bridge = _is_bridge_landmark(
+            name, highway, bridge, wikidata, wikipedia,
+        )
 
         for line in lines:
             if line.length < 10.0:
