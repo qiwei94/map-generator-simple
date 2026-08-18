@@ -143,6 +143,10 @@ def parse_args():
         help='Draft 模式：跳过 brick/boolean，快速导出 GLB 预览后退出'
     )
     parser.add_argument(
+        '--preview-fast', action='store_true', default=False,
+        help='快速预览：降低 DEM/GLB 精度，跳过植被与 landuse 取数（仅影响 --draft）'
+    )
+    parser.add_argument(
         '--base-thickness-mm', type=float, default=0.4, metavar='MM',
         help='公共打印底层厚度；GLB 预览与正式 3MF 共用（默认 0.4mm）'
     )
@@ -331,6 +335,8 @@ def main():
     cli_args = parse_args()
     if not 0.4 <= cli_args.base_thickness_mm <= 3.0:
         raise SystemExit("--base-thickness-mm must be between 0.4 and 3.0")
+    if cli_args.preview_fast and not cli_args.draft:
+        raise SystemExit("--preview-fast requires --draft")
 
     LAT1, LON1, LAT2, LON2 = cli_args.bbox_tuple
     CITY_NAME = cli_args.city
@@ -386,6 +392,8 @@ def main():
     area_km2 = bbox["area_km2"]
     area_class = get_area_class(area_km2)
     resolution = TERRAIN_GRID.get(area_class, 512)
+    if cli_args.preview_fast:
+        resolution = min(resolution, 256)
     scale = compute_scale(width_m, height_m)
     south, west, north, east = bbox["wgs84_bbox"]
     utm_crs = bbox["utm_crs"]
@@ -399,7 +407,9 @@ def main():
 
     # 取数框量化（snap-to-grid）：取数用量化框（跨请求缓存复用），
     # 输出度量与最终裁剪仍用用户精确框。--no-snap 回退旧行为。
-    snap_active = not cli_args.no_snap
+    # 快速预览优先减少本次解析量：精确 bbox 通常远小于量化后的缓存框。
+    # 已选画廊风格的预览仍由 generate_gallery_draft 直接复用预处理缓存。
+    snap_active = not cli_args.no_snap and not cli_args.preview_fast
     if snap_active:
         fs, fw, fn, fe = _snap_bbox(south, west, north, east)
         snap_info = bbox_to_utm(fs, fw, fn, fe)
@@ -414,6 +424,8 @@ def main():
     print(f"  Area: {width_m:.0f}m × {height_m:.0f}m = {area_km2:.1f} km² ({area_class})")
     print(f"  Scale: {scale:.6f} mm/m")
     print(f"  Resolution: {resolution}x{resolution}")
+    if cli_args.preview_fast:
+        print("  [preview-fast] exact bbox, reduced DEM/GLB geometry")
     if snap_active:
         print(f"  Fetch bbox (snapped): ({fs:.4f}, {fw:.4f}) → ({fn:.4f}, {fe:.4f}) "
               f"[snap={_snap_bbox.__defaults__[0]:.2f}°]")
@@ -536,11 +548,15 @@ def main():
     print(f"\n[Stage 3] Fetching vegetation data...")
     t3 = time.time()
 
-    vegetation_gdf = (fetch_tiled_from_cli if snap_active else fetch_from_cli)(
-        tag_type='vegetation',
-        south=fs, west=fw, north=fn, east=fe,
-        pbf_file=PBF_FILE
-    )
+    if cli_args.preview_fast:
+        print("  [preview-fast] skipped (formal 3MF still includes vegetation)")
+        vegetation_gdf = None
+    else:
+        vegetation_gdf = (fetch_tiled_from_cli if snap_active else fetch_from_cli)(
+            tag_type='vegetation',
+            south=fs, west=fw, north=fn, east=fe,
+            pbf_file=PBF_FILE
+        )
 
     veg_fetch_time = time.time() - t3
 
@@ -612,11 +628,15 @@ def main():
     print(f"\n[Stage 3d] Fetching landuse data...")
     t3d = time.time()
 
-    landuse_gdf = (fetch_tiled_from_cli if snap_active else fetch_from_cli)(
-        tag_type='landuse',
-        south=fs, west=fw, north=fn, east=fe,
-        pbf_file=PBF_FILE
-    )
+    if cli_args.preview_fast:
+        print("  [preview-fast] skipped (block-base classification simplified)")
+        landuse_gdf = None
+    else:
+        landuse_gdf = (fetch_tiled_from_cli if snap_active else fetch_from_cli)(
+            tag_type='landuse',
+            south=fs, west=fw, north=fn, east=fe,
+            pbf_file=PBF_FILE
+        )
 
     if landuse_gdf is not None and len(landuse_gdf) > 0:
         print(f"  Features: {len(landuse_gdf)}")
@@ -967,6 +987,7 @@ def main():
             base_thickness_mm=cli_args.base_thickness_mm,
             terrain_relief_mm=(_cfg.TERRAIN_THICKNESS_MM
                                if auto_resolved is not None else None),
+            preview_quality=("fast" if cli_args.preview_fast else "balanced"),
         )
         glb_size = os.path.getsize(glb_path) / (1024 * 1024)
         total_time = time.time() - t_start

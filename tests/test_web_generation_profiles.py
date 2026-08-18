@@ -60,6 +60,10 @@ def test_classic_profile_keeps_legacy_entry():
     job = _queued_job(response)
     assert job["spec"]["cmd"][1] == "generate_city_legacy.py"
     assert "--draft" in job["spec"]["cmd"]
+    assert "--preview-fast" in job["spec"]["cmd"]
+    assert "--no-vegetation" in job["spec"]["cmd"]
+    assert "--png" not in job["spec"]["cmd"]
+    assert "--review-png" not in job["spec"]["cmd"]
     assert job["spec"]["cmd"][
         job["spec"]["cmd"].index("--base-thickness-mm") + 1] == "0.40"
 
@@ -92,6 +96,18 @@ def test_custom_draft_reuses_selected_gallery_cache(monkeypatch, tmp_path):
     assert "--png" not in cmd
     assert job["fast_draft"] is True
     assert "1–3 分钟" in server._job_duration_hint(job)
+
+
+def test_classic_full_keeps_print_render_outputs():
+    response = server.api_generate(server.GenerateRequest(
+        city="westlake", mode="full", generation_profile="classic",
+    ))
+
+    cmd = _queued_job(response)["spec"]["cmd"]
+    assert "--draft" not in cmd
+    assert "--preview-fast" not in cmd
+    assert "--png" in cmd
+    assert "--review-png" in cmd
 
 
 @pytest.mark.parametrize(

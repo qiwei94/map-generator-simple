@@ -42,6 +42,8 @@ if str(ROOT) not in sys.path:
 OUTPUT_DIR = Path(os.environ.get("STUDIO_OUTPUT_DIR", ROOT / "output"))
 GALLERY_DIR = OUTPUT_DIR / "style_gallery"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+SHOWCASE_PLAN_PATH = ROOT / "data" / "showcase_cities.json"
+SHOWCASE_STATUS_PATH = ROOT / "tmp" / "showcase_batch_status.json"
 JOB_LOG_DIR = Path(os.environ.get(
     "STUDIO_JOB_LOG_DIR", ROOT / "tmp" / "webapp_jobs"))
 JOB_LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -1083,31 +1085,71 @@ def api_cities():
 
 @app.get("/api/showcase")
 def api_showcase():
-    """Curated real pipeline outputs; absent files are simply omitted."""
-    candidates = [
-        ("巴黎 · 塞纳河", "城市精细", "custom_327de4",
-         "dense_detail_topdown.png"),
-        ("芝加哥 · 湖岸", "街区填充", "timing_chicago_25km2_20260818",
-         "block_fill_topdown.png"),
-        ("杭州 · 西湖", "水岸景观", "custom_694256",
-         "baseline_topdown.png"),
-        ("杭州 · 西湖核心", "精细道路", "westlake_acceptance_5km",
-         "dense_detail_topdown.png"),
-    ]
+    """Return only completed, physically verified 15×15 km samples."""
+    style_labels = {
+        "baseline": "STANDARD",
+        "block_fill": "BLOCK FILL",
+        "dense_detail": "DENSE DETAIL",
+        "minimal": "MINIMAL",
+    }
     samples = []
-    for title, style, slug, filename in candidates:
-        path = GALLERY_DIR / slug / filename
-        if path.is_file():
+    try:
+        plan = json.loads(SHOWCASE_PLAN_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        plan = {"size_km": 15, "cities": []}
+    size_km = int(plan.get("size_km") or 15)
+    expected_area = size_km * size_km
+    for city in plan.get("cities", []):
+        slug = city.get("slug", "")
+        meta = _load_gallery(slug)
+        if not meta:
+            continue
+        area_km2 = float(meta.get("profile", {}).get("area_km2") or 0)
+        if not expected_area * 0.88 <= area_km2 <= expected_area * 1.12:
+            continue
+        styles = [city.get("hero_style", "baseline")]
+        styles.extend(city.get("extra_hero_styles", []))
+        for style in styles:
+            filename = (meta.get("styles", {}).get(style, {})
+                        .get("renders", {}).get("topdown"))
+            path = GALLERY_DIR / slug / str(filename or "")
+            if not filename or not path.is_file():
+                continue
+            label = style_labels.get(style, style.upper())
+            title = city.get("caption") or city.get("title") or slug
+            if style != city.get("hero_style"):
+                title = f"{city.get('title', title)} · {label.title()}"
             samples.append({
-                "title": title, "style": style,
+                "title": title,
+                "location": f"{city.get('key', slug).replace('_', ' ').upper()} / {label}",
+                "kind": "真实 15 × 15 KM 输出",
+                "alt": f"真实生成的{city.get('title', title)} 15 公里乘 15 公里{label}风格图",
+                "size_km": size_km,
                 "url": f"/files/style_gallery/{slug}/{filename}",
             })
-    if not samples and (STATIC_DIR / "assets/westlake-real-output.jpg").is_file():
-        samples.append({
-            "title": "杭州 · 西湖", "style": "真实 25 km 输出",
-            "url": "/assets/westlake-real-output.jpg",
-        })
     return {"samples": samples}
+
+
+@app.get("/api/showcase/status")
+def api_showcase_status():
+    """Expose overnight sample progress without leaking worker internals."""
+    try:
+        plan = json.loads(SHOWCASE_PLAN_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        plan = {"cities": []}
+    try:
+        batch = json.loads(SHOWCASE_STATUS_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        batch = {"state": "not_started"}
+    completed = 0
+    for city in plan.get("cities", []):
+        meta = _load_gallery(city.get("slug", ""))
+        style = city.get("hero_style", "baseline")
+        if (meta and meta.get("styles", {}).get(style, {})
+                .get("renders", {}).get("topdown")):
+            completed += 1
+    return {"planned": len(plan.get("cities", [])),
+            "completed": completed, "batch": batch}
 
 
 @app.get("/api/gallery/{city}")
@@ -1667,11 +1709,15 @@ def api_generate(req: GenerateRequest, request: Request = None):
         cmd = base_cmd
     else:
         cmd = base_cmd + [
-            "--png", "--review-png", "--base-thickness-mm",
-            f"{PRODUCT_BASE_THICKNESS_MM:.2f}",
+            "--base-thickness-mm", f"{PRODUCT_BASE_THICKNESS_MM:.2f}",
         ]
         if req.mode == "draft":
-            cmd.append("--draft")
+            # Draft is a composition check, not a print artifact.  Avoid both
+            # PNG render passes, full vegetation/landuse, and print-grade mesh
+            # density; the formal 3MF path remains unchanged.
+            cmd.extend(["--draft", "--preview-fast", "--no-vegetation"])
+        else:
+            cmd.extend(["--png", "--review-png"])
 
     # 标注点（照片 GPS 点）：draft GLB 将其附近最高处染红
     if not quality_profile:

@@ -332,6 +332,72 @@ def _drape_polys(polys, sampler: _TerrainSampler, scale: float, color,
     return mesh
 
 
+def _drape_lines(lines_with_width, sampler: _TerrainSampler, scale: float,
+                 color, offset_mm: float, cell_m: float,
+                 simplify_m: float = 0.0) -> "trimesh.Trimesh | None":
+    """Build lightweight terrain-following road ribbons without polygon booleans.
+
+    Print geometry buffers every line into a polygon and Delaunay-triangulates
+    it.  A browser preview only needs a visible ribbon, so this path emits two
+    vertices per sampled centerline point.  It is intentionally an open shell.
+    """
+    import shapely
+
+    parts = []
+    for geometry, width_m in lines_with_width:
+        if geometry is None or geometry.is_empty:
+            continue
+        geoms = (geometry.geoms if hasattr(geometry, "geoms")
+                 else (geometry,))
+        for line in geoms:
+            if line.is_empty or line.geom_type != "LineString":
+                continue
+            if simplify_m > 0:
+                line = line.simplify(simplify_m, preserve_topology=False)
+            try:
+                line = shapely.segmentize(line, cell_m)
+            except Exception:
+                pass
+            points = np.asarray(line.coords, dtype=float)
+            if len(points) < 2:
+                continue
+            deltas = np.empty_like(points)
+            deltas[0] = points[1] - points[0]
+            deltas[-1] = points[-1] - points[-2]
+            if len(points) > 2:
+                deltas[1:-1] = points[2:] - points[:-2]
+            lengths = np.linalg.norm(deltas, axis=1)
+            valid = lengths > 1e-9
+            if not valid.all():
+                points = points[valid]
+                deltas = deltas[valid]
+                lengths = lengths[valid]
+            if len(points) < 2:
+                continue
+            normals = np.column_stack([-deltas[:, 1], deltas[:, 0]])
+            normals /= lengths[:, None]
+            offset = normals * max(float(width_m), 1.0) / 2.0
+            left = points + offset
+            right = points - offset
+            xy = np.empty((len(points) * 2, 2), dtype=float)
+            xy[0::2] = left
+            xy[1::2] = right
+            z = sampler.z_mm_vec(xy[:, 0], xy[:, 1]) + offset_mm
+            vertices = np.column_stack([xy * scale, z])
+            i = np.arange(len(points) - 1) * 2
+            faces = np.vstack([
+                np.column_stack([i, i + 1, i + 2]),
+                np.column_stack([i + 1, i + 3, i + 2]),
+            ])
+            parts.append(trimesh.Trimesh(
+                vertices=vertices, faces=faces, process=False))
+    if not parts:
+        return None
+    mesh = trimesh.util.concatenate(parts)
+    mesh.visual.vertex_colors = color
+    return mesh
+
+
 def _terrain_heightfield(elevation_grid, bbox_local, scale, z_gamma,
                          relief_mm_max, thickness_mm=None, grid_n=128,
                          *, surface_base_mm=0.0, bottom_z_mm=None):
@@ -566,7 +632,8 @@ def render_glb_preview(layers, ctx: dict, output_path: str,
                        elevation_grid=None, markers=None,
                        water_gdf=None,
                        base_thickness_mm=None,
-                       terrain_relief_mm=None) -> str:
+                       terrain_relief_mm=None,
+                       preview_quality="balanced") -> str:
     """Draft GLB 导出主入口。
 
     Args:
@@ -587,6 +654,9 @@ def render_glb_preview(layers, ctx: dict, output_path: str,
         VEGETATION_THICKNESS_MM, VL_Z_OFFSET_MM, VO_Z_OFFSET_MM,
     )
 
+    if preview_quality not in ("balanced", "fast"):
+        raise ValueError("preview_quality must be 'balanced' or 'fast'")
+    fast = preview_quality == "fast"
     t0 = time.time()
     bbox_local = ctx["bbox_local"]
     scale = float(ctx["scale"])
@@ -607,14 +677,17 @@ def render_glb_preview(layers, ctx: dict, output_path: str,
     scene.add_geometry(
         _terrain_heightfield(elevation_grid, bbox_local, scale, Z_GAMMA,
                              relief_mm_max, surface_base_mm=terrain_base_z,
-                             bottom_z_mm=Z_WATER_BASE_MM),
+                             bottom_z_mm=Z_WATER_BASE_MM,
+                             grid_n=64 if fast else 128),
         node_name="terrain")
 
     # ── 平板层（block_base / water / vegetation）──
     # 草稿几何简化容差：按区域宽度自适应（大区域粗一些，控制 GLB 体积）
-    draft_tol_m = max((xmax - xmin) / 2000.0, 5.0)
+    draft_tol_m = max((xmax - xmin) / (900.0 if fast else 2000.0),
+                      10.0 if fast else 5.0)
     # drape 三角化边长：地形贴合密度（道路/水体用）
-    drape_cell_m = max((xmax - xmin) / 512.0, 20.0)
+    drape_cell_m = max((xmax - xmin) / (220.0 if fast else 512.0),
+                       35.0 if fast else 20.0)
 
     flat_specs = [
         ("block_base", list(_iter_polys(layers.block_base)),
@@ -693,20 +766,29 @@ def render_glb_preview(layers, ctx: dict, output_path: str,
 
     # ── 道路（贴地形 drape：随浮雕起伏，不悬浮）──
     if layers.roads_lines:
-        road_polys = []
+        road_specs = []
         for item in layers.roads_lines:
             line, highway = item[0], item[1]
             if line is None or line.is_empty:
                 continue
             w_m = ROAD_WIDTHS.get(highway,
                                   ROAD_DEFAULT_WIDTH_M) * ROAD_WIDTH_MULTIPLIER
-            try:
-                road_polys.append(line.buffer(w_m / 2.0, quad_segs=1))
-            except Exception:
-                continue
-        mesh = _drape_polys(list(_iter_polys(road_polys)), sampler, scale,
-                            _COLORS["roads"], Z_ROAD_ABOVE_TERRAIN_MM,
-                            drape_cell_m)
+            road_specs.append((line, w_m))
+        if fast:
+            mesh = _drape_lines(
+                road_specs, sampler, scale, _COLORS["roads"],
+                Z_ROAD_ABOVE_TERRAIN_MM, drape_cell_m,
+                simplify_m=draft_tol_m)
+        else:
+            road_polys = []
+            for line, w_m in road_specs:
+                try:
+                    road_polys.append(line.buffer(w_m / 2.0, quad_segs=1))
+                except Exception:
+                    continue
+            mesh = _drape_polys(list(_iter_polys(road_polys)), sampler, scale,
+                                _COLORS["roads"], Z_ROAD_ABOVE_TERRAIN_MM,
+                                drape_cell_m)
         if mesh is not None:
             scene.add_geometry(mesh, node_name="roads")
             print(f"  [glb] roads: {len(mesh.faces):,} faces")
@@ -718,7 +800,10 @@ def render_glb_preview(layers, ctx: dict, output_path: str,
     bl_items = [(p, -Z_BUILDING_EMBED_MM, max(float(h), 0.5))
                 for p, h in layers.BL if p is not None and not p.is_empty]
     for name, items in (("buildings", bo_items), ("landmarks", bl_items)):
-        mesh = _extrude_polys(items, sampler, scale, _COLORS[name])
+        simplify_m = (draft_tol_m if fast and name == "buildings"
+                      else draft_tol_m / 2.0 if fast else 0.0)
+        mesh = _extrude_polys(items, sampler, scale, _COLORS[name],
+                              simplify_m=simplify_m)
         if mesh is not None:
             scene.add_geometry(mesh, node_name=name)
             print(f"  [glb] {name}: {len(mesh.faces):,} faces")

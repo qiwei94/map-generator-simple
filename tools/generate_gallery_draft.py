@@ -5,7 +5,8 @@ The normal legacy entry is intentionally comprehensive: it fetches landuse,
 rebuilds preprocessing and renders a diagnostic PNG before exporting GLB.
 After a user has already generated and selected a style, those stages are
 duplicate work.  This entry reopens the same ``CityHarness`` cache, loads the
-selected preprocess result, and only renders the matching topdown + draft GLB.
+selected preprocess result, and renders only the lightweight draft GLB.  The
+matching topdown already exists in the style gallery.
 """
 from __future__ import annotations
 
@@ -22,7 +23,6 @@ if str(ROOT) not in sys.path:
 
 from aesthetic.presets import CityPreset, register_preset
 from aesthetic.rerun_harness import CityHarness
-from aesthetic.review_render import render_review_bundle
 from _TEXTURE_STYLE_OF_DEEPSEEK.render_glb import render_glb_preview
 from _TEXTURE_STYLE_OF_DEEPSEEK.design_spec import write_design_spec
 
@@ -77,13 +77,6 @@ def main() -> int:
     harness.prepare()
     layers = harness.run_round(params)
 
-    render_review_bundle(
-        layers, harness.ctx,
-        road_width_multiplier=float(params.get("road_width_multiplier", 2.0)),
-        out_dir=str(out_dir), tag=args.city,
-        scene_type=args.scene_type,
-    )
-
     markers_local = []
     if args.marker:
         from pyproj import Transformer
@@ -107,6 +100,7 @@ def main() -> int:
         base_thickness_mm=args.base_thickness_mm,
         terrain_relief_mm=float(params.get(
             "terrain_thickness_mm", harness.base_params.terrain_thickness_mm)),
+        preview_quality="fast",
     )
 
     design_spec = {
