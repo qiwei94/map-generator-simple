@@ -370,7 +370,11 @@ class GenerateRequest(BaseModel):
     area: CustomArea | None = None    # 自定义区域（与 city 二选一）
     markers: list[list[float]] = []   # [[lat, lon], ...] 标注点（附近最高处染红）
     gallery_slug: str = ""            # 风格画廊身份；防止找回任务后区域串线
-    base_thickness_mm: float = 0.4
+
+
+# 产品端固定打印底层：改变该值必然让 GLB/3MF 全部重算，
+# 不作为用户参数也避免同一区域产生无意义的缓存分叉。
+PRODUCT_BASE_THICKNESS_MM = 0.4
 
 
 GENERATION_PROFILES = {
@@ -1550,9 +1554,6 @@ def api_generate(req: GenerateRequest, request: Request = None):
     user = _current_user(request, required=AUTH_REQUIRED)
     if req.mode not in ("draft", "full"):
         raise HTTPException(400, f"未知模式: {req.mode}")
-    if not 0.4 <= req.base_thickness_mm <= 3.0:
-        raise HTTPException(400, "打印底层厚度需在 0.4–3.0 mm 之间")
-
     profile = req.generation_profile.strip() or "classic"
     if profile not in GENERATION_PROFILES:
         raise HTTPException(400, f"未知生成方式: {profile}")
@@ -1658,7 +1659,6 @@ def api_generate(req: GenerateRequest, request: Request = None):
         "generation_profile": profile,
         "markers": req.markers,
         "gallery_slug": req.gallery_slug.strip(),
-        "base_thickness_mm": round(req.base_thickness_mm, 2),
     })
     job_id = uuid.uuid4().hex[:8]
     log_path = JOB_LOG_DIR / f"{job_id}_{city}_{req.mode}.log"
@@ -1668,7 +1668,7 @@ def api_generate(req: GenerateRequest, request: Request = None):
     else:
         cmd = base_cmd + [
             "--png", "--review-png", "--base-thickness-mm",
-            f"{req.base_thickness_mm:.2f}",
+            f"{PRODUCT_BASE_THICKNESS_MM:.2f}",
         ]
         if req.mode == "draft":
             cmd.append("--draft")
@@ -1709,7 +1709,7 @@ def api_generate(req: GenerateRequest, request: Request = None):
             "--scene-type", gallery_meta.get("scene_type", "urban"),
             "--params-json", str(params_path),
             "--base-thickness-mm",
-            f"{req.base_thickness_mm:.2f}",
+            f"{PRODUCT_BASE_THICKNESS_MM:.2f}",
         ]
         for mk in req.markers:
             if len(mk) == 2:

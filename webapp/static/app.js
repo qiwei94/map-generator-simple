@@ -18,7 +18,6 @@ const state = {
   renderKind: "topdown",
   selectedStyle: null,
   generationProfile: "classic",
-  baseThicknessMm: 0.4,
   authConfig: null,
   account: null,
   job: null,           // {id, mode}
@@ -49,7 +48,6 @@ function getSession() {
     target: null,          // {kind, city, title, prototype}
     selectedStyle: null,
     generationProfile: "classic",
-    baseThicknessMm: 0.4,
     areaName: "",
     photoPoints: [],       // [{lat, lon, name}] 照片 GPS 坐标（不含原图）
     journeyClusters: null, // [{lat, lon, name, count}]
@@ -99,12 +97,6 @@ async function restoreSession() {
   }
   if (s.generationProfile) {
     state.generationProfile = s.generationProfile;
-  }
-  if (Number.isFinite(Number(s.baseThicknessMm))) {
-    state.baseThicknessMm = Number(s.baseThicknessMm);
-    $("baseThickness").value = String(state.baseThicknessMm);
-    $("baseThicknessValue").textContent =
-      `${state.baseThicknessMm.toFixed(2)} mm`;
   }
   if (s.areaName) {
     const el = $("areaName");
@@ -165,7 +157,6 @@ function persistState() {
     target: state.target,
     selectedStyle: state.selectedStyle,
     generationProfile: state.generationProfile,
-    baseThicknessMm: state.baseThicknessMm,
     areaName: ($("areaName") || {}).value || "",
     lastCity: state.target.city || (lastArtifacts ? state.jobSlug : null),
     lastBbox: map.state.map ? currentBbox() : null,
@@ -1418,19 +1409,11 @@ $("profilePicker").addEventListener("change", (event) => {
   persistState();
 });
 
-$("baseThickness").oninput = () => {
-  state.baseThicknessMm = Number($("baseThickness").value);
-  $("baseThicknessValue").textContent =
-    `${state.baseThicknessMm.toFixed(2)} mm`;
-  persistState();
-};
-
 /** 组装请求体：预设城市 or 自定义区域，统一入口 */
 function buildRequest(mode) {
   const body = {
     mode,
     generation_profile: state.generationProfile,
-    base_thickness_mm: state.baseThicknessMm,
   };
   if (mode === "draft" && state.generationProfile !== "classic") {
     throw new Error("精细模型直接生成正式打印文件，不提供快速预览");

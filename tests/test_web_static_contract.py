@@ -38,9 +38,9 @@ def test_restored_gallery_also_loads_existing_preview_artifacts():
 def test_app_script_cache_key_is_bumped_for_shared_preview_spec_ui():
     html = INDEX_HTML.read_text(encoding="utf-8")
 
-    assert '<script src="app.js?v=45"></script>' in html
-    assert '<link rel="stylesheet" href="style.css?v=45">' in html
+    assert '<script src="app.js?v=46"></script>' in html
+    assert '<link rel="stylesheet" href="style.css?v=46">' in html
     assert 'id="accountDialog"' in html
     assert 'id="myTasksCard"' in html
     assert 'id="showcaseTrack"' in html
-    assert 'min="0.4" max="1.2"' in html
+    assert 'id="baseThickness"' not in html
