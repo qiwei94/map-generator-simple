@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <meta name="theme-color" content="#171916">
 <title>旅程浮雕 Studio</title>
-<link rel="stylesheet" href="style.css?v=40">
+<link rel="stylesheet" href="style.css?v=44">
 <link rel="stylesheet" href="vendor/leaflet/leaflet.css">
 <!-- 本地自托管，无 CDN 依赖 -->
 <script type="module" src="vendor/model-viewer.min.js"
@@ -26,6 +26,10 @@
     <a href="#step2"><span>02</span>取景</a>
     <a href="#step4"><span>03</span>生成</a>
   </nav>
+  <button class="account-trigger" id="accountTrigger" type="button">
+    <span id="accountLabel">登录</span>
+    <small id="accountQuota">保存我的任务</small>
+  </button>
   <p class="top-spec">3MF · PRINT READY</p>
 </header>
 
@@ -231,13 +235,52 @@
   </section>
 
   <!-- 找回任务 -->
-  <section class="card">
+  <section class="card task-lookup">
     <div class="custom-row">
       <input type="text" id="jobLookup" class="text-input" placeholder="输入任务令牌或粘贴任务链接，查询进度/结果">
       <button class="btn btn-ghost" id="btnJobLookup">找回任务</button>
     </div>
   </section>
+
+  <section class="card account-jobs" id="myTasksCard" hidden>
+    <div class="section-head">
+      <h2 class="section-title">我的任务 <span class="hint" id="myTasksSummary"></span></h2>
+      <button class="btn-inline" id="btnRefreshTasks" type="button">刷新</button>
+    </div>
+    <div class="my-task-list" id="myTaskList"></div>
+  </section>
 </main>
+
+<dialog class="account-dialog" id="accountDialog">
+  <button class="account-close" id="accountClose" type="button" aria-label="关闭">×</button>
+  <div id="accountLoginView">
+    <p class="account-kicker">YOUR RELIEF ARCHIVE</p>
+    <h2>找回每一段旅程</h2>
+    <p class="account-intro">用邮箱验证码登录。任务、进度与成品会保存在你的账号中，无需记住任务令牌。</p>
+    <label class="account-field">邮箱
+      <input class="text-input" id="authEmail" type="email" autocomplete="email" placeholder="name@example.com">
+    </label>
+    <div class="account-code-row">
+      <label class="account-field">验证码
+        <input class="text-input mono" id="authCode" inputmode="numeric" maxlength="6" autocomplete="one-time-code" placeholder="6 位数字">
+      </label>
+      <button class="btn btn-ghost" id="btnSendCode" type="button">获取验证码</button>
+    </div>
+    <button class="btn btn-primary" id="btnVerifyCode" type="button">登录 / 注册</button>
+    <p class="account-message" id="authMessage"></p>
+  </div>
+  <div id="accountUserView" hidden>
+    <p class="account-kicker">MY STUDIO</p>
+    <h2 id="accountEmail">—</h2>
+    <div class="quota-block">
+      <span>本月可用额度</span>
+      <strong id="accountQuotaLarge">—</strong>
+      <small id="accountQuotaPeriod">按计算量扣除；缓存结果不重复扣费</small>
+    </div>
+    <button class="btn btn-primary" id="btnOpenTasks" type="button">查看我的任务</button>
+    <button class="btn btn-ghost" id="btnLogout" type="button">退出登录</button>
+  </div>
+</dialog>
 
 <!-- 灯箱 -->
 <div class="lightbox" id="lightbox" hidden>
@@ -248,6 +291,6 @@
 
 <footer class="foot">旅程浮雕 · 把走过的路，凝固成可以触摸的实体 · <a href="#" onclick="copyMyLink();return false">复制我的链接</a> · <a href="#" onclick="localStorage.removeItem('jr_session');location.href=location.pathname;return false">重新开始</a></footer>
 
-<script src="app.js?v=43"></script>
+<script src="app.js?v=44"></script>
 </body>
 </html>

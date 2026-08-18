@@ -98,6 +98,18 @@ def test_logout_revokes_session(store):
     assert store.get_session_user(token, now=1003) is None
 
 
+def test_admin_controls_quota_and_account_status(store):
+    user, _ = _login(store)
+
+    updated = store.update_user_controls(
+        user.id, quota_limit=12, status="paused", now=1010)
+
+    assert updated.quota_limit == 12
+    assert updated.status == "paused"
+    with pytest.raises(AuthError, match="额度"):
+        store.update_user_controls(user.id, quota_limit=-1)
+
+
 def test_http_email_login_sets_secure_server_session(monkeypatch, tmp_path):
     from fastapi.testclient import TestClient
     import server
@@ -172,7 +184,40 @@ def test_owned_jobs_charge_once_share_cache_and_stay_private(monkeypatch,
     assert shared.json()["reused"] is True
     assert http_store.get_user(second_user["id"]).quota_used == 0
     assert second_client.get(f"/api/jobs/{job_id}").status_code == 200
+    assert second_client.get("/api/jobs?mine=true").json()["jobs"][0]["id"] == job_id
     assert set(server.JOBS[job_id]["owner_ids"]) == {
         first_user["id"], second_user["id"],
     }
     server.JOBS.clear()
+
+
+def test_admin_can_list_users_and_change_quota(monkeypatch, tmp_path):
+    from fastapi.testclient import TestClient
+    import server
+
+    http_store = AuthStore(
+        tmp_path / "admin.db", "http-secret", default_quota=20,
+        admin_emails={"admin@example.com"},
+    )
+    monkeypatch.setattr(server, "_AUTH_STORE", http_store)
+    monkeypatch.setattr(server, "AUTH_DEV_ECHO_CODE", True)
+    monkeypatch.setattr(server, "AUTH_REQUIRED", True)
+    server.JOBS.clear()
+    admin_client = TestClient(server.app)
+    user_client = TestClient(server.app)
+    admin = _http_login(admin_client, "admin@example.com")
+    user = _http_login(user_client, "user@example.com")
+
+    forbidden = user_client.get("/api/jobs?include_log=true")
+    users = admin_client.get("/api/admin/users")
+    changed = admin_client.patch(
+        f"/api/admin/users/{user['id']}", json={"quota_limit": 50},
+    )
+
+    assert admin["role"] == "admin"
+    assert forbidden.status_code == 403
+    assert users.status_code == 200
+    assert {row["email"] for row in users.json()["users"]} == {
+        "admin@example.com", "user@example.com",
+    }
+    assert changed.json()["user"]["quota_limit"] == 50

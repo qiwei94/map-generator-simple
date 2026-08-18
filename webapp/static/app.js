@@ -18,6 +18,8 @@ const state = {
   renderKind: "topdown",
   selectedStyle: null,
   generationProfile: "classic",
+  authConfig: null,
+  account: null,
   job: null,           // {id, mode}
   /* 当前目标：预设城市 or 自定义区域 */
   target: { kind: "area", city: null, title: "自定义区域" },
@@ -181,10 +183,156 @@ async function fetchJSON(url, opts) {
   if (!r.ok) {
     let msg = `HTTP ${r.status}`;
     try { msg = (await r.json()).detail || msg; } catch (_) {}
+    if (r.status === 401) openAccountDialog();
     throw new Error(msg);
   }
   return r.json();
 }
+
+/* ---------------- 账号与我的任务 ---------------- */
+
+function openAccountDialog() {
+  const dialog = $("accountDialog");
+  if (dialog.open) return;
+  if (dialog.showModal) dialog.showModal();
+  else dialog.setAttribute("open", "");
+}
+
+function closeAccountDialog() {
+  const dialog = $("accountDialog");
+  if (dialog.close) dialog.close();
+  else dialog.removeAttribute("open");
+}
+
+function renderAccount() {
+  const user = state.account;
+  $("accountLoginView").hidden = Boolean(user);
+  $("accountUserView").hidden = !user;
+  $("myTasksCard").hidden = !user;
+  if (!user) {
+    $("accountLabel").textContent = "登录";
+    $("accountQuota").textContent = "保存我的任务";
+    return;
+  }
+  const shortEmail = user.email.length > 24
+    ? user.email.slice(0, 21) + "…" : user.email;
+  $("accountLabel").textContent = shortEmail;
+  $("accountQuota").textContent = `本月剩余 ${user.quota_remaining}`;
+  $("accountEmail").textContent = user.email;
+  $("accountQuotaLarge").textContent = `${user.quota_remaining} / ${user.quota_limit}`;
+  $("accountQuotaPeriod").textContent =
+    `${user.quota_period} · 按计算量扣除，缓存结果不重复扣费`;
+}
+
+async function refreshAccount() {
+  if (window.location.protocol === "file:") return;
+  try {
+    const config = await fetchJSON("/api/auth/config");
+    state.authConfig = config;
+    const result = await fetchJSON("/api/auth/me");
+    state.account = result.user || null;
+    renderAccount();
+    if (state.account) await loadMyTasks();
+    else if (config.required) openAccountDialog();
+  } catch (_) {
+    renderAccount();
+  }
+}
+
+async function sendEmailCode() {
+  const email = $("authEmail").value.trim();
+  if (!email) { $("authMessage").textContent = "请先输入邮箱"; return; }
+  const button = $("btnSendCode");
+  button.disabled = true;
+  $("authMessage").textContent = "正在发送…";
+  try {
+    const result = await fetchJSON("/api/auth/email/start", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email }),
+    });
+    $("authMessage").textContent = result.message;
+    if (result.dev_code) $("authCode").value = result.dev_code;
+    let left = 60;
+    button.textContent = `${left}s 后重发`;
+    const timer = setInterval(() => {
+      left -= 1;
+      button.textContent = left > 0 ? `${left}s 后重发` : "获取验证码";
+      if (left <= 0) { clearInterval(timer); button.disabled = false; }
+    }, 1000);
+  } catch (error) {
+    $("authMessage").textContent = error.message;
+    button.disabled = false;
+  }
+}
+
+async function verifyEmailCode() {
+  const email = $("authEmail").value.trim();
+  const code = $("authCode").value.trim();
+  if (!email || !/^\d{6}$/.test(code)) {
+    $("authMessage").textContent = "请输入邮箱和 6 位验证码";
+    return;
+  }
+  try {
+    const result = await fetchJSON("/api/auth/email/verify", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, code }),
+    });
+    state.account = result.user;
+    renderAccount();
+    await loadMyTasks();
+    closeAccountDialog();
+  } catch (error) {
+    $("authMessage").textContent = error.message;
+  }
+}
+
+async function logoutAccount() {
+  await fetchJSON("/api/auth/logout", { method: "POST" });
+  state.account = null;
+  renderAccount();
+}
+
+async function loadMyTasks() {
+  if (!state.account) return;
+  try {
+    const result = await fetchJSON("/api/jobs?mine=true");
+    const jobs = result.jobs || [];
+    $("myTasksSummary").textContent = jobs.length
+      ? `共 ${jobs.length} 个，点击即可继续` : "还没有任务";
+    $("myTaskList").innerHTML = jobs.length ? jobs.map((job) => {
+      const status = { pending: "排队中", running: "生成中", done: "已完成",
+                       failed: "失败" }[job.status] || job.status;
+      const queue = job.status === "pending" && job.queue_position
+        ? ` · 队列第 ${job.queue_position} 位` : "";
+      return `<button class="my-task" type="button" data-job-id="${esc(job.id)}">
+        <span><strong>${esc(job.city_title || job.city)}</strong>
+          <small>${esc(job.mode === "styles" ? "风格方案" :
+            (job.mode === "draft" ? "快速预览" : "正式模型"))}</small></span>
+        <span class="my-task-status ${esc(job.status)}">${esc(status + queue)}</span>
+      </button>`;
+    }).join("") : '<p class="my-task-empty">从选择一个地点开始，第一件作品会出现在这里。</p>';
+  } catch (error) {
+    $("myTaskList").innerHTML = `<p class="my-task-empty">${esc(error.message)}</p>`;
+  }
+}
+
+$("accountTrigger").onclick = openAccountDialog;
+$("accountClose").onclick = closeAccountDialog;
+$("btnSendCode").onclick = sendEmailCode;
+$("btnVerifyCode").onclick = verifyEmailCode;
+$("authCode").onkeydown = (event) => {
+  if (event.key === "Enter") verifyEmailCode();
+};
+$("btnLogout").onclick = logoutAccount;
+$("btnRefreshTasks").onclick = loadMyTasks;
+$("btnOpenTasks").onclick = () => {
+  closeAccountDialog();
+  $("myTasksCard").scrollIntoView({ behavior: "smooth", block: "start" });
+};
+$("myTaskList").onclick = (event) => {
+  const item = event.target.closest("[data-job-id]");
+  if (item) lookupJob(item.dataset.jobId);
+};
 
 /* ---------------- Step 1 Tab 切换 ---------------- */
 
@@ -540,6 +688,7 @@ async function confirmArea() {
       duration_hint: "首次生成通常需要 8–12 分钟；相同区域会直接复用",
     });
     showJobToken(r.job_id);
+    refreshAccount();
     lockView();   // 任务已开始，锁定取景框
     pollJob();
   } catch (err) {
@@ -1304,6 +1453,7 @@ async function startJob(mode) {
         : "正式模型通常需要 15–40 分钟",
     });
     showJobToken(resp.job_id);
+    refreshAccount();
     setBusy(true);
     pollJob();
   } catch (err) {
@@ -1365,9 +1515,13 @@ async function pollJob() {
     renderQualityChecks(j.quality_checks || []);
     // pending = 排队等 worker 拉取；running = 正在计算
     if (j.status === "pending") {
-      $("jobStatus").textContent = "⏳ 排队中，等待计算节点接单…";
+      const queueText = j.queue_position
+        ? `当前队列第 ${j.queue_position} 位` : "等待计算节点接单";
+      $("jobStatus").textContent = `⏳ 排队中 · ${queueText}`;
       $("jobStatus").className = "pill";
-      $("jobStage").textContent = "任务已保存，可以稍后凭令牌找回";
+      $("jobStage").textContent = state.account
+        ? "任务已保存到账号，可以关闭页面稍后回来"
+        : "任务已保存，可以稍后凭令牌找回";
       setTimeout(pollJob, 3000);
       return;
     }
@@ -1397,6 +1551,7 @@ async function pollJob() {
     state.jobSlug = slug;
     state.job = null;
     setBusy(false);
+    refreshAccount();
     if (mode === "fetch") {
       // 数据到位 → 重查当前位置状态，清掉提示里的下载按钮
       if (j.status === "done") {
@@ -1705,6 +1860,7 @@ window.addEventListener("load", async () => {
   if (window.location.protocol !== "file:") {
     lmSearch("", false);   // 预取目录缓存，不弹下拉
   }
+  await refreshAccount();
   await restoreSession();  // 恢复上次会话
   syncGenerationProfileAvailability();
   // 任务链接 ?job=xxx → 自动找回该任务

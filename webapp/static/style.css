@@ -749,7 +749,7 @@ body { background: var(--bg); color: var(--ink); }
 }
 #step1 { grid-column: 1; align-self: start; }
 #step2 { grid-column: 2; }
-#step3, #step4, #step5, .job-card, #main > section.card:last-of-type { grid-column: 1 / -1; }
+#step3, #step4, #step5, .job-card, .task-lookup, .account-jobs { grid-column: 1 / -1; }
 .section-title { color: var(--ink); font-size: 15px; letter-spacing: .01em; }
 .section-title .hint { color: var(--ink-dim); }
 .step-num {
@@ -836,4 +836,68 @@ body { background: var(--bg); color: var(--ink); }
   .product-hero { grid-template-columns: 1fr; }
   .hero-copy { min-height: 520px; }
   .hero-visual { min-height: 520px; }
+}
+
+/* Account archive and queue history */
+.account-trigger {
+  display: flex; flex-direction: column; align-items: flex-end; gap: 3px;
+  border: 0; border-left: 1px solid var(--line); padding: 3px 0 3px 18px;
+  background: transparent; color: var(--ink); cursor: pointer; white-space: nowrap;
+}
+.account-trigger span { font-size: 12px; max-width: 180px; overflow: hidden; text-overflow: ellipsis; }
+.account-trigger small { color: var(--ink-dim); font-size: 9px; font-weight: 400; }
+.account-dialog {
+  width: min(460px, calc(100vw - 32px)); max-height: calc(100vh - 40px);
+  margin: auto; padding: 42px; overflow: auto; border: 1px solid var(--line);
+  background: var(--bg-card); color: var(--ink); box-shadow: 0 30px 100px rgba(30,27,22,.28);
+}
+.account-dialog::backdrop { background: rgba(24,23,20,.52); backdrop-filter: blur(5px); }
+.account-close {
+  position: absolute; right: 16px; top: 12px; border: 0; background: transparent;
+  color: var(--ink-dim); font: 300 27px/1 sans-serif; cursor: pointer;
+}
+.account-kicker {
+  color: var(--accent); font: 600 9px/1 Consolas, Menlo, monospace;
+  letter-spacing: .17em; margin-bottom: 14px;
+}
+.account-dialog h2 {
+  font: 500 28px/1.25 "Songti SC", "Noto Serif SC", serif; margin-bottom: 12px;
+  overflow-wrap: anywhere;
+}
+.account-intro { color: var(--ink-dim); font-size: 13px; line-height: 1.75; margin-bottom: 24px; }
+.account-field { display: flex; flex-direction: column; gap: 7px; color: var(--ink-dim); font-size: 11px; }
+.account-code-row { display: grid; grid-template-columns: minmax(0, 1fr) 130px; gap: 10px; margin: 12px 0; }
+.account-dialog .btn { width: 100%; flex: none; }
+.account-code-row .btn { align-self: end; min-height: 47px; padding: 10px; font-size: 12px; }
+.account-message { min-height: 20px; color: var(--accent); font-size: 11px; margin-top: 12px; }
+.quota-block {
+  display: flex; flex-direction: column; gap: 6px; margin: 24px 0;
+  padding: 22px; background: var(--bg-elev); border-left: 2px solid var(--accent);
+}
+.quota-block span { color: var(--ink-dim); font-size: 11px; }
+.quota-block strong { font: 500 34px/1 Consolas, Menlo, monospace; }
+.quota-block small { color: var(--ink-dim); font-size: 10px; }
+#accountUserView .btn + .btn { margin-top: 9px; }
+.my-task-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 9px; margin-top: 14px; }
+.my-task {
+  display: flex; align-items: center; justify-content: space-between; gap: 20px;
+  padding: 15px; border: 1px solid var(--line); background: #fff; color: var(--ink);
+  text-align: left; cursor: pointer;
+}
+.my-task:hover { border-color: var(--accent); }
+.my-task > span:first-child { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.my-task strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.my-task small, .my-task-empty { color: var(--ink-dim); font-size: 10px; }
+.my-task-status { color: var(--ink-dim); flex-shrink: 0; font-size: 10px; }
+.my-task-status.done { color: var(--accent-2); }
+.my-task-status.failed { color: var(--danger); }
+.my-task-status.running, .my-task-status.pending { color: var(--accent); }
+
+@media (max-width: 767px) {
+  .account-trigger { margin-left: auto; border-left: 0; padding-left: 8px; }
+  .account-trigger small { display: none; }
+  .account-dialog { padding: 34px 22px 24px; }
+  .account-code-row { grid-template-columns: 1fr; }
+  .account-code-row .btn { min-height: 42px; }
+  .my-task-list { grid-template-columns: 1fr; }
 }

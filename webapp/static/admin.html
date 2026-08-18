@@ -27,21 +27,37 @@ th { background: #22252f; color: var(--dim); font-weight: 500; }
 .log-pre { background: #111; color: #aaa; padding: 8px; border-radius: 4px; font-size: 11px; max-height: 200px; overflow: auto; white-space: pre-wrap; margin-top: 4px; display: none; }
 .refresh { float: right; background: var(--accent); color: #1a1408; border: 0; padding: 6px 14px; border-radius: 6px; cursor: pointer; font-weight: 600; }
 .auto { font-size: 11px; color: var(--dim); margin-left: 8px; }
+.notice { display:none; margin: 10px 0 16px; padding: 10px 12px; border: 1px solid var(--red); color: #ffb0a8; }
+.notice a { color: var(--accent); }
+.section-title { margin: 28px 0 10px; font-size: 15px; }
+.quota-input { width: 78px; padding: 4px 6px; color: var(--text); background: #111; border: 1px solid var(--border); }
+.user-actions { display:flex; gap:5px; flex-wrap:wrap; }
 </style>
 </head>
 <body>
 <h1><span>◆</span> 旅程回忆 · 管理后台 <button class="refresh" onclick="load()">刷新</button><span class="auto" id="autoLabel">自动刷新 5s</span></h1>
+<div class="notice" id="notice"></div>
 <div class="stats" id="stats"></div>
 <table>
 <thead><tr><th>ID</th><th>城市</th><th>模式</th><th>风格</th><th>状态</th><th>耗时</th><th>提交时间</th><th>日志</th></tr></thead>
 <tbody id="tbody"></tbody>
+</table>
+<h2 class="section-title">账号与月度额度</h2>
+<table>
+<thead><tr><th>邮箱</th><th>角色</th><th>状态</th><th>任务</th><th>已用 / 上限</th><th>管理</th></tr></thead>
+<tbody id="userBody"></tbody>
 </table>
 <script>
 let autoTimer = null;
 async function load() {
   try {
     const r = await fetch("/api/jobs?include_log=1");
-    const jobs = r.ok ? (await r.json()).jobs : [];
+    if (!r.ok) {
+      const detail = await r.json().catch(() => ({}));
+      throw new Error(detail.detail || `HTTP ${r.status}`);
+    }
+    document.getElementById("notice").style.display = "none";
+    const jobs = (await r.json()).jobs;
     // stats
     const counts = { pending: 0, running: 0, done: 0, failed: 0 };
     jobs.forEach(j => counts[j.status] = (counts[j.status] || 0) + 1);
@@ -57,26 +73,60 @@ async function load() {
       const t = new Date((Date.now() - j.elapsed_s * 1000)).toLocaleTimeString("zh-CN", {hour:"2-digit",minute:"2-digit",second:"2-digit"});
       const logId = "log_" + j.id;
       return `<tr>
-        <td><code>${j.id}</code></td>
-        <td>${j.city_title || j.city}</td>
-        <td>${j.mode}</td>
-        <td>${j.style || "-"}</td>
-        <td><span class="status ${j.status}">${j.status}</span></td>
+        <td><code>${escHtml(j.id)}</code></td>
+        <td>${escHtml(j.city_title || j.city)}</td>
+        <td>${escHtml(j.mode)}</td>
+        <td>${escHtml(j.style || "-")}</td>
+        <td><span class="status ${escHtml(j.status)}">${escHtml(j.status)}</span></td>
         <td>${j.elapsed_s}s</td>
         <td>${t}</td>
         <td><button class="log-btn" onclick="toggleLog('${logId}')">查看</button>
             <pre class="log-pre" id="${logId}">${escHtml(j.log_tail || "(无日志)")}</pre></td>
       </tr>`;
     }).join("");
+    await loadUsers();
   } catch (e) {
     document.getElementById("tbody").innerHTML = `<tr><td colspan="8" style="color:var(--red)">加载失败: ${e.message}</td></tr>`;
+    const notice = document.getElementById("notice");
+    notice.style.display = "block";
+    notice.innerHTML = `请先在<a href="/" target="_blank">产品页</a>使用管理员邮箱登录，再刷新本页。<br>${escHtml(e.message)}`;
   }
+}
+async function loadUsers() {
+  const r = await fetch("/api/admin/users");
+  if (!r.ok) return;
+  const users = (await r.json()).users;
+  document.getElementById("userBody").innerHTML = users.map(u => `<tr>
+    <td>${escHtml(u.email)}</td><td>${escHtml(u.role)}</td>
+    <td><span class="status ${u.status === "active" ? "done" : "failed"}">${escHtml(u.status)}</span></td>
+    <td>${u.job_count}（运行 ${u.active_jobs}）</td>
+    <td>${u.quota_used} / <input class="quota-input" id="quota_${u.id}" type="number" min="0" max="100000" value="${u.quota_limit}"></td>
+    <td><div class="user-actions">
+      <button class="log-btn" onclick="updateUser('${u.id}', null)">保存额度</button>
+      <button class="log-btn" onclick="updateUser('${u.id}', '${u.status === "active" ? "paused" : "active"}')">${u.status === "active" ? "暂停" : "恢复"}</button>
+    </div></td>
+  </tr>`).join("");
+}
+async function updateUser(id, status) {
+  const quota = Number(document.getElementById("quota_" + id).value);
+  const body = {quota_limit: quota};
+  if (status) body.status = status;
+  const r = await fetch("/api/admin/users/" + id, {
+    method: "PATCH", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) {
+    const detail = await r.json().catch(() => ({}));
+    alert(detail.detail || "更新失败");
+    return;
+  }
+  load();
 }
 function toggleLog(id) {
   const el = document.getElementById(id);
   el.style.display = el.style.display === "block" ? "none" : "block";
 }
-function escHtml(s) { return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+function escHtml(s) { return String(s ?? "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/\"/g,"&quot;"); }
 load();
 autoTimer = setInterval(load, 5000);
 </script>

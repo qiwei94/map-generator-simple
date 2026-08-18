@@ -216,6 +216,11 @@ class EmailCodeVerify(BaseModel):
     code: str
 
 
+class AdminUserUpdate(BaseModel):
+    quota_limit: int | None = None
+    status: str | None = None
+
+
 def _send_login_email(email: str, code: str) -> None:
     host = os.environ.get("SMTP_HOST", "").strip()
     if not host:
@@ -303,6 +308,44 @@ def api_auth_logout(request: Request, response: Response):
     _auth_store().revoke_session(token)
     response.delete_cookie(AUTH_COOKIE_NAME, path="/")
     return {"ok": True}
+
+
+def _admin_user(request: Request) -> AuthUser:
+    user = _current_user(request, required=True)
+    if user is None or user.role != "admin":
+        raise HTTPException(403, "需要管理员账号")
+    return user
+
+
+@app.get("/api/admin/users")
+def api_admin_users(request: Request):
+    _admin_user(request)
+    with JOBS_LOCK:
+        jobs = list(JOBS.values())
+    rows = []
+    for user in _auth_store().list_users():
+        row = _user_public(user)
+        owned = [job for job in jobs
+                 if user.id in (job.get("owner_ids") or [])]
+        row["job_count"] = len(owned)
+        row["active_jobs"] = sum(
+            job.get("status") in _ACTIVE_JOB_STATUSES for job in owned)
+        rows.append(row)
+    return {"users": rows}
+
+
+@app.patch("/api/admin/users/{user_id}")
+def api_admin_user_update(user_id: str, req: AdminUserUpdate,
+                          request: Request):
+    admin = _admin_user(request)
+    if user_id == admin.id and req.status == "paused":
+        raise HTTPException(400, "不能暂停当前管理员账号")
+    try:
+        user = _auth_store().update_user_controls(
+            user_id, quota_limit=req.quota_limit, status=req.status)
+    except AuthError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"user": _user_public(user)}
 
 # ---------------------------------------------------------------------------
 # 任务管理（内存态，单机自用足够）
@@ -1733,17 +1776,26 @@ def api_job(job_id: str, include_log: bool = False,
         raise HTTPException(404, "任务不存在")
     if AUTH_REQUIRED and not _can_access_job(job, user):
         raise HTTPException(404, "任务不存在")
+    if include_log and not (user and user.role == "admin"):
+        raise HTTPException(403, "需要管理员账号")
     allow_log = bool(include_log and user and user.role == "admin")
     return _job_public(job, include_log=allow_log)
 
 
 @app.get("/api/jobs")
-def api_jobs(include_log: bool = False, request: Request = None):
+def api_jobs(include_log: bool = False, mine: bool = False,
+             request: Request = None):
     user = _current_user(request, required=AUTH_REQUIRED)
     with JOBS_LOCK:
         jobs = list(JOBS.values())
-    if AUTH_REQUIRED and not (user and user.role == "admin"):
+    if mine:
+        if user is None:
+            raise HTTPException(401, "请先登录")
+        jobs = [job for job in jobs if user.id in (job.get("owner_ids") or [])]
+    elif AUTH_REQUIRED and not (user and user.role == "admin"):
         jobs = [job for job in jobs if _can_access_job(job, user)]
+    if include_log and not (user and user.role == "admin"):
+        raise HTTPException(403, "需要管理员账号")
     allow_log = bool(include_log and user and user.role == "admin")
     return {"jobs": [_job_public(j, include_log=allow_log) for j in
                      sorted(jobs, key=lambda j: j["started"], reverse=True)]}

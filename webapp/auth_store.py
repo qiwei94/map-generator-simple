@@ -355,6 +355,42 @@ class AuthStore:
         return [user for row in rows
                 if (user := self.get_user(row["id"])) is not None]
 
+    def update_user_controls(self, user_id: str, *,
+                             quota_limit: int | None = None,
+                             status: str | None = None,
+                             now: float | None = None) -> AuthUser:
+        """Admin control for bounded quota and account suspension."""
+        if quota_limit is not None and not 0 <= quota_limit <= 100_000:
+            raise AuthError("额度必须在 0 到 100000 之间")
+        if status is not None and status not in ("active", "paused"):
+            raise AuthError("账号状态无效")
+        assignments = []
+        values: list[object] = []
+        if quota_limit is not None:
+            assignments.append("quota_limit=?")
+            values.append(quota_limit)
+        if status is not None:
+            assignments.append("status=?")
+            values.append(status)
+        if not assignments:
+            user = self.get_user(user_id, now=now)
+            if user is None:
+                raise AuthError("账号不存在")
+            return user
+        assignments.append("updated_at=?")
+        values.append(now or time.time())
+        values.append(user_id)
+        with self._connect() as conn:
+            cursor = conn.execute(
+                f"UPDATE users SET {','.join(assignments)} WHERE id=?", values,
+            )
+            if cursor.rowcount != 1:
+                raise AuthError("账号不存在")
+        user = self.get_user(user_id, now=now)
+        if user is None:  # pragma: no cover - update invariant
+            raise AuthError("账号不存在")
+        return user
+
 
 def store_from_env(root: Path) -> AuthStore:
     path = Path(os.environ.get("STUDIO_DB_PATH", root / "data" / "studio.db"))
