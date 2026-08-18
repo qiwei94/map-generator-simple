@@ -174,6 +174,7 @@ class GenerateRequest(BaseModel):
     generation_profile: str = "classic"
     area: CustomArea | None = None    # 自定义区域（与 city 二选一）
     markers: list[list[float]] = []   # [[lat, lon], ...] 标注点（附近最高处染红）
+    gallery_slug: str = ""            # 风格画廊身份；防止找回任务后区域串线
 
 
 GENERATION_PROFILES = {
@@ -405,6 +406,13 @@ def _job_public(job: dict, include_log: bool = False) -> dict:
         "status": public_status,
         "elapsed_s": round(elapsed, 1),
     }
+    bbox = job.get("bbox")
+    if (isinstance(bbox, (list, tuple)) and len(bbox) == 4 and
+            all(isinstance(value, (int, float)) for value in bbox)):
+        # 找回风格任务时，前端必须恢复生成画廊时的原始取景框。
+        out["bbox"] = list(bbox)
+    if job.get("prototype"):
+        out["prototype"] = job["prototype"]
     log_tail = _read_job_log_tail(job)
     progress_pct, stage_label = _job_progress(job, log_tail)
     out["stage_label"] = stage_label
@@ -1265,13 +1273,19 @@ def api_generate(req: GenerateRequest):
             raise HTTPException(400, "区域太小（每边至少约 0.5km）")
         if (n - s) > 0.4 or (e - w) > 0.5:
             raise HTTPException(400, "区域太大（建议单边不超过约 40km）")
+        city = _custom_slug(bbox)
+        gallery_slug = req.gallery_slug.strip()
+        if gallery_slug and gallery_slug != city:
+            raise HTTPException(
+                409,
+                "风格图与当前取景不是同一区域，请重新找回任务或确认位置",
+            )
         st = _pbf_status(bbox)
         if st["state"] == "fetchable":
             raise HTTPException(409, "该区域数据正在准备中，敬请期待")
         if st["state"] == "none":
             raise HTTPException(422, "该区域即将开放，敬请期待")
         pbf = st["pbf"]
-        city = _custom_slug(bbox)
         city_title = req.area.name.strip() or "自定义区域"
         fast_draft_context = {"bbox": bbox, "pbf": pbf}
         base_cmd = [sys.executable, "generate_city_legacy.py",
@@ -1321,6 +1335,7 @@ def api_generate(req: GenerateRequest):
         "style": req.style,
         "generation_profile": profile,
         "markers": req.markers,
+        "gallery_slug": req.gallery_slug.strip(),
     })
     job_id = uuid.uuid4().hex[:8]
     log_path = JOB_LOG_DIR / f"{job_id}_{city}_{req.mode}.log"
@@ -1390,6 +1405,10 @@ def api_generate(req: GenerateRequest):
                    "PYTHONIOENCODING": "utf-8",
                    "PYTHONUNBUFFERED": "1",
                    "PATH": env["PATH"]}}}
+        if req.area is not None:
+            job["bbox"] = list(req.area.bbox)
+            if gallery_meta:
+                job["prototype"] = gallery_meta.get("prototype", "landscape")
         claimed, reused, cached = _claim_or_reuse_job(job)
         if reused and params_path is not None:
             params_path.unlink(missing_ok=True)
@@ -1406,6 +1425,10 @@ def api_generate(req: GenerateRequest):
            "request_key": request_key,
            "log_path": str(log_path), "status": "starting",
            "started": time.time(), "ended": None}
+    if req.area is not None:
+        job["bbox"] = list(req.area.bbox)
+        if gallery_meta:
+            job["prototype"] = gallery_meta.get("prototype", "landscape")
     claimed, reused, cached = _claim_or_reuse_job(job)
     if reused:
         if params_path is not None:

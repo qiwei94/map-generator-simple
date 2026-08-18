@@ -13,6 +13,8 @@ const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({
 const state = {
   cities: [],
   gallery: null,       // 当前预设城市的画廊元数据
+  gallerySlug: null,   // 画廊对应的服务端区域身份
+  galleryBbox: null,   // 画廊生成时的原始 bbox；生成模型必须复用
   renderKind: "topdown",
   selectedStyle: null,
   generationProfile: "classic",
@@ -360,6 +362,41 @@ function kmFromBbox(b) {
   return Math.max(latKm, lonKm);
 }
 
+function normalizeBbox(value) {
+  if (!Array.isArray(value) || value.length !== 4) return null;
+  const bbox = value.map(Number);
+  if (!bbox.every(Number.isFinite)) return null;
+  const [s, w, n, e] = bbox;
+  return n > s && e > w ? bbox : null;
+}
+
+/** 用服务端任务记录恢复区域上下文，杜绝“巴黎画廊 + 西湖选框”。 */
+function restoreJobArea(job) {
+  const bbox = normalizeBbox(job.bbox);
+  if (!bbox) return false;
+  const title = job.city_title || "自定义区域";
+  state.target = {
+    kind: "area", city: null, title,
+    prototype: job.prototype || "landscape",
+  };
+  state.gallerySlug = job.city;
+  state.galleryBbox = bbox;
+  $("areaName").value = title;
+  initMap();
+  map.userMoved = false;
+  setTierNear(kmFromBbox(bbox));
+  syncSize();
+  map.state.map.fitBounds(
+    [[bbox[0], bbox[1]], [bbox[2], bbox[3]]],
+    { padding: [16, 16] },
+  );
+  setTimeout(updateRect, 120);
+  renderTabs();
+  lockView();
+  saveSession({ target: state.target, areaName: title, lastBbox: bbox });
+  return true;
+}
+
 function updateRect() {
   if (!map.state.map) return;
   const [s, w, n, e] = currentBbox();
@@ -417,6 +454,8 @@ $("tierSeg").querySelectorAll("button").forEach((b) => {
 function invalidateStyles() {
   if (state.target.kind === "preset") return;   // 预设城市画廊不变
   state.gallery = null;
+  state.gallerySlug = null;
+  state.galleryBbox = null;
   state.selectedStyle = null;
   renderStep3();
   renderViewer();
@@ -484,6 +523,8 @@ async function confirmArea() {
     });
     state.job = { id: r.job_id, mode: "styles", city: r.slug, slug: r.slug };
     state.pendingArea = { bbox, slug: r.slug };
+    state.gallerySlug = r.slug;
+    state.galleryBbox = bbox;
     $("jobPanel").hidden = false;
     $("jobStatus").textContent = r.cached
       ? "已找到该区域的现成结果"
@@ -1207,11 +1248,19 @@ function buildRequest(mode) {
     return body;
   }
   if (!map.state.map) throw new Error("请先在上方选择位置");
-  const bbox = currentBbox();
+  const bbox = state.gallery && state.galleryBbox
+    ? [...state.galleryBbox]
+    : currentBbox();
   const [s, w, n, e] = bbox;
   const inBox = (lat, lon) => lat >= s && lat <= n && lon >= w && lon <= e;
   body.area = { bbox, name: $("areaName").value.trim() };
-  if (state.selectedStyle && state.gallery) body.style = state.selectedStyle;
+  if (state.selectedStyle && state.gallery) {
+    if (!state.gallerySlug) {
+      throw new Error("风格图缺少区域身份，请重新找回任务或确认位置");
+    }
+    body.style = state.selectedStyle;
+    body.gallery_slug = state.gallerySlug;
+  }
   body.markers = [];
   if (map.journey) {
     const cs = map.journey.clusters.filter((c) => inBox(c.lat, c.lon));
@@ -1364,6 +1413,10 @@ async function pollJob() {
         // 拉回刚生成的风格画廊，填到 Step 3
         try {
           state.gallery = await fetchJSON(`/api/gallery/${state.jobSlug}`);
+          state.gallerySlug = state.jobSlug;
+          if (state.pendingArea && state.pendingArea.slug === state.jobSlug) {
+            state.galleryBbox = [...state.pendingArea.bbox];
+          }
           state.selectedStyle = null;
           renderStep3();
           renderViewer();
@@ -1449,6 +1502,7 @@ async function lookupJob(input) {
   if (!id) { alert("令牌格式不对，请输入 6-16 位字母数字或完整链接"); return; }
   try {
     const j = await fetchJSON(`/api/jobs/${id}`);
+    if (j.mode === "styles") restoreJobArea(j);
     state.job = { id, mode: j.mode, city: j.city, slug: j.city };
     $("jobPanel").hidden = false;
     showJobToken(id);
