@@ -14,6 +14,8 @@ import json
 import math
 import os
 import re
+import secrets
+import smtplib
 import socket
 import subprocess
 import sys
@@ -21,13 +23,15 @@ import threading
 import time
 import uuid
 from pathlib import Path
+from email.message import EmailMessage
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import journey as journey_mod
+from auth_store import AuthError, AuthStore, AuthUser, store_from_env
 
 ROOT = Path(__file__).resolve().parent.parent
 # 以 `python webapp/server.py` 启动时 sys.path[0] 是 webapp/，
@@ -40,6 +44,51 @@ GALLERY_DIR = OUTPUT_DIR / "style_gallery"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 JOB_LOG_DIR = ROOT / "tmp" / "webapp_jobs"
 JOB_LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+AUTH_REQUIRED = os.environ.get("AUTH_REQUIRED", "").lower() in (
+    "1", "true", "yes", "on",
+)
+AUTH_COOKIE_NAME = "studio_session"
+AUTH_COOKIE_SECURE = os.environ.get("AUTH_COOKIE_SECURE", "").lower() in (
+    "1", "true", "yes", "on",
+)
+AUTH_DEV_ECHO_CODE = os.environ.get("AUTH_DEV_ECHO_CODE", "").lower() in (
+    "1", "true", "yes", "on",
+)
+_AUTH_STORE: AuthStore | None = None
+
+
+def _auth_store() -> AuthStore:
+    global _AUTH_STORE
+    if _AUTH_STORE is None:
+        if AUTH_REQUIRED and not os.environ.get("AUTH_SECRET"):
+            raise RuntimeError("AUTH_REQUIRED=1 时必须设置 AUTH_SECRET")
+        _AUTH_STORE = store_from_env(ROOT)
+    return _AUTH_STORE
+
+
+def _current_user(request: Request | None, *, required: bool = False
+                  ) -> AuthUser | None:
+    if request is None:
+        return None
+    token = request.cookies.get(AUTH_COOKIE_NAME, "")
+    user = _auth_store().get_session_user(token)
+    if user is None and (required or AUTH_REQUIRED):
+        raise HTTPException(401, "请先登录")
+    return user
+
+
+def _user_public(user: AuthUser) -> dict:
+    return {
+        "id": user.id,
+        "email": user.email,
+        "role": user.role,
+        "status": user.status,
+        "quota_limit": user.quota_limit,
+        "quota_used": user.quota_used,
+        "quota_remaining": user.quota_remaining,
+        "quota_period": user.quota_period,
+    }
 
 # 与 generate_city_legacy.py PRESETS 保持一致（轻量副本，避免 import 重管线）
 PRESETS = {
@@ -152,6 +201,108 @@ def _state_fields(bbox) -> dict:
 
 
 app = FastAPI(title="Map Relief Studio")
+
+
+# ---------------------------------------------------------------------------
+# 账号（邮箱验证码；微信 UnionID 使用同一 auth_identities 表后续接入）
+# ---------------------------------------------------------------------------
+
+class EmailCodeStart(BaseModel):
+    email: str
+
+
+class EmailCodeVerify(BaseModel):
+    email: str
+    code: str
+
+
+def _send_login_email(email: str, code: str) -> None:
+    host = os.environ.get("SMTP_HOST", "").strip()
+    if not host:
+        if AUTH_DEV_ECHO_CODE:
+            return
+        raise AuthError("邮件服务尚未配置，请联系管理员")
+    port = int(os.environ.get("SMTP_PORT", "465"))
+    username = os.environ.get("SMTP_USERNAME", "")
+    password = os.environ.get("SMTP_PASSWORD", "")
+    sender = os.environ.get("SMTP_FROM", username).strip()
+    if not sender:
+        raise AuthError("邮件发件人尚未配置")
+    message = EmailMessage()
+    message["Subject"] = "旅程浮雕登录验证码"
+    message["From"] = sender
+    message["To"] = email
+    message.set_content(
+        f"你的登录验证码是：{code}\n\n验证码 10 分钟内有效。"
+        "如果不是你本人操作，请忽略此邮件。\n",
+    )
+    use_ssl = os.environ.get("SMTP_SSL", "1").lower() in (
+        "1", "true", "yes", "on",
+    )
+    smtp_cls = smtplib.SMTP_SSL if use_ssl else smtplib.SMTP
+    try:
+        with smtp_cls(host, port, timeout=15) as smtp:
+            if not use_ssl and os.environ.get("SMTP_STARTTLS", "1").lower() in (
+                    "1", "true", "yes", "on"):
+                smtp.starttls()
+            if username:
+                smtp.login(username, password)
+            smtp.send_message(message)
+    except (OSError, smtplib.SMTPException) as exc:
+        raise AuthError("验证码邮件发送失败，请稍后重试") from exc
+
+
+@app.get("/api/auth/config")
+def api_auth_config():
+    return {
+        "required": AUTH_REQUIRED,
+        "email_enabled": bool(os.environ.get("SMTP_HOST")) or
+                         AUTH_DEV_ECHO_CODE,
+        "wechat_enabled": bool(os.environ.get("WECHAT_APP_ID")),
+    }
+
+
+@app.post("/api/auth/email/start")
+def api_auth_email_start(req: EmailCodeStart):
+    try:
+        email = _auth_store().normalize_email(req.email)
+        code = f"{secrets.randbelow(1_000_000):06d}"
+        _auth_store().request_email_code(email, code)
+        _send_login_email(email, code)
+    except AuthError as exc:
+        raise HTTPException(429 if "频繁" in str(exc) else 503, str(exc))
+    result = {"ok": True, "message": "验证码已发送，请检查邮箱"}
+    if AUTH_DEV_ECHO_CODE:
+        result["dev_code"] = code
+    return result
+
+
+@app.post("/api/auth/email/verify")
+def api_auth_email_verify(req: EmailCodeVerify, response: Response):
+    try:
+        user, token = _auth_store().verify_email_code(req.email, req.code)
+    except AuthError as exc:
+        raise HTTPException(400, str(exc))
+    response.set_cookie(
+        AUTH_COOKIE_NAME, token, max_age=30 * 86400,
+        httponly=True, secure=AUTH_COOKIE_SECURE, samesite="lax", path="/",
+    )
+    return {"ok": True, "user": _user_public(user)}
+
+
+@app.get("/api/auth/me")
+def api_auth_me(request: Request):
+    user = _current_user(request)
+    return {"authenticated": user is not None,
+            "user": _user_public(user) if user else None}
+
+
+@app.post("/api/auth/logout")
+def api_auth_logout(request: Request, response: Response):
+    token = request.cookies.get(AUTH_COOKIE_NAME, "")
+    _auth_store().revoke_session(token)
+    response.delete_cookie(AUTH_COOKIE_NAME, path="/")
+    return {"ok": True}
 
 # ---------------------------------------------------------------------------
 # 任务管理（内存态，单机自用足够）
@@ -406,6 +557,8 @@ def _job_public(job: dict, include_log: bool = False) -> dict:
         "status": public_status,
         "elapsed_s": round(elapsed, 1),
     }
+    if job.get("quota_cost"):
+        out["quota_cost"] = int(job["quota_cost"])
     bbox = job.get("bbox")
     if (isinstance(bbox, (list, tuple)) and len(bbox) == 4 and
             all(isinstance(value, (int, float)) for value in bbox)):
@@ -459,6 +612,7 @@ def _watch_job(job: dict):
         job["status"] = "done" if ok else "failed"
         if not ok:
             job["error_code"], job["error_msg"] = _classify_job_error(job, ret)
+            _refund_job_quota(job)
         _save_jobs()
 
 
@@ -491,6 +645,57 @@ def _job_artifacts_available(job: dict) -> bool:
     return bool(artifacts["models_3mf"])
 
 
+def _bbox_side_km(bbox: list[float] | tuple[float, ...]) -> float:
+    """Approximate the longest bbox side for predictable quota pricing."""
+    south, west, north, east = bbox
+    mid_lat = math.radians((south + north) / 2.0)
+    north_south = abs(north - south) * 110.574
+    east_west = abs(east - west) * 111.320 * max(0.01, math.cos(mid_lat))
+    return max(north_south, east_west)
+
+
+def _quota_cost(mode: str, bbox: list[float] | tuple[float, ...]) -> int:
+    """Return coarse compute credits: task kind × each started 10 km."""
+    base = {"draft": 1, "styles": 2, "full": 5}.get(mode, 0)
+    if base == 0:
+        return 0
+    size_band = max(1, math.ceil(_bbox_side_km(bbox) / 10.0))
+    return base * size_band
+
+
+def _attach_job_account(job: dict, user: AuthUser | None,
+                        bbox: list[float] | tuple[float, ...]) -> None:
+    if user is None:
+        return
+    job["owner_ids"] = [user.id]
+    job["quota_payer_id"] = user.id
+    job["quota_cost"] = _quota_cost(job.get("mode", ""), bbox)
+
+
+def _refund_job_quota(job: dict) -> None:
+    """Refund a genuinely failed task once; cached/reused tasks were not billed."""
+    payer = job.get("quota_payer_id")
+    amount = int(job.get("quota_cost") or 0)
+    if not payer or amount <= 0 or job.get("quota_refunded"):
+        return
+    _auth_store().refund_quota(payer, job["id"])
+    job["quota_refunded"] = True
+
+
+def _share_job_with_owner(existing: dict, incoming: dict) -> bool:
+    """Attach an identical shared result to another account without rebilling."""
+    incoming_owners = incoming.get("owner_ids") or []
+    if not incoming_owners:
+        return False
+    owners = existing.setdefault("owner_ids", [])
+    changed = False
+    for owner_id in incoming_owners:
+        if owner_id not in owners:
+            owners.append(owner_id)
+            changed = True
+    return changed
+
+
 def _claim_or_reuse_job(job: dict) -> tuple[dict, bool, bool]:
     """Atomically claim a city output slot or reuse an identical request.
 
@@ -519,6 +724,8 @@ def _claim_or_reuse_job(job: dict) -> tuple[dict, bool, bool]:
             )
             if active is not None:
                 if active.get("request_key") == request_key:
+                    if _share_job_with_owner(active, job):
+                        _save_jobs()
                     return active, True, False
                 raise HTTPException(
                     409, "该区域正在使用另一组参数生成，请等待当前任务完成",
@@ -532,10 +739,25 @@ def _claim_or_reuse_job(job: dict) -> tuple[dict, bool, bool]:
             if (latest_done is not None and
                     latest_done.get("request_key") == request_key and
                     _job_artifacts_available(latest_done)):
+                if _share_job_with_owner(latest_done, job):
+                    _save_jobs()
                 return latest_done, True, True
 
-            JOBS[job["id"]] = job
-            _save_jobs()
+            payer = job.get("quota_payer_id")
+            amount = int(job.get("quota_cost") or 0)
+            if payer and amount > 0:
+                try:
+                    _auth_store().reserve_quota(payer, job["id"], amount)
+                except AuthError as exc:
+                    raise HTTPException(429, str(exc)) from exc
+            try:
+                JOBS[job["id"]] = job
+                _save_jobs()
+            except Exception:
+                JOBS.pop(job["id"], None)
+                if payer and amount > 0:
+                    _auth_store().refund_quota(payer, job["id"])
+                raise
     return job, False, False
 
 
@@ -1100,13 +1322,14 @@ class StylesRequest(BaseModel):
 
 
 @app.post("/api/styles")
-def api_styles(req: StylesRequest):
+def api_styles(req: StylesRequest, request: Request = None):
     """为任意区域生成风格画廊（4 种风格的 2D 图）。
 
     实测 10km 见方 ≈ 49s 出 4 张（每张 7–8s + 一次 prepare）。
     同 bbox 命中 PipelineCache 后更快。
     """
     bbox = req.bbox
+    user = _current_user(request, required=AUTH_REQUIRED)
     if len(bbox) != 4:
         raise HTTPException(400, "bbox 需为 [south, west, north, east]")
     s, w, n, e = bbox
@@ -1148,6 +1371,7 @@ def api_styles(req: StylesRequest):
                    "PYTHONIOENCODING": "utf-8",
                    "PYTHONUNBUFFERED": "1",
                    "PATH": env["PATH"]}}}
+        _attach_job_account(job, user, bbox)
         claimed, reused, cached = _claim_or_reuse_job(job)
         return {"job_id": claimed["id"], "slug": slug,
                 "queued": claimed["status"] == "pending",
@@ -1160,6 +1384,7 @@ def api_styles(req: StylesRequest):
            "bbox": bbox,
            "log_path": str(log_path), "status": "starting",
            "started": time.time(), "ended": None}
+    _attach_job_account(job, user, bbox)
     claimed, reused, cached = _claim_or_reuse_job(job)
     if reused:
         return {"job_id": claimed["id"], "slug": slug,
@@ -1176,6 +1401,7 @@ def api_styles(req: StylesRequest):
             job["ended"] = time.time()
             job["error_code"] = "render_failed"
             job["error_msg"] = "生成任务无法启动，请稍后重试"
+            _refund_job_quota(job)
             _save_jobs()
         raise HTTPException(500, "生成任务无法启动，请稍后重试")
     with JOBS_LOCK:
@@ -1231,7 +1457,8 @@ def api_geocode(q: str = "", near_lat: float | None = None,
 
 
 @app.post("/api/generate")
-def api_generate(req: GenerateRequest):
+def api_generate(req: GenerateRequest, request: Request = None):
+    user = _current_user(request, required=AUTH_REQUIRED)
     if req.mode not in ("draft", "full"):
         raise HTTPException(400, f"未知模式: {req.mode}")
 
@@ -1252,6 +1479,7 @@ def api_generate(req: GenerateRequest):
         block_mode = "flat" if profile == "quality_flat" else "textured"
         city = f"westlake_{profile}"
         city_title = f"杭州 · 西湖（{GENERATION_PROFILES[profile]['label']}）"
+        quota_bbox = PRESETS["westlake"]["bbox"]
         base_cmd = [
             sys.executable, "generate_city.py",
             "--city", city,
@@ -1264,6 +1492,7 @@ def api_generate(req: GenerateRequest):
     # ── 目标解析：预设城市 / 景点目录 / 自定义区域 ──
     elif req.area is not None:
         bbox = req.area.bbox
+        quota_bbox = bbox
         if len(bbox) != 4:
             raise HTTPException(400, "bbox 需为 [south, west, north, east]")
         s, w, n, e = bbox
@@ -1301,12 +1530,14 @@ def api_generate(req: GenerateRequest):
     elif req.city in PRESETS:
         city = req.city
         city_title = PRESETS[city]["title"]
+        quota_bbox = PRESETS[city]["bbox"]
         base_cmd = [sys.executable, "generate_city_legacy.py", "--preset", city,
                     "--auto-params"]
     elif req.city in _landmark_presets():
         # 景点目录城市：用 bbox + pbf 路径（与自定义区域相同）
         lm_info = _landmark_presets()[req.city]
         bbox = lm_info["bbox"]
+        quota_bbox = bbox
         s, w, n, e = bbox
         st = _pbf_status(bbox)
         if st["state"] == "fetchable":
@@ -1409,6 +1640,7 @@ def api_generate(req: GenerateRequest):
             job["bbox"] = list(req.area.bbox)
             if gallery_meta:
                 job["prototype"] = gallery_meta.get("prototype", "landscape")
+        _attach_job_account(job, user, quota_bbox)
         claimed, reused, cached = _claim_or_reuse_job(job)
         if reused and params_path is not None:
             params_path.unlink(missing_ok=True)
@@ -1429,6 +1661,7 @@ def api_generate(req: GenerateRequest):
         job["bbox"] = list(req.area.bbox)
         if gallery_meta:
             job["prototype"] = gallery_meta.get("prototype", "landscape")
+    _attach_job_account(job, user, quota_bbox)
     claimed, reused, cached = _claim_or_reuse_job(job)
     if reused:
         if params_path is not None:
@@ -1448,6 +1681,7 @@ def api_generate(req: GenerateRequest):
             job["ended"] = time.time()
             job["error_code"] = "render_failed"
             job["error_msg"] = "生成任务无法启动，请稍后重试"
+            _refund_job_quota(job)
             _save_jobs()
         raise HTTPException(500, "生成任务无法启动，请稍后重试")
     with JOBS_LOCK:
@@ -1465,20 +1699,38 @@ def api_generation_profiles():
     return {"profiles": GENERATION_PROFILES}
 
 
+def _can_access_job(job: dict, user: AuthUser | None) -> bool:
+    if user and user.role == "admin":
+        return True
+    owners = job.get("owner_ids") or []
+    if not owners:
+        return True  # legacy jobs created before accounts were activated
+    return bool(user and user.id in owners)
+
+
 @app.get("/api/jobs/{job_id}")
-def api_job(job_id: str, include_log: bool = False):
+def api_job(job_id: str, include_log: bool = False,
+            request: Request = None):
+    user = _current_user(request, required=AUTH_REQUIRED)
     with JOBS_LOCK:
         job = JOBS.get(job_id)
     if job is None:
         raise HTTPException(404, "任务不存在")
-    return _job_public(job, include_log=include_log)
+    if AUTH_REQUIRED and not _can_access_job(job, user):
+        raise HTTPException(404, "任务不存在")
+    allow_log = bool(include_log and user and user.role == "admin")
+    return _job_public(job, include_log=allow_log)
 
 
 @app.get("/api/jobs")
-def api_jobs(include_log: bool = False):
+def api_jobs(include_log: bool = False, request: Request = None):
+    user = _current_user(request, required=AUTH_REQUIRED)
     with JOBS_LOCK:
         jobs = list(JOBS.values())
-    return {"jobs": [_job_public(j, include_log=include_log) for j in
+    if AUTH_REQUIRED and not (user and user.role == "admin"):
+        jobs = [job for job in jobs if _can_access_job(job, user)]
+    allow_log = bool(include_log and user and user.role == "admin")
+    return {"jobs": [_job_public(j, include_log=allow_log) for j in
                      sorted(jobs, key=lambda j: j["started"], reverse=True)]}
 
 

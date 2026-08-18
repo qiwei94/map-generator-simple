@@ -96,3 +96,83 @@ def test_logout_revokes_session(store):
     store.revoke_session(token, now=1002)
 
     assert store.get_session_user(token, now=1003) is None
+
+
+def test_http_email_login_sets_secure_server_session(monkeypatch, tmp_path):
+    from fastapi.testclient import TestClient
+    import server
+
+    http_store = AuthStore(tmp_path / "http.db", "http-secret")
+    monkeypatch.setattr(server, "_AUTH_STORE", http_store)
+    monkeypatch.setattr(server, "AUTH_DEV_ECHO_CODE", True)
+    client = TestClient(server.app)
+
+    started = client.post("/api/auth/email/start",
+                          json={"email": "web@example.com"})
+    verified = client.post(
+        "/api/auth/email/verify",
+        json={"email": "web@example.com", "code": started.json()["dev_code"]},
+    )
+    me = client.get("/api/auth/me")
+
+    assert started.status_code == 200
+    assert verified.status_code == 200
+    assert "studio_session=" in verified.headers["set-cookie"]
+    assert "HttpOnly" in verified.headers["set-cookie"]
+    assert me.json()["user"]["email"] == "web@example.com"
+
+
+def _http_login(client, email):
+    started = client.post("/api/auth/email/start", json={"email": email})
+    assert started.status_code == 200
+    verified = client.post(
+        "/api/auth/email/verify",
+        json={"email": email, "code": started.json()["dev_code"]},
+    )
+    assert verified.status_code == 200
+    return verified.json()["user"]
+
+
+def test_owned_jobs_charge_once_share_cache_and_stay_private(monkeypatch,
+                                                              tmp_path):
+    from fastapi.testclient import TestClient
+    import server
+
+    http_store = AuthStore(tmp_path / "jobs.db", "http-secret",
+                           default_quota=20)
+    monkeypatch.setattr(server, "_AUTH_STORE", http_store)
+    monkeypatch.setattr(server, "AUTH_DEV_ECHO_CODE", True)
+    monkeypatch.setattr(server, "AUTH_REQUIRED", True)
+    monkeypatch.setattr(server, "WORKER_MODE", True)
+    monkeypatch.setattr(server, "_save_jobs", lambda: None)
+    monkeypatch.setattr(server, "_pbf_status", lambda bbox: {
+        "state": "local", "pbf": "fixture.osm.pbf",
+    })
+    server.JOBS.clear()
+    first_client = TestClient(server.app)
+    second_client = TestClient(server.app)
+    first_user = _http_login(first_client, "first@example.com")
+    second_user = _http_login(second_client, "second@example.com")
+
+    payload = {
+        "bbox": [30.20, 120.10, 30.27, 120.18],
+        "name": "同一区域",
+        "prototype": "landscape",
+    }
+    first = first_client.post("/api/styles", json=payload)
+    assert first.status_code == 200
+    job_id = first.json()["job_id"]
+    assert http_store.get_user(first_user["id"]).quota_used == 2
+    assert second_client.get(f"/api/jobs/{job_id}").status_code == 404
+
+    shared = second_client.post("/api/styles", json=payload)
+
+    assert shared.status_code == 200
+    assert shared.json()["job_id"] == job_id
+    assert shared.json()["reused"] is True
+    assert http_store.get_user(second_user["id"]).quota_used == 0
+    assert second_client.get(f"/api/jobs/{job_id}").status_code == 200
+    assert set(server.JOBS[job_id]["owner_ids"]) == {
+        first_user["id"], second_user["id"],
+    }
+    server.JOBS.clear()
