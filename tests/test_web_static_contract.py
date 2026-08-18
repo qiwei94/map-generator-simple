@@ -35,7 +35,9 @@ def test_restored_gallery_also_loads_existing_preview_artifacts():
     assert "await refreshArtifacts(state.jobSlug);" in styles_branch
 
 
-def test_app_script_cache_key_is_bumped_for_area_identity_fix():
+def test_app_script_cache_key_is_bumped_for_account_queue_ui():
     html = INDEX_HTML.read_text(encoding="utf-8")
 
-    assert '<script src="app.js?v=43"></script>' in html
+    assert '<script src="app.js?v=44"></script>' in html
+    assert 'id="accountDialog"' in html
+    assert 'id="myTasksCard"' in html
