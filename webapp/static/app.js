@@ -2,6 +2,13 @@
 "use strict";
 
 const $ = (id) => document.getElementById(id);
+const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({
+  "&": "&amp;",
+  "<": "&lt;",
+  ">": "&gt;",
+  '"': "&quot;",
+  "'": "&#39;",
+})[char]);
 
 const state = {
   cities: [],
@@ -1384,11 +1391,15 @@ function renderQualityChecks(checks) {
     el.innerHTML = "";
     return;
   }
-  el.innerHTML = checks.map((check) => `
-    <div class="quality-check ${check.status}">
+  el.innerHTML = checks.map((check) => {
+    const status = check.status === "pass" || check.status === "warning"
+      ? check.status : "";
+    return `
+    <div class="quality-check ${status}">
       <strong>${esc(check.label)}</strong>
       <span>${esc(check.detail)}</span>
-    </div>`).join("");
+    </div>`;
+  }).join("");
   el.hidden = false;
 }
 
