@@ -28,7 +28,14 @@ def test_restored_gallery_uses_original_bbox_and_server_identity():
     assert "if (j.mode === \"styles\") restoreJobArea(j);" in source
 
 
+def test_restored_gallery_also_loads_existing_preview_artifacts():
+    source = APP_JS.read_text(encoding="utf-8")
+
+    styles_branch = source[source.index('if (mode === "styles")'):]
+    assert "await refreshArtifacts(state.jobSlug);" in styles_branch
+
+
 def test_app_script_cache_key_is_bumped_for_area_identity_fix():
     html = INDEX_HTML.read_text(encoding="utf-8")
 
-    assert '<script src="app.js?v=42"></script>' in html
+    assert '<script src="app.js?v=43"></script>' in html

@@ -1418,6 +1418,9 @@ async function pollJob() {
             state.galleryBbox = [...state.pendingArea.bbox];
           }
           state.selectedStyle = null;
+          // 风格任务与模型任务共用区域 slug。找回已完成风格任务时，
+          // 同时恢复该区域后来生成的最新 GLB/PNG；否则预览区会永久空白。
+          await refreshArtifacts(state.jobSlug);
           renderStep3();
           renderViewer();
           $("step3").scrollIntoView({ behavior: "smooth", block: "start" });
