@@ -125,3 +125,29 @@ def test_style_result_can_be_reused_while_model_for_same_city_runs(monkeypatch):
     assert reused["job_id"] == styles["job_id"]
     assert reused["cached"] is True
     assert len(server.JOBS) == 2
+
+
+def test_public_style_job_exposes_original_area_context():
+    response = server.api_styles(_styles_request("terrain"))
+
+    public = server.api_job(response["job_id"])
+
+    assert public["bbox"] == [29.3777, 118.6099, 29.5134, 118.7646]
+    assert public["prototype"] == "terrain"
+    assert public["city_title"] == "千岛湖"
+
+
+def test_model_request_rejects_gallery_from_another_bbox():
+    bbox = [48.7906, 2.2229, 48.9262, 2.4277]
+    request = server.GenerateRequest(
+        mode="draft",
+        area=server.CustomArea(bbox=bbox, name="巴黎"),
+        style="baseline",
+        gallery_slug="custom_bdb29b",
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        server.api_generate(request)
+
+    assert exc.value.status_code == 409
+    assert "不是同一区域" in exc.value.detail

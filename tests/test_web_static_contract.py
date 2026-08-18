@@ -19,7 +19,16 @@ def test_quality_check_renderer_has_html_escape_helper():
     assert "${esc(check.detail)}" in source
 
 
-def test_app_script_cache_key_is_bumped_for_job_restore_fix():
+def test_restored_gallery_uses_original_bbox_and_server_identity():
+    source = APP_JS.read_text(encoding="utf-8")
+
+    assert "function restoreJobArea(job)" in source
+    assert "state.galleryBbox = bbox" in source
+    assert "body.gallery_slug = state.gallerySlug" in source
+    assert "if (j.mode === \"styles\") restoreJobArea(j);" in source
+
+
+def test_app_script_cache_key_is_bumped_for_area_identity_fix():
     html = INDEX_HTML.read_text(encoding="utf-8")
 
-    assert '<script src="app.js?v=41"></script>' in html
+    assert '<script src="app.js?v=42"></script>' in html
