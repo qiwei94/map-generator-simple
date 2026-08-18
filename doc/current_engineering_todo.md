@@ -1,8 +1,29 @@
 # Current engineering TODO
 
-Updated: 2026-08-15
+Updated: 2026-08-18
 
 This file records active work only. Historical session notes remain under `doc/`.
+
+## Progress checkpoint — 2026-08-18
+
+Completed foundations on `agent/web-premium-studio`:
+
+- [x] Dense-city cache/RSS fix; the formerly OOMing large Paris gallery now completes 4/4 styles.
+- [x] Portable osmium runs through the active Python interpreter; native-free real extraction returned 823 road features.
+- [x] Legacy full 3MF and fast gallery draft persist an atomic `design_spec.json` sidecar.
+- [x] Terrain-draped vegetation splits point-touching/pinched topology into closed edge-manifold shells.
+- [x] Validator V12 checks finite/in-bounds/closed edge-manifold vegetation instead of requiring horizontal faces.
+- [x] Real 25.2 km² Paris 3MF accepted at 12/12 rules, 0 errors, 0 warnings.
+
+Still open:
+
+- [ ] Data-quality-aware `block-base-mode auto` policy and cross-region A/B acceptance.
+- [ ] DesignSpec coverage for every 3MF-producing entry and explicit exact-vs-snap measurement scope.
+- [ ] Remaining selective geometry backports: exact terrain interpolation, road footprint clipping,
+  bridge separation, all-layer printability gates, and a small real structural golden fixture.
+- [ ] Global PBF/DEM storage rollout; the existing ~80 PBF cache is not global coverage.
+
+Full evidence and handoff: `doc/session_2026_08_18_rescue_summary.md`.
 
 ## P0 — Data-quality-aware block base
 
