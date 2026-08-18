@@ -1,7 +1,7 @@
 # 部署与交接文档（Deployment & Handover）
 
 > 目标：让任何接手的 agent/人 能立刻理解现状、连上设备、继续干活。
-> 最后更新：2026-08-10。Git 分支：`v0.2-with-gemeni-advise`，remote: `origin https://github.com/qiwei94/map-generator-simple.git`
+> 最后更新：2026-08-18。生产恢复分支：`agent/web-premium-studio`，视觉基线：`v0.2-with-gemeni-advise`，remote: `origin https://github.com/qiwei94/map-generator-simple.git`
 
 ---
 
@@ -160,9 +160,11 @@ ssh root@8.136.0.235
 # A → B（A 的密钥已加到 B）
 ssh root@8.136.0.235 "ssh root@172.16.164.54 '<cmd>'"
 
-# 本地 → B（跳板）
+# 本地 → B（当前推荐，专用密钥已验证）
+ssh -i ~/.ssh/map_generator_ed25519 -o IdentitiesOnly=yes root@118.31.184.240
+
+# 本地 → B（私网跳板备用）
 ssh -J root@8.136.0.235 root@172.16.164.54
-# 或 B 已有公网 118.31.184.240，但本地密钥未加到 B，需先 ssh-copy-id 或继续走跳板
 ```
 
 > 注意：本机是 Windows PowerShell，不支持 `&&`，用 `;`。嵌套 ssh 的引号极易出错，**复杂命令一律写成 .sh 脚本 scp 上去再 `bash xxx.sh`**（见 `deploy/` 目录）。
