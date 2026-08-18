@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <meta name="theme-color" content="#171916">
 <title>旅程浮雕 Studio</title>
-<link rel="stylesheet" href="style.css?v=46">
+<link rel="stylesheet" href="style.css?v=47">
 <link rel="stylesheet" href="vendor/leaflet/leaflet.css">
 <!-- 本地自托管，无 CDN 依赖 -->
 <script type="module" src="vendor/model-viewer.min.js"
@@ -35,36 +35,32 @@
 
 <main id="main">
 
-  <section class="showcase" id="showcase" aria-label="真实作品样品" hidden>
-    <div class="showcase-head">
-      <div><p>SELECTED OUTPUTS</p><h2>真实生成的城市与山河</h2></div>
-      <div class="showcase-controls">
-        <button id="showcasePrev" type="button" aria-label="向左浏览">←</button>
-        <button id="showcaseNext" type="button" aria-label="向右浏览">→</button>
-      </div>
-    </div>
-    <div class="showcase-track" id="showcaseTrack"></div>
-  </section>
-
   <section class="product-hero" aria-labelledby="heroTitle">
     <div class="hero-copy">
-      <p class="hero-kicker">MAP RELIEF / 25 KM</p>
+      <p class="hero-kicker">MAP RELIEF / 15 KM</p>
       <h2 id="heroTitle">把走过的城市，<br>留在手里。<br>把旅途的回忆，<br>放在桌上。</h2>
       <p>把旅行中念念不忘的山河、街巷与城市轮廓，做成可以触摸的城市浮雕。从地点或照片开始，完成取景与风格选择，然后交付可打印的模型。</p>
       <a class="hero-cta" href="#step1">制作我的城市 <span>↓</span></a>
       <div class="hero-specs">
-        <span><strong>25 km</strong>西湖真实范围</span>
+        <span><strong>15 km</strong>标准取景范围</span>
         <span><strong>200 mm</strong>标准成品宽度</span>
         <span><strong>12 / 12</strong>项目规则通过</span>
       </div>
     </div>
-    <figure class="hero-visual">
-      <img src="assets/westlake-real-output.jpg"
-           alt="真实生成的杭州西湖与钱塘江 25 公里浮雕俯视图">
-      <div class="hero-visual-meta"><span>真实管线审查图</span><span>2026.08</span></div>
-      <figcaption>
-        <p>HANGZHOU / 30.13—30.36 N</p>
-        <strong>西湖、钱塘江与城市纹理</strong>
+    <figure class="hero-visual" id="heroShowcase" aria-roledescription="轮播图">
+      <img id="heroShowcaseImage" src="assets/westlake-15km-standard.jpg"
+           alt="真实生成的杭州西湖 15 公里乘 15 公里标准风格图">
+      <div class="hero-visual-meta">
+        <span id="heroShowcaseKind">真实 15 × 15 KM 输出</span>
+        <div class="hero-visual-nav">
+          <button id="heroShowcasePrev" type="button" aria-label="上一张样品">←</button>
+          <span id="heroShowcaseCount" aria-live="polite">01 / 03</span>
+          <button id="heroShowcaseNext" type="button" aria-label="下一张样品">→</button>
+        </div>
+      </div>
+      <figcaption aria-live="polite">
+        <p id="heroShowcaseLocation">HANGZHOU / STANDARD</p>
+        <strong id="heroShowcaseTitle">西湖水岸与城市纹理</strong>
       </figcaption>
     </figure>
   </section>
@@ -302,6 +298,6 @@
 
 <footer class="foot">旅程浮雕 · 把走过的路，凝固成可以触摸的实体 · <a href="#" onclick="copyMyLink();return false">复制我的链接</a> · <a href="#" onclick="localStorage.removeItem('jr_session');location.href=location.pathname;return false">重新开始</a></footer>
 
-<script src="app.js?v=46"></script>
+<script src="app.js?v=47"></script>
 </body>
 </html>

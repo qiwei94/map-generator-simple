@@ -360,31 +360,93 @@ async function loadCities() {
   renderDownloads();
 }
 
+const FALLBACK_HERO_SAMPLES = [
+  {
+    url: "assets/westlake-15km-standard.jpg",
+    kind: "真实 15 × 15 KM 输出",
+    location: "HANGZHOU / STANDARD",
+    title: "西湖水岸与城市纹理",
+    alt: "真实生成的杭州西湖 15 公里乘 15 公里标准风格图",
+  },
+  {
+    url: "assets/westlake-15km-block-fill.jpg",
+    kind: "真实 15 × 15 KM 输出",
+    location: "HANGZHOU / BLOCK FILL",
+    title: "西湖与饱满街区",
+    alt: "真实生成的杭州西湖 15 公里乘 15 公里街区填充风格图",
+  },
+  {
+    url: "assets/paris-15km-dense.jpg",
+    kind: "真实 15 × 15 KM 输出",
+    location: "PARIS / DENSE DETAIL",
+    title: "塞纳河与巴黎城市肌理",
+    alt: "真实生成的巴黎 15 公里乘 15 公里精细风格图",
+  },
+];
+
+let heroSamples = FALLBACK_HERO_SAMPLES;
+let heroSampleIndex = 0;
+let heroTouchStartX = null;
+
+function showHeroSample(index, immediate = false) {
+  if (!heroSamples.length) return;
+  heroSampleIndex = (index + heroSamples.length) % heroSamples.length;
+  const sample = heroSamples[heroSampleIndex];
+  const image = $("heroShowcaseImage");
+  const apply = () => {
+    image.src = sample.url;
+    image.alt = sample.alt || `${sample.title}，15 公里乘 15 公里真实输出`;
+    $("heroShowcaseKind").textContent = sample.kind || "真实 15 × 15 KM 输出";
+    $("heroShowcaseLocation").textContent = sample.location || "15 KM × 15 KM";
+    $("heroShowcaseTitle").textContent = sample.title;
+    $("heroShowcaseCount").textContent =
+      `${String(heroSampleIndex + 1).padStart(2, "0")} / ${String(heroSamples.length).padStart(2, "0")}`;
+    image.classList.remove("is-changing");
+  };
+  if (immediate || image.getAttribute("src") === sample.url) {
+    apply();
+  } else {
+    image.classList.add("is-changing");
+    window.setTimeout(apply, 130);
+  }
+}
+
+function initHeroShowcase() {
+  showHeroSample(0, true);
+  $("heroShowcasePrev").onclick = () => showHeroSample(heroSampleIndex - 1);
+  $("heroShowcaseNext").onclick = () => showHeroSample(heroSampleIndex + 1);
+  const frame = $("heroShowcase");
+  frame.addEventListener("touchstart", (event) => {
+    heroTouchStartX = event.changedTouches[0]?.clientX ?? null;
+  }, { passive: true });
+  frame.addEventListener("touchend", (event) => {
+    if (heroTouchStartX === null) return;
+    const delta = (event.changedTouches[0]?.clientX ?? heroTouchStartX) - heroTouchStartX;
+    heroTouchStartX = null;
+    if (Math.abs(delta) >= 45) showHeroSample(heroSampleIndex + (delta < 0 ? 1 : -1));
+  }, { passive: true });
+  FALLBACK_HERO_SAMPLES.slice(1).forEach((sample) => {
+    const image = new Image();
+    image.src = sample.url;
+  });
+}
+
 async function loadShowcase() {
   try {
     const result = await fetchJSON("/api/showcase");
-    const samples = result.samples || [];
+    const samples = (result.samples || []).filter(
+      (sample) => sample.url && sample.title && sample.size_km === 15);
     if (!samples.length) return;
-    $("showcaseTrack").innerHTML = samples.map((sample, index) => `
-      <figure class="showcase-item">
-        <img src="${esc(sample.url)}" alt="${esc(sample.title)} · ${esc(sample.style)}"
-             ${index ? 'loading="lazy"' : ''}>
-        <figcaption><strong>${esc(sample.title)}</strong><span>${esc(sample.style)}</span></figcaption>
-      </figure>`).join("");
-    $("showcase").hidden = false;
-  } catch (_) {}
+    heroSamples = samples;
+    showHeroSample(0, true);
+    heroSamples.slice(1, 4).forEach((sample) => {
+      const image = new Image();
+      image.src = sample.url;
+    });
+  } catch (_) {
+    // file:// previews and an unavailable API keep the bundled verified samples.
+  }
 }
-
-function scrollShowcase(direction) {
-  const track = $("showcaseTrack");
-  const card = track.querySelector(".showcase-item");
-  const amount = card ? card.getBoundingClientRect().width + 14
-    : track.clientWidth * 0.8;
-  track.scrollBy({ left: direction * amount, behavior: "smooth" });
-}
-
-$("showcasePrev").onclick = () => scrollShowcase(-1);
-$("showcaseNext").onclick = () => scrollShowcase(1);
 
 /** 构建国家分组下拉（去重 + 精选置顶） */
 function buildGroupSelect() {
@@ -1291,6 +1353,10 @@ function renderStep3() {
   $("renderToggle").style.display = has ? "" : "none";
 
   if (has) {
+    if (!state.selectedStyle || !state.gallery.styles[state.selectedStyle]) {
+      state.selectedStyle = state.gallery.styles.baseline
+        ? "baseline" : Object.keys(state.gallery.styles)[0];
+    }
     grid.style.display = "";
     for (const [key, s] of Object.entries(state.gallery.styles)) {
       const card = document.createElement("div");
@@ -1310,13 +1376,13 @@ function renderStep3() {
         openLightbox(img, `${s.label} · ★${s.score.toFixed(2)}`);
       };
       card.onclick = () => {
-        state.selectedStyle = (state.selectedStyle === key) ? null : key;
+        state.selectedStyle = key;
         renderStep3();
         renderViewer();      // 选中风格后，Step 4 上方的 2D 图跟着换
       };
       grid.appendChild(card);
     }
-    $("galleryHint").textContent = "点图片放大，点卡片选中";
+    $("galleryHint").textContent = "点图片放大，点卡片切换风格";
   } else {
     grid.style.display = "none";
     $("galleryHint").textContent = "自定义区域用自动参数（规则引擎按地貌适配）";
@@ -1343,7 +1409,7 @@ function updateStyleHint() {
   const el = $("styleHint");
   if (state.selectedStyle && state.gallery) {
     const s = state.gallery.styles[state.selectedStyle];
-    el.textContent = `将按风格生成：${s.label}（再次点击卡片可取消）`;
+    el.textContent = `快速预览和正式模型将使用：${s.label}`;
     el.classList.add("on");
   } else if (state.gallery) {
     el.textContent = "未选风格，将用自动参数生成；可先在上方选一个";
@@ -1884,6 +1950,7 @@ $("lightbox").onclick = closeLightbox;
 $("lightboxClose").onclick = closeLightbox;
 
 syncSize();
+initHeroShowcase();
 window.addEventListener("load", async () => {
   initMap();
   if (window.location.protocol !== "file:") {

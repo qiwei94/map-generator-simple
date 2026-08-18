@@ -35,12 +35,16 @@ def test_restored_gallery_also_loads_existing_preview_artifacts():
     assert "await refreshArtifacts(state.jobSlug);" in styles_branch
 
 
-def test_app_script_cache_key_is_bumped_for_shared_preview_spec_ui():
+def test_app_script_cache_key_is_bumped_for_hero_sample_carousel():
     html = INDEX_HTML.read_text(encoding="utf-8")
 
-    assert '<script src="app.js?v=46"></script>' in html
-    assert '<link rel="stylesheet" href="style.css?v=46">' in html
+    assert '<script src="app.js?v=47"></script>' in html
+    assert '<link rel="stylesheet" href="style.css?v=47">' in html
     assert 'id="accountDialog"' in html
     assert 'id="myTasksCard"' in html
-    assert 'id="showcaseTrack"' in html
+    assert 'id="heroShowcase"' in html
+    assert 'id="heroShowcasePrev"' in html
+    assert 'id="heroShowcaseNext"' in html
+    assert 'id="showcaseTrack"' not in html
+    assert "15 KM" in html
     assert 'id="baseThickness"' not in html
