@@ -39,6 +39,7 @@ def _args():
     parser.add_argument("--params-json", required=True)
     parser.add_argument("--marker", action="append", default=[])
     parser.add_argument("--output-dir", default=None)
+    parser.add_argument("--base-thickness-mm", type=float, default=0.4)
     return parser.parse_args()
 
 
@@ -55,6 +56,7 @@ def main() -> int:
     if not pbf.is_absolute():
         pbf = ROOT / pbf
     params = json.loads(Path(args.params_json).read_text(encoding="utf-8"))
+    params["base_thickness_mm"] = args.base_thickness_mm
     out_dir = (Path(args.output_dir) if args.output_dir
                else ROOT / "output" / args.city)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -102,6 +104,9 @@ def main() -> int:
         elevation_grid=harness.ctx["elevation_grid"],
         markers=markers_local or None,
         water_gdf=harness.ctx.get("water"),
+        base_thickness_mm=args.base_thickness_mm,
+        terrain_relief_mm=float(params.get(
+            "terrain_thickness_mm", harness.base_params.terrain_thickness_mm)),
     )
 
     design_spec = {

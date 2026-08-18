@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <meta name="theme-color" content="#171916">
 <title>旅程浮雕 Studio</title>
-<link rel="stylesheet" href="style.css?v=44">
+<link rel="stylesheet" href="style.css?v=45">
 <link rel="stylesheet" href="vendor/leaflet/leaflet.css">
 <!-- 本地自托管，无 CDN 依赖 -->
 <script type="module" src="vendor/model-viewer.min.js"
@@ -34,6 +34,17 @@
 </header>
 
 <main id="main">
+
+  <section class="showcase" id="showcase" aria-label="真实作品样品" hidden>
+    <div class="showcase-head">
+      <div><p>SELECTED OUTPUTS</p><h2>真实生成的城市与山河</h2></div>
+      <div class="showcase-controls">
+        <button id="showcasePrev" type="button" aria-label="向左浏览">←</button>
+        <button id="showcaseNext" type="button" aria-label="向右浏览">→</button>
+      </div>
+    </div>
+    <div class="showcase-track" id="showcaseTrack"></div>
+  </section>
 
   <section class="product-hero" aria-labelledby="heroTitle">
     <div class="hero-copy">
@@ -179,6 +190,12 @@
       </label>
       <p class="profile-note" id="profileNote">精细模型暂在“杭州 · 西湖”开放，并直接生成正式模型。</p>
     </fieldset>
+    <div class="base-control">
+      <label for="baseThickness">底座厚度</label>
+      <input id="baseThickness" type="range" min="0.4" max="1.2" step="0.1" value="0.4">
+      <output id="baseThicknessValue" for="baseThickness">0.40 mm</output>
+      <p>预览与正式 3MF 共用此值。0.4 mm 是当前打印下限；向右调整会同时加厚两种产物。</p>
+    </div>
     <div class="actions">
       <button class="btn btn-primary" id="btnDraft">生成快速预览
         <small>PNG + 可旋转 3D 模型</small></button>
@@ -291,6 +308,6 @@
 
 <footer class="foot">旅程浮雕 · 把走过的路，凝固成可以触摸的实体 · <a href="#" onclick="copyMyLink();return false">复制我的链接</a> · <a href="#" onclick="localStorage.removeItem('jr_session');location.href=location.pathname;return false">重新开始</a></footer>
 
-<script src="app.js?v=44"></script>
+<script src="app.js?v=45"></script>
 </body>
 </html>

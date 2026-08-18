@@ -29,18 +29,12 @@ _COLORS = {
 }
 
 # 各层挤出参数（mm）：(底部 z 偏移, 厚度)
-_LAYER_Z = {
-    "block_base": (0.0, 0.6),
-    "water": (0.0, 0.25),
-    "vegetation": (0.6, 0.3),
-    "roads": (0.6, 0.35),
-}
-
 # ── 落地后检（grounding postcheck）参数 ──
 # 各层底面相对地形面的预期 z 偏移（mm）
 _EXPECTED_Z0 = {
-    "block_base": 0.0, "water": 0.0, "vegetation": 0.6, "roads": 0.6,
-    "buildings": 0.6, "landmarks": 0.6, "route": 1.05, "marker": 1.5,
+    "block_base": 0.01, "water": 0.0, "vegetation": -0.10,
+    "roads": 0.51, "buildings": -0.04, "landmarks": -0.04,
+    "route": 1.05, "marker": 1.5,
 }
 _ROUTE_COLOR = (224, 164, 88)
 _MARKER_COLOR = (226, 61, 61)
@@ -151,10 +145,10 @@ def _iter_polys(polys):
 
 
 class _TerrainSampler:
-    """质心 → 地形高度 (mm)。elevation_grid 为 None 时恒 0。"""
+    """质心 → 地形高度 (mm)，与正式地形使用同一 Z 基准。"""
 
     def __init__(self, elevation_grid, bbox_local, scale, z_gamma,
-                 relief_mm_max):
+                 relief_mm_max, z_base_mm=0.0):
         self.grid = elevation_grid
         self.xmin, self.ymin, self.xmax, self.ymax = bbox_local
         self.scale = scale
@@ -166,6 +160,7 @@ class _TerrainSampler:
                               1e-6)
         self.z_gamma = z_gamma
         self.relief_mm_max = relief_mm_max
+        self.z_base_mm = float(z_base_mm)
 
     def z_mm(self, x, y) -> float:
         return float(self.z_mm_vec(np.array([x]), np.array([y]))[0])
@@ -177,14 +172,16 @@ class _TerrainSampler:
         xs = np.asarray(xs, dtype=float)
         ys = np.asarray(ys, dtype=float)
         if self.grid is None or self.zrange <= 1e-6:
-            return np.zeros_like(xs)
+            # 正式管线的平地也放在浮雕范围中点，不是 z=0。
+            return np.full_like(xs, self.z_base_mm + self.relief_mm_max / 2.0)
         h, w = self.grid.shape
         col = np.clip(((xs - self.xmin) / (self.xmax - self.xmin) * (w - 1))
                       .astype(int), 0, w - 1)
         row = np.clip(((ys - self.ymin) / (self.ymax - self.ymin) * (h - 1))
                       .astype(int), 0, h - 1)
         t = (self.grid[row, col] - self.zmin) / self.zrange
-        return (np.maximum(t, 0.0) ** self.z_gamma) * self.relief_mm_max
+        return (self.z_base_mm
+                + (np.maximum(t, 0.0) ** self.z_gamma) * self.relief_mm_max)
 
 
 def _try_extrude(poly, height_m):
@@ -336,16 +333,20 @@ def _drape_polys(polys, sampler: _TerrainSampler, scale: float, color,
 
 
 def _terrain_heightfield(elevation_grid, bbox_local, scale, z_gamma,
-                         relief_mm_max, thickness_mm, grid_n=128):
+                         relief_mm_max, thickness_mm=None, grid_n=128,
+                         *, surface_base_mm=0.0, bottom_z_mm=None):
     """降采样 heightfield + 四周裙边 + 平底 → 封闭实体底座。
 
-    顶面 z 与 _TerrainSampler.z_mm 同基准（[0, relief_mm_max]），
+    顶面 z 与 _TerrainSampler.z_mm 同基准，
     图层才能贴地——历史 bug：顶面曾整体下移 thickness_mm，
     导致所有图层均匀悬浮一层地形厚度。
 
-    底面固定在 z = -thickness_mm：四周裙边封侧面、底面成底座，
+    底面固定在 bottom_z_mm；旧调用仍可传 thickness_mm，
+    等价于 bottom_z_mm=-thickness_mm。四周裙边封侧面、底面成底座，
     产物为 watertight 实体（旧版只三角化顶面，是一张透空薄壳）。"""
     xmin, ymin, xmax, ymax = bbox_local
+    legacy_zero_baseline = (bottom_z_mm is None and thickness_mm is not None
+                            and float(surface_base_mm) == 0.0)
     if elevation_grid is None:
         elevation_grid = np.zeros((2, 2), dtype=np.float32)
     h, w = elevation_grid.shape
@@ -354,14 +355,24 @@ def _terrain_heightfield(elevation_grid, bbox_local, scale, z_gamma,
     sub = elevation_grid[np.ix_(rs, cs)].astype(np.float64)
     # 归一化基线用全网格 min/max，与 _TerrainSampler 严格一致
     zmin = float(np.nanmin(elevation_grid))
-    zr = max(float(np.nanmax(elevation_grid)) - zmin, 1e-6)
-    zn = np.clip((sub - zmin) / zr, 0, 1) ** z_gamma * relief_mm_max
+    zr_raw = float(np.nanmax(elevation_grid)) - zmin
+    if zr_raw > 0.01:
+        zn = (np.clip((sub - zmin) / zr_raw, 0, 1) ** z_gamma
+              * relief_mm_max + float(surface_base_mm))
+    else:
+        flat_z = (float(surface_base_mm) if legacy_zero_baseline else
+                  float(surface_base_mm) + relief_mm_max / 2.0)
+        zn = np.full_like(sub, flat_z)
 
     ny, nx = zn.shape
     xs = np.linspace(xmin, xmax, nx) * scale
     ys = np.linspace(ymin, ymax, ny) * scale        # 行 0 = 南
     xx, yy = np.meshgrid(xs, ys)
-    z_bot = -float(thickness_mm)
+    if bottom_z_mm is None:
+        if thickness_mm is None:
+            raise ValueError("bottom_z_mm or thickness_mm is required")
+        bottom_z_mm = -float(thickness_mm)
+    z_bot = float(bottom_z_mm)
 
     n_top = ny * nx
     top = np.column_stack([xx.ravel(), yy.ravel(), zn.ravel()])
@@ -553,7 +564,9 @@ def _amap_water_polys(ctx: dict):
 
 def render_glb_preview(layers, ctx: dict, output_path: str,
                        elevation_grid=None, markers=None,
-                       water_gdf=None) -> str:
+                       water_gdf=None,
+                       base_thickness_mm=None,
+                       terrain_relief_mm=None) -> str:
     """Draft GLB 导出主入口。
 
     Args:
@@ -568,25 +581,33 @@ def render_glb_preview(layers, ctx: dict, output_path: str,
     from _TEXTURE_STYLE_OF_DEEPSEEK.config import (
         Z_GAMMA, TERRAIN_THICKNESS_MM, BUILDING_AGGREGATE_HEIGHT_MM,
         ROAD_WIDTHS, ROAD_DEFAULT_WIDTH_M, ROAD_WIDTH_MULTIPLIER,
-        WATERWAY_WIDTHS,
+        WATERWAY_WIDTHS, WATER_BASE_THICKNESS_MM, Z_WATER_BASE_MM,
+        BLOCK_BASE_THICKNESS_MM, ROAD_THICKNESS_MM,
+        Z_ROAD_ABOVE_TERRAIN_MM, Z_BUILDING_EMBED_MM,
+        VEGETATION_THICKNESS_MM, VL_Z_OFFSET_MM, VO_Z_OFFSET_MM,
     )
 
     t0 = time.time()
     bbox_local = ctx["bbox_local"]
     scale = float(ctx["scale"])
     xmin, ymin, xmax, ymax = bbox_local
-    # 草稿地形起伏上限：区域宽度的 3%（与正式管线视觉量级一致即可）
-    relief_mm_max = (xmax - xmin) * scale * 0.03 * 10
-    relief_mm_max = min(max(relief_mm_max, 2.0), 12.0)
+    relief_mm_max = (TERRAIN_THICKNESS_MM if terrain_relief_mm is None
+                     else float(terrain_relief_mm))
+    slab_mm = (WATER_BASE_THICKNESS_MM if base_thickness_mm is None
+               else float(base_thickness_mm))
+    if not 0.4 <= slab_mm <= 3.0:
+        raise ValueError("base thickness must be between 0.4 and 3.0mm")
+    terrain_base_z = Z_WATER_BASE_MM + slab_mm
 
     sampler = _TerrainSampler(elevation_grid, bbox_local, scale,
-                              Z_GAMMA, relief_mm_max)
+                              Z_GAMMA, relief_mm_max, terrain_base_z)
     scene = trimesh.Scene()
 
     # ── 地形 ──
     scene.add_geometry(
         _terrain_heightfield(elevation_grid, bbox_local, scale, Z_GAMMA,
-                             relief_mm_max, TERRAIN_THICKNESS_MM),
+                             relief_mm_max, surface_base_mm=terrain_base_z,
+                             bottom_z_mm=Z_WATER_BASE_MM),
         node_name="terrain")
 
     # ── 平板层（block_base / water / vegetation）──
@@ -596,13 +617,18 @@ def render_glb_preview(layers, ctx: dict, output_path: str,
     drape_cell_m = max((xmax - xmin) / 512.0, 20.0)
 
     flat_specs = [
-        ("block_base", list(_iter_polys(layers.block_base))),
-        ("vegetation", list(_iter_polys(list(layers.VL) + list(layers.VO)))),
+        ("block_base", list(_iter_polys(layers.block_base)),
+         0.01, BLOCK_BASE_THICKNESS_MM),
+        ("vegetation", list(_iter_polys(layers.VL)),
+         VL_Z_OFFSET_MM - VEGETATION_THICKNESS_MM,
+         VEGETATION_THICKNESS_MM),
+        ("vegetation", list(_iter_polys(layers.VO)),
+         VO_Z_OFFSET_MM - VEGETATION_THICKNESS_MM,
+         VEGETATION_THICKNESS_MM),
     ]
-    for name, polys in flat_specs:
+    for name, polys, z0, th in flat_specs:
         if not polys:
             continue
-        z0, th = _LAYER_Z[name]
         mesh = _extrude_polys([(p, z0, th) for p in polys], sampler, scale,
                               _COLORS[name], simplify_m=draft_tol_m,
                               z_sample="min")
@@ -660,7 +686,7 @@ def render_glb_preview(layers, ctx: dict, output_path: str,
         except Exception:
             pass
         mesh = _drape_polys(water_polys, sampler, scale, _COLORS["water"],
-                            0.25, drape_cell_m, simplify_m=draft_tol_m)
+                            0.0, drape_cell_m, simplify_m=draft_tol_m)
         if mesh is not None:
             scene.add_geometry(mesh, node_name="water")
             print(f"  [glb] water: {len(mesh.faces):,} faces")
@@ -679,15 +705,17 @@ def render_glb_preview(layers, ctx: dict, output_path: str,
             except Exception:
                 continue
         mesh = _drape_polys(list(_iter_polys(road_polys)), sampler, scale,
-                            _COLORS["roads"], 0.6, drape_cell_m)
+                            _COLORS["roads"], Z_ROAD_ABOVE_TERRAIN_MM,
+                            drape_cell_m)
         if mesh is not None:
             scene.add_geometry(mesh, node_name="roads")
             print(f"  [glb] roads: {len(mesh.faces):,} faces")
 
     # ── 建筑（BO 聚合高度 / BL 各自高度，压在 block_base 上）──
     bo_h = float(BUILDING_AGGREGATE_HEIGHT_MM)
-    bo_items = [(p, 0.6, bo_h) for p in _iter_polys(layers.BO)]
-    bl_items = [(p, 0.6, max(float(h), 0.5))
+    bo_items = [(p, -Z_BUILDING_EMBED_MM, bo_h)
+                for p in _iter_polys(layers.BO)]
+    bl_items = [(p, -Z_BUILDING_EMBED_MM, max(float(h), 0.5))
                 for p, h in layers.BL if p is not None and not p.is_empty]
     for name, items in (("buildings", bo_items), ("landmarks", bl_items)):
         mesh = _extrude_polys(items, sampler, scale, _COLORS[name])

@@ -143,6 +143,10 @@ def parse_args():
         help='Draft 模式：跳过 brick/boolean，快速导出 GLB 预览后退出'
     )
     parser.add_argument(
+        '--base-thickness-mm', type=float, default=0.4, metavar='MM',
+        help='公共打印底层厚度；GLB 预览与正式 3MF 共用（默认 0.4mm）'
+    )
+    parser.add_argument(
         '--marker', action='append', default=None, metavar='LAT,LON',
         help='在 draft GLB 中插红色大头针标注（可重复，如照片 GPS 点）'
     )
@@ -325,6 +329,8 @@ def _transform_layers_to_exact(layers, dx, dy, clip_box):
 
 def main():
     cli_args = parse_args()
+    if not 0.4 <= cli_args.base_thickness_mm <= 3.0:
+        raise SystemExit("--base-thickness-mm must be between 0.4 and 3.0")
 
     LAT1, LON1, LAT2, LON2 = cli_args.bbox_tuple
     CITY_NAME = cli_args.city
@@ -746,11 +752,13 @@ def main():
         # Water is represented as a separate mesh layer instead.
         print(f"  Skipping Manifold water hollow (preserves terrain detail)")
         terrain_solid = build_deepseek_terrain(
-            elevation_grid, width_m, height_m, area_km2, scale, water_gdf
+            elevation_grid, width_m, height_m, area_km2, scale, water_gdf,
+            base_thickness_mm=cli_args.base_thickness_mm,
         )
     else:
         terrain_solid = build_deepseek_terrain(
-            elevation_grid, width_m, height_m, area_km2, scale, water_gdf
+            elevation_grid, width_m, height_m, area_km2, scale, water_gdf,
+            base_thickness_mm=cli_args.base_thickness_mm,
         )
         print(f"  Terrain (no water data) faces: {len(terrain_solid.faces):,}")
 
@@ -956,6 +964,9 @@ def main():
             elevation_grid=elevation_grid,
             markers=marker_local or None,
             water_gdf=water_gdf,
+            base_thickness_mm=cli_args.base_thickness_mm,
+            terrain_relief_mm=(_cfg.TERRAIN_THICKNESS_MM
+                               if auto_resolved is not None else None),
         )
         glb_size = os.path.getsize(glb_path) / (1024 * 1024)
         total_time = time.time() - t_start
@@ -1094,7 +1105,8 @@ def main():
         try:
             water_mesh = build_deepseek_water_v3(
                 layers.WL, layers.WO,
-                bbox_x_min, bbox_y_min, bbox_x_max, bbox_y_max, scale)
+                bbox_x_min, bbox_y_min, bbox_x_max, bbox_y_max, scale,
+                base_thickness_mm=cli_args.base_thickness_mm)
             if water_mesh is not None:
                 print(f"  Water faces: {len(water_mesh.faces):,}")
             else:
@@ -1237,7 +1249,8 @@ def main():
         city=CITY_NAME,
         bbox_wgs84=(south, west, north, east),
         artifact_path=output_path,
-        params={**_resolved_params, **style_overrides},
+        params={**_resolved_params, **style_overrides,
+                "base_thickness_mm": cli_args.base_thickness_mm},
         decisions=_decisions,
         profile=_profile,
         source_features=_source_features,

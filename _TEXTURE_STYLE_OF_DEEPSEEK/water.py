@@ -150,6 +150,7 @@ def build_deepseek_water_v3(
     bbox_x_max: float, bbox_y_max: float,
     scale: float = 1.0,
     flat_only: bool = True,
+    base_thickness_mm: float | None = None,
 ) -> trimesh.Trimesh:
     """V3 water builder.
 
@@ -170,14 +171,20 @@ def build_deepseek_water_v3(
 
     n_wl = len(WL_polys)
 
-    # Convert config mm thickness to model meters
-    base_thickness_m = WATER_BASE_THICKNESS_MM / scale if scale > 0 else 0.0
+    # Function-level import keeps this value identical to the request used by
+    # terrain and GLB preview, instead of a module-import-time snapshot.
+    from _TEXTURE_STYLE_OF_DEEPSEEK.config import WATER_BASE_THICKNESS_MM
+    resolved_base_mm = (WATER_BASE_THICKNESS_MM if base_thickness_mm is None
+                        else float(base_thickness_mm))
+    if resolved_base_mm < 0.4:
+        raise ValueError("base thickness must be at least 0.4mm")
+    base_thickness_m = resolved_base_mm / scale if scale > 0 else 0.0
 
     if flat_only:
         combined = _build_base_plate_manifold(
             bbox_x_min, bbox_y_min, bbox_x_max, bbox_y_max, base_thickness_m,
         )
-        print(f"  Water(v3): flat base plate {WATER_BASE_THICKNESS_MM:.1f}mm, "
+        print(f"  Water(v3): flat base plate {resolved_base_mm:.1f}mm, "
               f"{n_wl} WL + {len(WO_polys)} WO skipped")
     else:
         # Water feature heights in model meters (two levels)

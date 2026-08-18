@@ -62,8 +62,10 @@ def run_task(spec: dict, dry_run: bool = False, heartbeat=None,
         # dry-run：不真跑管线，生成一个假产物验证回路
         city = cmd[cmd.index("--city") + 1] if "--city" in cmd else "dryrun"
         slug = cmd[cmd.index("--slug") + 1] if "--slug" in cmd else ""
-        out_dir = (Path(cwd) / "output" / "style_gallery" / slug
-                   if slug else Path(cwd) / "output" / city)
+        output_root = Path(os.environ.get(
+            "STUDIO_OUTPUT_DIR", Path(cwd) / "output"))
+        out_dir = (output_root / "style_gallery" / slug
+                   if slug else output_root / city)
         out_dir.mkdir(parents=True, exist_ok=True)
         fake_png = out_dir / f"{city}_preview.png"
         fake_png.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 100)
@@ -144,8 +146,10 @@ def run_task(spec: dict, dry_run: bool = False, heartbeat=None,
     # 收集产物
     city = cmd[cmd.index("--city") + 1] if "--city" in cmd else ""
     slug = cmd[cmd.index("--slug") + 1] if "--slug" in cmd else city
-    out_dir = (Path(cwd) / "output" / "style_gallery" / slug
-               if "--slug" in cmd else Path(cwd) / "output" / city)
+    output_root = Path(os.environ.get(
+        "STUDIO_OUTPUT_DIR", Path(cwd) / "output"))
+    out_dir = (output_root / "style_gallery" / slug
+               if "--slug" in cmd else output_root / city)
     produced = []
     if out_dir.is_dir():
         for ext in ("*.glb", "*.png", "*.3mf", "*.json"):

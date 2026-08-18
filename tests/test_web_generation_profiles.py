@@ -55,11 +55,14 @@ def test_classic_profile_keeps_legacy_entry():
         city="westlake",
         mode="draft",
         generation_profile="classic",
+        base_thickness_mm=0.8,
     ))
 
     job = _queued_job(response)
     assert job["spec"]["cmd"][1] == "generate_city_legacy.py"
     assert "--draft" in job["spec"]["cmd"]
+    assert job["spec"]["cmd"][
+        job["spec"]["cmd"].index("--base-thickness-mm") + 1] == "0.80"
 
 
 def test_custom_draft_reuses_selected_gallery_cache(monkeypatch, tmp_path):

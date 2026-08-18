@@ -224,6 +224,9 @@ class CityHarness:
 
         # 高度杠杆：猴补丁（buildings._compress_height 已函数级 import）
         _cfg.BUILDING_HEIGHT_MAX_MM = float(params["building_height_mm_max"])
+        # GLB 预览与正式管线共用同一已解析地形起伏。
+        _cfg.TERRAIN_THICKNESS_MM = float(params.get(
+            "terrain_thickness_mm", self.base_params.terrain_thickness_mm))
         # BL 轮廓简化杠杆（_extract_BL 两条路径均已函数级 import）
         _cfg.BUILDING_SIMPLIFY_TOL_M = float(params.get(
             "building_simplify_tol_m", self.base_params.building_simplify_tol_m))

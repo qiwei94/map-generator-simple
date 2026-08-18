@@ -18,6 +18,7 @@ const state = {
   renderKind: "topdown",
   selectedStyle: null,
   generationProfile: "classic",
+  baseThicknessMm: 0.4,
   authConfig: null,
   account: null,
   job: null,           // {id, mode}
@@ -48,6 +49,7 @@ function getSession() {
     target: null,          // {kind, city, title, prototype}
     selectedStyle: null,
     generationProfile: "classic",
+    baseThicknessMm: 0.4,
     areaName: "",
     photoPoints: [],       // [{lat, lon, name}] 照片 GPS 坐标（不含原图）
     journeyClusters: null, // [{lat, lon, name, count}]
@@ -97,6 +99,12 @@ async function restoreSession() {
   }
   if (s.generationProfile) {
     state.generationProfile = s.generationProfile;
+  }
+  if (Number.isFinite(Number(s.baseThicknessMm))) {
+    state.baseThicknessMm = Number(s.baseThicknessMm);
+    $("baseThickness").value = String(state.baseThicknessMm);
+    $("baseThicknessValue").textContent =
+      `${state.baseThicknessMm.toFixed(2)} mm`;
   }
   if (s.areaName) {
     const el = $("areaName");
@@ -157,6 +165,7 @@ function persistState() {
     target: state.target,
     selectedStyle: state.selectedStyle,
     generationProfile: state.generationProfile,
+    baseThicknessMm: state.baseThicknessMm,
     areaName: ($("areaName") || {}).value || "",
     lastCity: state.target.city || (lastArtifacts ? state.jobSlug : null),
     lastBbox: map.state.map ? currentBbox() : null,
@@ -359,6 +368,32 @@ async function loadCities() {
   renderViewer();
   renderDownloads();
 }
+
+async function loadShowcase() {
+  try {
+    const result = await fetchJSON("/api/showcase");
+    const samples = result.samples || [];
+    if (!samples.length) return;
+    $("showcaseTrack").innerHTML = samples.map((sample, index) => `
+      <figure class="showcase-item">
+        <img src="${esc(sample.url)}" alt="${esc(sample.title)} · ${esc(sample.style)}"
+             ${index ? 'loading="lazy"' : ''}>
+        <figcaption><strong>${esc(sample.title)}</strong><span>${esc(sample.style)}</span></figcaption>
+      </figure>`).join("");
+    $("showcase").hidden = false;
+  } catch (_) {}
+}
+
+function scrollShowcase(direction) {
+  const track = $("showcaseTrack");
+  const card = track.querySelector(".showcase-item");
+  const amount = card ? card.getBoundingClientRect().width + 14
+    : track.clientWidth * 0.8;
+  track.scrollBy({ left: direction * amount, behavior: "smooth" });
+}
+
+$("showcasePrev").onclick = () => scrollShowcase(-1);
+$("showcaseNext").onclick = () => scrollShowcase(1);
 
 /** 构建国家分组下拉（去重 + 精选置顶） */
 function buildGroupSelect() {
@@ -1383,9 +1418,20 @@ $("profilePicker").addEventListener("change", (event) => {
   persistState();
 });
 
+$("baseThickness").oninput = () => {
+  state.baseThicknessMm = Number($("baseThickness").value);
+  $("baseThicknessValue").textContent =
+    `${state.baseThicknessMm.toFixed(2)} mm`;
+  persistState();
+};
+
 /** 组装请求体：预设城市 or 自定义区域，统一入口 */
 function buildRequest(mode) {
-  const body = { mode, generation_profile: state.generationProfile };
+  const body = {
+    mode,
+    generation_profile: state.generationProfile,
+    base_thickness_mm: state.baseThicknessMm,
+  };
   if (mode === "draft" && state.generationProfile !== "classic") {
     throw new Error("精细模型直接生成正式打印文件，不提供快速预览");
   }
@@ -1861,6 +1907,7 @@ window.addEventListener("load", async () => {
     lmSearch("", false);   // 预取目录缓存，不弹下拉
   }
   await refreshAccount();
+  await loadShowcase();
   await restoreSession();  // 恢复上次会话
   syncGenerationProfileAvailability();
   // 任务链接 ?job=xxx → 自动找回该任务

@@ -39,10 +39,11 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-OUTPUT_DIR = ROOT / "output"
+OUTPUT_DIR = Path(os.environ.get("STUDIO_OUTPUT_DIR", ROOT / "output"))
 GALLERY_DIR = OUTPUT_DIR / "style_gallery"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
-JOB_LOG_DIR = ROOT / "tmp" / "webapp_jobs"
+JOB_LOG_DIR = Path(os.environ.get(
+    "STUDIO_JOB_LOG_DIR", ROOT / "tmp" / "webapp_jobs"))
 JOB_LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 AUTH_REQUIRED = os.environ.get("AUTH_REQUIRED", "").lower() in (
@@ -369,6 +370,7 @@ class GenerateRequest(BaseModel):
     area: CustomArea | None = None    # 自定义区域（与 city 二选一）
     markers: list[list[float]] = []   # [[lat, lon], ...] 标注点（附近最高处染红）
     gallery_slug: str = ""            # 风格画廊身份；防止找回任务后区域串线
+    base_thickness_mm: float = 0.4
 
 
 GENERATION_PROFILES = {
@@ -1075,6 +1077,35 @@ def api_cities():
     return {"cities": cities}
 
 
+@app.get("/api/showcase")
+def api_showcase():
+    """Curated real pipeline outputs; absent files are simply omitted."""
+    candidates = [
+        ("巴黎 · 塞纳河", "城市精细", "custom_327de4",
+         "dense_detail_topdown.png"),
+        ("芝加哥 · 湖岸", "街区填充", "timing_chicago_25km2_20260818",
+         "block_fill_topdown.png"),
+        ("杭州 · 西湖", "水岸景观", "custom_694256",
+         "baseline_topdown.png"),
+        ("杭州 · 西湖核心", "精细道路", "westlake_acceptance_5km",
+         "dense_detail_topdown.png"),
+    ]
+    samples = []
+    for title, style, slug, filename in candidates:
+        path = GALLERY_DIR / slug / filename
+        if path.is_file():
+            samples.append({
+                "title": title, "style": style,
+                "url": f"/files/style_gallery/{slug}/{filename}",
+            })
+    if not samples and (STATIC_DIR / "assets/westlake-real-output.jpg").is_file():
+        samples.append({
+            "title": "杭州 · 西湖", "style": "真实 25 km 输出",
+            "url": "/assets/westlake-real-output.jpg",
+        })
+    return {"samples": samples}
+
+
 @app.get("/api/gallery/{city}")
 def api_gallery(city: str):
     meta = _load_gallery(city)
@@ -1519,6 +1550,8 @@ def api_generate(req: GenerateRequest, request: Request = None):
     user = _current_user(request, required=AUTH_REQUIRED)
     if req.mode not in ("draft", "full"):
         raise HTTPException(400, f"未知模式: {req.mode}")
+    if not 0.4 <= req.base_thickness_mm <= 3.0:
+        raise HTTPException(400, "打印底层厚度需在 0.4–3.0 mm 之间")
 
     profile = req.generation_profile.strip() or "classic"
     if profile not in GENERATION_PROFILES:
@@ -1625,6 +1658,7 @@ def api_generate(req: GenerateRequest, request: Request = None):
         "generation_profile": profile,
         "markers": req.markers,
         "gallery_slug": req.gallery_slug.strip(),
+        "base_thickness_mm": round(req.base_thickness_mm, 2),
     })
     job_id = uuid.uuid4().hex[:8]
     log_path = JOB_LOG_DIR / f"{job_id}_{city}_{req.mode}.log"
@@ -1632,7 +1666,10 @@ def api_generate(req: GenerateRequest, request: Request = None):
     if quality_profile:
         cmd = base_cmd
     else:
-        cmd = base_cmd + ["--png", "--review-png"]
+        cmd = base_cmd + [
+            "--png", "--review-png", "--base-thickness-mm",
+            f"{req.base_thickness_mm:.2f}",
+        ]
         if req.mode == "draft":
             cmd.append("--draft")
 
@@ -1671,6 +1708,8 @@ def api_generate(req: GenerateRequest, request: Request = None):
             "--prototype", gallery_meta.get("prototype", "landscape"),
             "--scene-type", gallery_meta.get("scene_type", "urban"),
             "--params-json", str(params_path),
+            "--base-thickness-mm",
+            f"{req.base_thickness_mm:.2f}",
         ]
         for mk in req.markers:
             if len(mk) == 2:
