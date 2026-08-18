@@ -559,6 +559,17 @@ def _job_public(job: dict, include_log: bool = False) -> dict:
     }
     if job.get("quota_cost"):
         out["quota_cost"] = int(job["quota_cost"])
+    if job.get("status") == "pending":
+        pending = sorted(
+            (item for item in list(JOBS.values())
+             if item.get("status") == "pending"),
+            key=lambda item: (item.get("queued_at", item.get("started", 0)),
+                              item.get("id", "")),
+        )
+        out["queue_position"] = next(
+            (index for index, item in enumerate(pending, 1)
+             if item.get("id") == job.get("id")), 1,
+        )
     bbox = job.get("bbox")
     if (isinstance(bbox, (list, tuple)) and len(bbox) == 4 and
             all(isinstance(value, (int, float)) for value in bbox)):
@@ -787,8 +798,10 @@ def _env(name: str, default: str = "") -> str:
 
 WORKER_MODE = _env("WORKER_MODE") in ("1", "true", "yes", "on")
 WORKER_TOKEN = _env("WORKER_TOKEN")
+WORKER_LEASE_SECONDS = max(30, int(_env("WORKER_LEASE_SECONDS", "90")))
 JOBS_PATH = JOB_LOG_DIR / "_jobs.json"
 _SKIP_SERIALIZE = {"proc", "fetch_paths"}   # 运行时对象/本地路径，不入库
+_LAST_WORKER_OWNER: str | None = None
 
 
 def _serialize_job(job: dict) -> dict:
@@ -810,19 +823,21 @@ def _save_jobs():
 
 
 def _load_jobs():
-    """启动恢复任务表。proc 无法恢复：
-    worker 模式 running → pending（重派，产物覆盖式幂等）；
-    local 模式 running → failed（子进程随重启消失）。"""
+    """Restore jobs without duplicating a worker whose lease is still live."""
     if not JOBS_PATH.exists():
         return
     try:
         data = json.loads(JOBS_PATH.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return
+    now = time.time()
     for jid, j in data.items():
         if j.get("status") in ("starting", "running"):
             if j.get("exec") == "worker":
-                j["status"] = "pending"
+                if float(j.get("lease_expires") or 0) <= now:
+                    j["status"] = "pending"
+                    j.pop("worker_id", None)
+                    j.pop("lease_expires", None)
             else:
                 j["status"] = "failed"
                 j["ended"] = time.time()
@@ -1366,7 +1381,7 @@ def api_styles(req: StylesRequest, request: Request = None):
                "request_key": request_key, "prototype": req.prototype,
                "bbox": bbox,
                "log_path": str(log_path), "status": "pending",
-               "started": time.time(), "ended": None,
+               "started": time.time(), "queued_at": time.time(), "ended": None,
                "spec": {"cmd": cmd, "cwd": str(ROOT), "env_extra": {
                    "PYTHONIOENCODING": "utf-8",
                    "PYTHONUNBUFFERED": "1",
@@ -1631,7 +1646,7 @@ def api_generate(req: GenerateRequest, request: Request = None):
                "fast_draft": fast_draft,
                "request_key": request_key,
                "log_path": str(log_path), "status": "pending",
-               "started": time.time(), "ended": None,
+               "started": time.time(), "queued_at": time.time(), "ended": None,
                "spec": {"cmd": cmd, "cwd": str(ROOT), "env_extra": {
                    "PYTHONIOENCODING": "utf-8",
                    "PYTHONUNBUFFERED": "1",
@@ -1741,25 +1756,98 @@ def api_jobs(include_log: bool = False, request: Request = None):
 class WorkerFinish(BaseModel):
     job_id: str
     token: str
+    worker_id: str = "legacy-worker"
     ok: bool = True
     error: str = ""
     files: list[dict] = []   # [{name, sha256, size}]
 
 
+class WorkerHeartbeat(BaseModel):
+    job_id: str
+    token: str
+    worker_id: str
+    log_tail: str = ""
+
+
+def _worker_owner(job: dict) -> str:
+    return str(job.get("quota_payer_id") or
+               ((job.get("owner_ids") or [""])[0]) or "anonymous")
+
+
+def _reclaim_expired_worker_jobs(now: float) -> bool:
+    changed = False
+    for job in JOBS.values():
+        if (job.get("exec") == "worker" and job.get("status") == "running"
+                and float(job.get("lease_expires") or 0) <= now):
+            job["status"] = "pending"
+            job["retry_count"] = int(job.get("retry_count") or 0) + 1
+            job.pop("worker_id", None)
+            job.pop("lease_expires", None)
+            changed = True
+    return changed
+
+
+def _next_fair_worker_job() -> dict | None:
+    """Oldest job, alternating account when another account is waiting."""
+    global _LAST_WORKER_OWNER
+    pending = sorted(
+        (job for job in JOBS.values()
+         if job.get("status") == "pending" and job.get("exec") == "worker"),
+        key=lambda job: (job.get("queued_at", job.get("started", 0)),
+                         job.get("id", "")),
+    )
+    if not pending:
+        return None
+    other_owner = [job for job in pending
+                   if _worker_owner(job) != _LAST_WORKER_OWNER]
+    chosen = other_owner[0] if other_owner else pending[0]
+    _LAST_WORKER_OWNER = _worker_owner(chosen)
+    return chosen
+
+
 @app.get("/api/worker/next")
-def worker_next(token: str = ""):
-    """Worker 拉取一个 pending 任务（乐观锁：pending → running 原子落盘）。"""
+def worker_next(token: str = "", worker_id: str = "legacy-worker"):
+    """Lease one queued task; expired leases are safely made available again."""
     _check_worker_token(token)
+    worker_id = worker_id.strip() or "legacy-worker"
     with JOBS_LOCK:
-        for jid, j in JOBS.items():
-            if j.get("status") == "pending" and j.get("exec") == "worker":
-                j["status"] = "running"
-                j["started"] = time.time()
-                _save_jobs()
-                return {"job_id": jid, "spec": j.get("spec"),
-                        "city": j["city"], "mode": j["mode"],
-                        "style": j.get("style")}
+        now = time.time()
+        changed = _reclaim_expired_worker_jobs(now)
+        job = _next_fair_worker_job()
+        if job is not None:
+            job["status"] = "running"
+            job["claimed_at"] = now
+            job["worker_id"] = worker_id
+            job["lease_expires"] = now + WORKER_LEASE_SECONDS
+            _save_jobs()
+            return {"job_id": job["id"], "spec": job.get("spec"),
+                    "city": job["city"], "mode": job["mode"],
+                    "style": job.get("style"),
+                    "lease_seconds": WORKER_LEASE_SECONDS}
+        if changed:
+            _save_jobs()
     return {"job_id": None}  # 无待处理任务
+
+
+@app.post("/api/worker/heartbeat")
+def worker_heartbeat(req: WorkerHeartbeat):
+    _check_worker_token(req.token)
+    with JOBS_LOCK:
+        job = JOBS.get(req.job_id)
+        if not job:
+            raise HTTPException(404, "任务不存在")
+        if job.get("status") != "running":
+            raise HTTPException(409, "任务已不在运行")
+        if job.get("worker_id") != req.worker_id:
+            raise HTTPException(409, "任务租约属于其他计算节点")
+        job["lease_expires"] = time.time() + WORKER_LEASE_SECONDS
+        job["last_heartbeat"] = time.time()
+        _save_jobs()
+        log_path = Path(job["log_path"])
+    if req.log_tail:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text(req.log_tail[-20_000:], encoding="utf-8")
+    return {"ok": True, "lease_seconds": WORKER_LEASE_SECONDS}
 
 
 @app.post("/api/worker/upload")
@@ -1779,7 +1867,7 @@ async def worker_upload(token: str = "", job_id: str = "",
     safe_name = Path(filename).name
     if not safe_name or safe_name != filename:
         raise HTTPException(400, "非法文件名")
-    dest_dir = OUTPUT_DIR / city
+    dest_dir = GALLERY_DIR / city if job.get("mode") == "styles" else OUTPUT_DIR / city
     dest_dir.mkdir(parents=True, exist_ok=True)
     part_path = dest_dir / (safe_name + ".part")
     # 流式写入 .part
@@ -1820,8 +1908,11 @@ def worker_finish(req: WorkerFinish):
     # 幂等：已 done 直接返回
     if job.get("status") == "done":
         return {"ok": True, "already_done": True}
+    if (job.get("worker_id") and job.get("worker_id") != req.worker_id and
+            float(job.get("lease_expires") or 0) > time.time()):
+        raise HTTPException(409, "任务租约属于其他计算节点")
     city = job["city"]
-    dest_dir = OUTPUT_DIR / city
+    dest_dir = GALLERY_DIR / city if job.get("mode") == "styles" else OUTPUT_DIR / city
 
     if req.ok:
         # 验证所有产物文件
@@ -1844,6 +1935,7 @@ def worker_finish(req: WorkerFinish):
         with JOBS_LOCK:
             job["status"] = "done"
             job["ended"] = time.time()
+            job.pop("lease_expires", None)
             _save_jobs()
     else:
         # worker 报告失败
@@ -1854,6 +1946,8 @@ def worker_finish(req: WorkerFinish):
             job["error_code"], job["error_msg"] = _classify_error_text(
                 req.error)
             job["error"] = req.error
+            job.pop("lease_expires", None)
+            _refund_job_quota(job)
             _save_jobs()
         # 清理可能的 .part 残留
         for finfo in req.files:
