@@ -605,7 +605,7 @@ def fetch_elevation_grid_tiled(south: float, west: float, north: float, east: fl
     """瓦片级高程取数：按 0.05° 网格瓦片缓存，拼接后返回量化框整框网格。
 
     与 fetch_elevation_grid 相同的网格约定（row0=south, col0=west）；
-    调用方（generate_city.py）拿到后再重采样裁剪到用户精确框。
+    旧通用调用方（generate_city_legacy.py）拿到后再重采样裁剪到用户精确框。
     平滑在拼接后整框做，避免瓦片接缝。
     """
     from _TEXTURE_STYLE_OF_DEEPSEEK._tile_grid import (

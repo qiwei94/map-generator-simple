@@ -388,6 +388,42 @@ def _fetch_amap_water(
     return polygons
 
 
+def fetch_amap_water_local(
+    bbox_wgs84: Tuple[float, float, float, float],
+    utm_crs,
+    origin: Tuple[float, float],
+    bbox_local: Optional[Tuple[float, float, float, float]] = None,
+    min_area_m2: float = 50000.0,
+) -> List[Polygon]:
+    """Return Gaode water polygons projected into the pipeline local CRS.
+
+    This is the shared, cache-backed entry used by both the 2D style gallery
+    and the draft GLB.  Keeping the result in the harness context prevents the
+    two preview stages from downloading/vectorising the same imagery twice.
+    Overseas bboxes return an empty list through ``_fetch_amap_water``.
+    """
+    polys_wgs84 = _fetch_amap_water(bbox_wgs84)
+    if not polys_wgs84:
+        return []
+    polys_local = _project_to_utm(polys_wgs84, utm_crs, origin)
+    clip = None
+    if bbox_local is not None:
+        from shapely.geometry import box
+        clip = box(*bbox_local)
+    out = []
+    for poly in polys_local:
+        try:
+            geom = poly.intersection(clip) if clip is not None else poly
+        except Exception:
+            continue
+        parts = (list(geom.geoms) if isinstance(geom, MultiPolygon)
+                 else [geom])
+        out.extend(part for part in parts
+                   if isinstance(part, Polygon) and not part.is_empty
+                   and part.is_valid and part.area >= min_area_m2)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Chamfer distance matching (scale + angle estimation)
 # ---------------------------------------------------------------------------

@@ -212,6 +212,42 @@ class TestWaterV3:
 class TestVegetationV3:
     """Tests for build_deepseek_vegetation_v3."""
 
+    def test_point_touching_triangle_islands_get_independent_vertices(self):
+        from _TEXTURE_STYLE_OF_DEEPSEEK.vegetation_exclusion import (
+            _split_point_touching_topology,
+        )
+
+        points = np.array([
+            [0, 0], [1, 0], [0, 1], [-1, 0], [0, -1],
+        ], dtype=np.float64)
+        faces = np.array([[0, 1, 2], [0, 3, 4]], dtype=np.int32)
+
+        split_points, split_faces = _split_point_touching_topology(
+            points, faces)
+
+        assert len(split_points) == 6
+        assert set(split_faces[0]).isdisjoint(set(split_faces[1]))
+
+    def test_local_boundary_pinch_is_split_even_when_faces_reconnect(self):
+        from _TEXTURE_STYLE_OF_DEEPSEEK.vegetation_exclusion import (
+            _split_point_touching_topology,
+        )
+
+        points = np.array([
+            [0, 0], [1, 0], [0, 1], [-1, 0], [0, -1],
+        ], dtype=np.float64)
+        # The first two triangles meet only at vertex 0, while the final two
+        # make the complete face set edge-connected away from that pinch.
+        faces = np.array([
+            [0, 1, 2], [0, 3, 4], [1, 3, 2], [2, 3, 4],
+        ], dtype=np.int32)
+
+        split_points, split_faces = _split_point_touching_topology(
+            points, faces)
+
+        assert len(split_points) == 6
+        assert split_faces[0, 0] != split_faces[1, 0]
+
     def test_empty_input_returns_none(self):
         """空输入返回 None。"""
         from _TEXTURE_STYLE_OF_DEEPSEEK.vegetation_exclusion import (
@@ -398,3 +434,47 @@ class TestBlockBaseV3:
         tiny = _make_square(0, 0, 1)   # area=1
         result = build_deepseek_block_base_v3([tiny], terrain, 2000.0)
         assert result is None
+
+
+class TestBlockBaseEdgeFilter:
+    def test_retreat_removes_edge_and_filters_transition_by_occupancy(self):
+        from shapely.geometry import box
+        from _TEXTURE_STYLE_OF_DEEPSEEK.block_base import filter_block_base_edges
+
+        # scale=0.01mm/m: 2mm retreat=200m, 1mm transition=100m.
+        edge = box(20, 400, 120, 500)
+        transition_empty = box(400, 220, 460, 280)
+        transition_built = box(220, 400, 280, 460)
+        inner = box(400, 400, 500, 500)
+        occupied = [box(230, 410, 270, 450)]
+
+        kept, indices, stats = filter_block_base_edges(
+            [edge, transition_empty, transition_built, inner],
+            (0, 0, 1000, 1000),
+            scale=0.01,
+            retreat_mm=2.0,
+            transition_mm=1.0,
+            occupied_polys=occupied,
+            min_coverage=0.02,
+        )
+
+        assert indices == [2, 3]
+        assert kept == [transition_built, inner]
+        assert stats == {
+            "input": 4,
+            "kept": 2,
+            "outer_removed": 1,
+            "transition_removed": 1,
+        }
+
+    def test_zero_retreat_is_identity(self):
+        from shapely.geometry import box
+        from _TEXTURE_STYLE_OF_DEEPSEEK.block_base import filter_block_base_edges
+
+        polys = [box(0, 0, 10, 10)]
+        kept, indices, stats = filter_block_base_edges(
+            polys, (0, 0, 100, 100), scale=1.0, retreat_mm=0.0
+        )
+        assert kept == polys
+        assert indices == [0]
+        assert stats["kept"] == 1

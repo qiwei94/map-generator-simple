@@ -1,6 +1,6 @@
 """统一城市 3MF 模型生成脚本（标准 CLI 管线）
 
-基于 real_back_up_westlake_cli.py 的完整管线流程，支持任意城市。
+基于当前正式西湖入口 generate_city.py 的管线流程，支持任意城市。
 
 标准管线流程:
   PBF → osmium extract → tags-filter → export → GeoJSON → GeoDataFrame

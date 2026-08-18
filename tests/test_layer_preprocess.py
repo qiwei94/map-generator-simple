@@ -11,6 +11,7 @@ import math
 from typing import List, Tuple
 
 import pytest
+import geopandas as gpd
 from shapely.geometry import Polygon, MultiPolygon, box, Point, LineString
 from shapely.ops import unary_union
 
@@ -20,8 +21,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from _TEXTURE_STYLE_OF_DEEPSEEK._layer_preprocess import (
     _subtract,
     _filter_by_area,
+    _extract_roads,
+    _effective_road_tier,
     LayerPolygons,
 )
+from _TEXTURE_STYLE_OF_DEEPSEEK.buildings import _aggregate_in_blocks
 
 
 # ---------------------------------------------------------------------------
@@ -107,6 +111,80 @@ class TestSubtract:
         assert len(result) == 1
         # a2 被跳过，a1 被减去
         assert result[0].area < 100.0
+
+    def test_subtract_repairs_self_intersection_instead_of_aborting(self):
+        """OSM 自交环不应让整个风格图因 TopologyException 失败。"""
+        bow_tie = Polygon([
+            (0, 0), (10, 10), (0, 10), (10, 0), (0, 0),
+        ])
+        assert not bow_tie.is_valid
+
+        result = _subtract([bow_tie], box(4, 4, 6, 6))
+
+        assert result
+        assert all(poly.is_valid for poly in result)
+        assert all(not poly.is_empty for poly in result)
+
+
+def test_oriented_block_aggregation_repairs_invalid_block():
+    """巴黎式非法街区不能让 oriented_bbox 风格整体退出。"""
+    invalid_block = Polygon([
+        (0, 0), (10, 10), (0, 10), (10, 0), (0, 0),
+    ])
+    building = box(4.5, 7.5, 5.5, 8.5)
+    assert not invalid_block.is_valid
+    assert invalid_block.contains(building.centroid)
+
+    result = _aggregate_in_blocks(
+        [building], [invalid_block], mode="oriented_bbox",
+        print_limit_m2=0.0, simplify_m=0.0,
+    )
+
+    assert result
+    assert all(poly.is_valid for poly in result)
+
+
+def test_extract_roads_keeps_bridge_metadata_and_subtracts_landmarks():
+    roads = gpd.GeoDataFrame({
+        "highway": ["primary", "residential"],
+        "name": ["Pont Example Bridge", "Rue Example"],
+        "bridge": ["yes", None],
+        "wikidata": ["Q123", None],
+        "wikipedia": [None, None],
+        "geometry": [
+            LineString([(0, 5), (30, 5)]),
+            LineString([(0, 20), (30, 20)]),
+        ],
+    }, crs="EPSG:3857")
+
+    result = _extract_roads(roads, [box(10, 0, 20, 10)], area_km2=10)
+
+    bridge_segments = [line for line, highway, bridge in result if bridge]
+    assert len(bridge_segments) == 2
+    assert all(line.length == pytest.approx(10.0) for line in bridge_segments)
+    assert any(highway == "residential" and not bridge
+               for _, highway, bridge in result)
+
+
+def test_extract_roads_filters_large_area_before_geometry_work():
+    roads = gpd.GeoDataFrame({
+        "highway": ["primary", "residential"],
+        "geometry": [
+            LineString([(0, 0), (20, 0)]),
+            LineString([(0, 10), (20, 10)]),
+        ],
+    }, crs="EPSG:3857")
+
+    result = _extract_roads(roads, [], area_km2=100)
+
+    assert len(result) == 1
+    assert result[0][1] == "primary"
+
+
+def test_large_area_caps_unprintable_footway_block_detail():
+    assert _effective_road_tier(5, area_km2=100) == 4
+    assert _effective_road_tier(4, area_km2=100) == 4
+    assert _effective_road_tier(5, area_km2=25) == 5
 
 
 # ---------------------------------------------------------------------------

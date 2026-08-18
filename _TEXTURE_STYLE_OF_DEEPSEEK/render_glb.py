@@ -531,6 +531,10 @@ def _amap_water_polys(ctx: dict):
     OSM 对大河往往只有中心线，固定宽 buffer 与真实江面（~2km）差距大。
     复用 _water_supplement 的瓦片提取（磁盘缓存命中则秒回；境外 bbox
     自动跳过），投影到本地坐标并裁到 bbox。任何失败返回 []。"""
+    prepared = ctx.get("amap_water_polys")
+    if prepared is not None:
+        return list(prepared)
+
     bbox_wgs84 = ctx.get("bbox_wgs84")
     utm_crs = ctx.get("utm_crs")
     origin = ctx.get("origin")
@@ -538,21 +542,10 @@ def _amap_water_polys(ctx: dict):
         return []
     try:
         from _TEXTURE_STYLE_OF_DEEPSEEK._water_supplement import (
-            _fetch_amap_water, _project_to_utm)
-        polys_wgs = _fetch_amap_water(bbox_wgs84)
-        if not polys_wgs:
-            return []
-        polys = _project_to_utm(polys_wgs, utm_crs, origin)
-        from shapely.geometry import box as _box
-        clip = _box(*ctx["bbox_local"])
-        out = []
-        for p in polys:
-            try:
-                g = p.intersection(clip)
-            except Exception:
-                continue
-            out.extend(q for q in _iter_polys([g]) if q.area >= 50000)
-        return out
+            fetch_amap_water_local)
+        return fetch_amap_water_local(
+            bbox_wgs84, utm_crs, origin,
+            bbox_local=ctx.get("bbox_local"), min_area_m2=50000.0)
     except Exception as e:
         print(f"  [glb] amap water skipped: {e}")
         return []

@@ -53,7 +53,8 @@
 ## 目录结构
 
 ```
-generate_city.py              # 主管线入口（--bbox / --preset / --draft / --marker / --params-json）
+generate_city.py              # 当前正式西湖 25KM 3MF 入口
+generate_city_legacy.py       # 旧通用入口（Web/draft/任意 bbox 兼容）
 _TEXTURE_STYLE_OF_DEEPSEEK/   # 几何预处理 + 渲染核心
   _layer_preprocess.py        #   图层预处理（BL/BO/WL/VO/roads…）
   render_glb.py               #   draft GLB 导出 + 落地后检 + 染红标注
@@ -99,9 +100,54 @@ STUDIO_PORT=9000 python webapp/server.py   # 自定义端口
 - 本机：`http://127.0.0.1:8787`
 - 手机同 WiFi：用 `ipconfig` 查 WLAN 的 IPv4 访问（注意排除代理虚拟网卡地址）。
 
+Studio 的“生成方式”保持相互隔离：
+
+- **经典通用**：沿用 `generate_city_legacy.py`，支持全部已配置区域和快速预览。
+- **西湖质量 · 平整填充**：调用 `generate_city.py`，输出独立到
+  `output/westlake_quality_flat/`，block base 使用平整填充和 2 mm 边缘退让。
+- **西湖质量 · 纹理填充**：输出独立到
+  `output/westlake_quality_textured/`，保留语义地块起伏和 2 mm 边缘退让。
+
+两种质量模式目前只接受“杭州 · 西湖”25 km 正式模型，不提供 draft，也不会
+静默退回经典管线。任务页会分别展示源数据要素数量、第二地图源水体补强和图层
+落地后检证据；例如 OSM 水体为零时，即使卫星水体补强成功也仍会提示人工复核。
+
 ### 4. 测试
 ```bash
 pytest tests/ -m "not slow"        # 离线套件（网络用例标 slow 默认跳过）
+```
+
+### 5. 西湖 25KM CLI 与 PNG 预览
+
+专用西湖脚本可在生成 3MF 的同一次运行中输出彩色诊断图、干净俯视图和高度图：
+
+```bash
+python generate_city.py \
+  --elevation-file /path/to/westlake_dem.tif \
+  --png \
+  --review-png
+```
+
+所有产物写入 `output/westlake_cli/`。`--png` 输出
+`westlake_cli_preview.png`；`--review-png` 输出
+`westlake_cli_topdown.png` 和 `westlake_cli_height.png`。
+
+城市基底可用同一入口做三档对比；默认仍为既有的 `textured`，避免静默改变当前正确输出：
+
+```bash
+python generate_city.py --block-base-mode off
+python generate_city.py --block-base-mode flat
+python generate_city.py --block-base-mode textured
+```
+
+三档分别表示不生成城市基底、生成无纹理平面基底、生成现有语义 Z 纹理基底。
+输出文件名包含 `_block-off`、`_block-flat` 或 `_block-textured`，可以并排保留。
+
+城市基底默认退让模型外圈 2mm：外圈街区整块移除，紧邻的过渡带仅保留具有建筑覆盖的街区。3mm 更明显；设为 0 可恢复旧版铺满边缘的行为：
+
+```bash
+python generate_city.py --block-base-mode flat --block-base-edge-retreat-mm 3
+python generate_city.py --block-base-mode flat --block-base-edge-retreat-mm 0
 ```
 
 ---
