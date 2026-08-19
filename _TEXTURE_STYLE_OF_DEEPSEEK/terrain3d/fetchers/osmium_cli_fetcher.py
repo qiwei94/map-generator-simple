@@ -25,6 +25,16 @@ logger = logging.getLogger(__name__)
 DEFAULT_PBF_DIR = os.path.join(os.path.dirname(__file__), '..', '..', '..', 'pbf_cache')
 
 
+def _bbox_option(west, south, east, north) -> str:
+    """Return an unambiguous bbox token for native and portable osmium.
+
+    A western-hemisphere bbox begins with ``-``.  Keeping the option and value
+    in one token avoids backend-specific option parsing differences, and both
+    native osmium and the portable pyosmium backend accept this spelling.
+    """
+    return f'--bbox={west},{south},{east},{north}'
+
+
 class OsmiumCLIFetcher:
     """使用 osmium CLI 获取 OSM 数据"""
 
@@ -641,7 +651,9 @@ class OsmiumCLIFetcher:
                         os.remove(tmp_out)
                     raise
                 if not ok:
-                    return gpd.GeoDataFrame()
+                    raise RuntimeError(
+                        f"osmium {tag_type} full-frame refresh failed; "
+                        "refusing to cache a false empty result")
                 gdf = self._prune_cache_columns(
                     gpd.read_file(full_path,
                                   columns=list(self._CACHE_COLUMNS)),
@@ -690,7 +702,9 @@ class OsmiumCLIFetcher:
                     os.remove(tmp_out)
                 raise
             if not ok:
-                return gpd.GeoDataFrame()
+                raise RuntimeError(
+                    f"osmium {tag_type} cold-frame extract failed; "
+                    "refusing to cache a false empty result")
             gdf = self._prune_cache_columns(
                 gpd.read_file(full_path, columns=list(self._CACHE_COLUMNS)),
                 tag_type)
@@ -715,26 +729,29 @@ class OsmiumCLIFetcher:
             try:
                 ok = self._run_osmium_pipeline(
                     pbf_file, tag_type, us, uw, un, ue, tmp_out)
-                if ok:
-                    mgdf = self._prune_cache_columns(
-                        gpd.read_file(tmp_out,
-                                      columns=list(self._CACHE_COLUMNS)),
-                        tag_type)
-                    # 按瓦片拆分缓存（仅覆盖缺失瓦片，不碰已有文件）；
-                    # 跨界要素由合并框完整提取，无需 buffer 重叠。
-                    from shapely.geometry import box
-                    for ix, iy, tp in missing:
-                        ts, tw, tn, te = tile_bbox(ix, iy, step)
-                        if len(mgdf) > 0:
-                            mask = mgdf.geometry.intersects(
-                                box(tw, ts, te, tn))
-                            part = mgdf[mask]
-                        else:
-                            part = mgdf
-                        self._atomic_write_gdf(part, tp)
-                        frames.append(part)
-                        print(f"  [Tile Cache] MISS->split {tag_type} tile "
-                              f"({ix},{iy}): {len(part)} features")
+                if not ok:
+                    raise RuntimeError(
+                        f"osmium {tag_type} merged tile extract failed; "
+                        "refusing to cache a false empty result")
+                mgdf = self._prune_cache_columns(
+                    gpd.read_file(tmp_out,
+                                  columns=list(self._CACHE_COLUMNS)),
+                    tag_type)
+                # 按瓦片拆分缓存（仅覆盖缺失瓦片，不碰已有文件）；
+                # 跨界要素由合并框完整提取，无需 buffer 重叠。
+                from shapely.geometry import box
+                for ix, iy, tp in missing:
+                    ts, tw, tn, te = tile_bbox(ix, iy, step)
+                    if len(mgdf) > 0:
+                        mask = mgdf.geometry.intersects(
+                            box(tw, ts, te, tn))
+                        part = mgdf[mask]
+                    else:
+                        part = mgdf
+                    self._atomic_write_gdf(part, tp)
+                    frames.append(part)
+                    print(f"  [Tile Cache] MISS->split {tag_type} tile "
+                          f"({ix},{iy}): {len(part)} features")
             finally:
                 if os.path.exists(tmp_out):
                     os.remove(tmp_out)
@@ -758,7 +775,11 @@ class OsmiumCLIFetcher:
                 print(f"  [Tile Cache] MISS->fetched {tag_type} tile "
                       f"({ix},{iy}): {len(tgdf)} features")
             else:
-                logger.warning(f"瓦片 ({ix},{iy}) 提取失败，跳过")
+                if os.path.exists(tmp_out):
+                    os.remove(tmp_out)
+                raise RuntimeError(
+                    f"osmium {tag_type} tile ({ix},{iy}) extract failed; "
+                    "refusing to cache a false empty result")
         merged = pd.concat(frames, ignore_index=True) \
             if len(frames) > 1 else frames[0]
         merged = self._dedupe_features(merged)
@@ -889,7 +910,7 @@ class OsmiumCLIFetcher:
         osmium_label = ' '.join(osmium_command)
         cmd1 = [
             *osmium_command, 'extract',
-            '-b', bbox_str,
+            _bbox_option(west, south, east, north),
         ]
         if is_water:
             cmd1.extend(['-s', 'smart'])
@@ -1091,7 +1112,7 @@ class OsmiumCLIFetcher:
         osmium_label = ' '.join(osmium_command)
         cmd_extract = [
             *osmium_command, 'extract',
-            '-b', bbox_str,
+            _bbox_option(west, south, east, north),
             '-s', 'smart',
             pbf_file,
             '-o', area_pbf,
@@ -1288,7 +1309,7 @@ def sample_building_density(
         # Step 1: osmium extract (bbox clip)
         subprocess.run([
             *osmium_command, 'extract',
-            '-b', f'{west},{south},{east},{north}', '-s', 'smart',
+            _bbox_option(west, south, east, north), '-s', 'smart',
             pbf_file, '-o', area_pbf, '--overwrite'
         ], capture_output=True, timeout=120, check=True, creationflags=flags)
         # Step 2: osmium tags-filter (building only)

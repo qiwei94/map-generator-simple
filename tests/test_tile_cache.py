@@ -12,6 +12,7 @@ from shapely.geometry import Point
 
 from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.osmium_cli_fetcher import (
     OsmiumCLIFetcher,
+    _bbox_option,
 )
 from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.elevation import (
     _stitch_tile_grids,
@@ -129,6 +130,11 @@ class TestCacheColumnPruning:
 
 
 class TestOsmiumBinaryOverride:
+    def test_western_hemisphere_bbox_is_one_cli_token(self):
+        option = _bbox_option(-87.75, 41.8, -87.5, 42.0)
+
+        assert option == "--bbox=-87.75,41.8,-87.5,42.0"
+
     def test_explicit_binary_wins_over_portable_path(self, monkeypatch):
         executable = shutil.which("true")
         assert executable is not None
@@ -158,6 +164,30 @@ class TestOsmiumBinaryOverride:
 
         assert os.path.isfile(portable)
         assert os.access(portable, os.X_OK)
+
+
+class TestExtractionFailureSafety:
+    def test_failed_extract_is_not_saved_as_empty_tile_cache(
+            self, monkeypatch, tmp_path):
+        pbf = tmp_path / "fixture.osm.pbf"
+        pbf.write_bytes(b"fixture")
+        tile_dir = tmp_path / "tiles"
+        tile_dir.mkdir()
+        fetcher = OsmiumCLIFetcher()
+        monkeypatch.setattr(fetcher, "osmium_available", True)
+        monkeypatch.setattr(
+            fetcher, "_tile_cache_path",
+            lambda tag, ix, iy: str(tile_dir / f"{tag}_{ix}_{iy}.geojson"),
+        )
+        monkeypatch.setattr(fetcher, "_run_osmium_pipeline", lambda *a: False)
+
+        with pytest.raises(RuntimeError, match="false empty result"):
+            fetcher.fetch_tiled_features(
+                "road", 1.111, 2.222, 1.121, 2.232,
+                pbf_file=str(pbf), step=0.05,
+            )
+
+        assert list(tile_dir.iterdir()) == []
 
 
 class TestStitchTileGrids:
