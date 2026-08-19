@@ -242,6 +242,10 @@ def generate_city_gallery(city: str, styles: list, out_root: str,
     harness.prepare()
     seed = harness.seed_params()
     scene_type = classify_scene_type(harness.profile, preset.prototype)
+    from aesthetic.framing import analyze_water_framing
+    framing = analyze_water_framing(
+        harness.ctx.get("water"), harness.ctx["bbox_local"],
+        harness.profile.water_ratio)
     variants = variants_for_scene(scene_type)
     print(f"  [gallery] scene_type={scene_type} "
           f"(prototype={preset.prototype}, "
@@ -254,6 +258,7 @@ def generate_city_gallery(city: str, styles: list, out_root: str,
         "scene_type": scene_type,
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "profile": harness.profile.to_dict(),
+        "framing": framing,
         "seed_params": seed,
         "styles": {},
     }

@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <meta name="theme-color" content="#171916">
 <title>旅程浮雕 Studio</title>
-<link rel="stylesheet" href="style.css?v=50">
+<link rel="stylesheet" href="style.css?v=53">
 <link rel="stylesheet" href="vendor/leaflet/leaflet.css">
 <!-- 本地自托管，无 CDN 依赖 -->
 <script type="module" src="vendor/model-viewer.min.js"
@@ -37,30 +37,30 @@
 
   <section class="product-hero" aria-labelledby="heroTitle">
     <div class="hero-copy">
-      <p class="hero-kicker">MAP RELIEF / 15 KM</p>
+      <p class="hero-kicker">MAP RELIEF / 15 + 25 KM</p>
       <h2 id="heroTitle">把走过的城市，<br>留在手里。<br>把旅途的回忆，<br>放在桌上。</h2>
       <p>把旅行中念念不忘的山河、街巷与城市轮廓，做成可以触摸的城市浮雕。从地点或照片开始，完成取景与风格选择，然后交付可打印的模型。</p>
       <a class="hero-cta" href="#step1">制作我的城市 <span>↓</span></a>
       <div class="hero-specs">
-        <span><strong>15 km</strong>标准取景范围</span>
+        <span><strong>15 / 25 km</strong>两档正式取景</span>
         <span><strong>200 mm</strong>标准成品宽度</span>
         <span><strong>12 / 12</strong>项目规则通过</span>
       </div>
     </div>
     <figure class="hero-visual" id="heroShowcase" aria-roledescription="轮播图">
-      <img id="heroShowcaseImage" src="assets/paris-15km-dense.jpg"
-           alt="真实生成的巴黎 15 公里乘 15 公里精细风格图">
+      <img id="heroShowcaseImage" src="assets/westlake-real-output.jpg"
+           alt="真实生成的杭州西湖与钱塘江 25 公里乘 25 公里风格图">
       <div class="hero-visual-meta">
-        <span id="heroShowcaseKind">真实 15 × 15 KM 输出</span>
+        <span id="heroShowcaseKind">真实 25 × 25 KM 输出</span>
         <div class="hero-visual-nav">
           <button id="heroShowcasePrev" type="button" aria-label="上一张样品">←</button>
-          <span id="heroShowcaseCount" aria-live="polite">01 / 02</span>
+          <span id="heroShowcaseCount" aria-live="polite">01 / 04</span>
           <button id="heroShowcaseNext" type="button" aria-label="下一张样品">→</button>
         </div>
       </div>
       <figcaption aria-live="polite">
-        <p id="heroShowcaseLocation">PARIS / DENSE DETAIL</p>
-        <strong id="heroShowcaseTitle">塞纳河与巴黎城市肌理</strong>
+        <p id="heroShowcaseLocation">HANGZHOU / WEST LAKE</p>
+        <strong id="heroShowcaseTitle">西湖、钱塘江与完整城市纹理</strong>
       </figcaption>
     </figure>
   </section>
@@ -132,11 +132,10 @@
     <div class="custom-row tier-row">
       <span class="tier-label">取景范围</span>
       <div class="seg tier-seg" id="tierSeg">
-        <button data-km="5">5 km</button>
-        <button data-km="10" class="active">10 km</button>
-        <button data-km="15">15 km</button>
+        <button data-km="15" class="active">15 km</button>
+        <button data-km="25">25 km</button>
       </div>
-      <span class="hint" id="tierHint">金色框即成品范围</span>
+      <span class="hint" id="tierHint">15 km 细节均衡 · 25 km 城市叙事</span>
     </div>
     <div class="custom-row">
       <input type="text" id="areaName" class="text-input" maxlength="24"
@@ -188,7 +187,7 @@
     </fieldset>
     <div class="actions">
       <button class="btn btn-primary" id="btnDraft">生成快速预览
-        <small>PNG + 可旋转 3D 模型</small></button>
+        <small>只取正式画面中心 5 km · 可旋转 3D</small></button>
     </div>
     <div class="preview-2d" id="preview2d" hidden>
       <figure class="p2-item" id="p2Topdown" hidden>
@@ -208,7 +207,7 @@
   <!-- ══ Step 5 · 打印文件 ══ -->
   <section class="card step" id="step5">
     <h2 class="section-title"><span class="step-num">5</span>打印文件
-      <span class="hint">预览满意后再生成，避免白等</span></h2>
+      <span class="hint">正式文件使用完整 15 / 25 km 取景范围</span></h2>
     <div class="actions">
       <button class="btn btn-primary" id="btnFull">生成正式打印文件
         <small id="fullModeHint">标准生成 · 模型 + 预览图</small></button>
@@ -298,6 +297,6 @@
 
 <footer class="foot">旅程浮雕 · 把走过的路，凝固成可以触摸的实体 · <a href="#" onclick="copyMyLink();return false">复制我的链接</a> · <a href="#" onclick="localStorage.removeItem('jr_session');location.href=location.pathname;return false">重新开始</a></footer>
 
-<script src="app.js?v=50"></script>
+<script src="app.js?v=53"></script>
 </body>
 </html>

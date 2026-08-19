@@ -362,6 +362,13 @@ async function loadCities() {
 
 const FALLBACK_HERO_SAMPLES = [
   {
+    url: "assets/westlake-real-output.jpg",
+    kind: "真实 25 × 25 KM 输出",
+    location: "HANGZHOU / WEST LAKE",
+    title: "西湖、钱塘江与完整城市纹理",
+    alt: "真实生成的杭州西湖与钱塘江 25 公里乘 25 公里风格图",
+  },
+  {
     url: "assets/paris-15km-dense.jpg",
     kind: "真实 15 × 15 KM 输出",
     location: "PARIS / DENSE DETAIL",
@@ -369,11 +376,11 @@ const FALLBACK_HERO_SAMPLES = [
     alt: "真实生成的巴黎 15 公里乘 15 公里精细风格图",
   },
   {
-    url: "assets/suzhou-15km-block-fill.jpg",
+    url: "assets/chicago-15km-dense.jpg",
     kind: "真实 15 × 15 KM 输出",
-    location: "SUZHOU / BLOCK FILL",
-    title: "金鸡湖水岸与苏州城市纹理",
-    alt: "真实生成的苏州金鸡湖 15 公里乘 15 公里街区填充风格图",
+    location: "CHICAGO / DENSE DETAIL",
+    title: "湖岸天际线与棋盘街区",
+    alt: "真实生成的芝加哥密歇根湖岸 15 公里乘 15 公里精细风格图",
   },
 ];
 
@@ -390,7 +397,7 @@ function showHeroSample(index, immediate = false) {
   const image = $("heroShowcaseImage");
   const apply = () => {
     image.src = sample.url;
-    image.alt = sample.alt || `${sample.title}，15 公里乘 15 公里真实输出`;
+    image.alt = sample.alt || `${sample.title}，真实城市浮雕输出`;
     $("heroShowcaseKind").textContent = sample.kind || "真实 15 × 15 KM 输出";
     $("heroShowcaseLocation").textContent = sample.location || "15 KM × 15 KM";
     $("heroShowcaseTitle").textContent = sample.title;
@@ -448,7 +455,7 @@ async function loadShowcase() {
   try {
     const result = await fetchJSON("/api/showcase");
     const samples = (result.samples || []).filter(
-      (sample) => sample.url && sample.title && sample.size_km === 15);
+      (sample) => sample.url && sample.title && [15, 25].includes(sample.size_km));
     if (!samples.length) return;
     heroSamples = samples;
     showHeroSample(0, true);
@@ -567,7 +574,7 @@ async function selectCity(name) {
 
 /* ---------------- 地图与取景 ---------------- */
 
-const TIERS = [5, 10, 15];              // 取景三挡（km）
+const TIERS = [15, 25];                 // 正式成品固定两挡（km）
 
 const map = {
   state: { map: null, rect: null },
@@ -578,7 +585,7 @@ const map = {
 
 function sizeKm() {
   const b = $("tierSeg").querySelector("button.active");
-  return b ? parseFloat(b.dataset.km) : 10;
+  return b ? parseFloat(b.dataset.km) : 15;
 }
 
 /** 选中最接近给定尺寸的挡位 */
@@ -591,7 +598,10 @@ function setTierNear(km) {
 
 function syncSize() {
   const km = sizeKm();
-  $("tierHint").textContent = `${km} km 见方 · 金色框即成品范围`;
+  $("tierHint").textContent = km === 25
+    ? "25 km 见方 · 完整城市叙事，河流转折场景优先推荐"
+    : "15 km 见方 · 城市细节与生成时间更均衡";
+  if ($("fullModeHint")) syncGenerationProfileAvailability();
 }
 
 function bboxFromCenter(lat, lon, km) {
@@ -1396,7 +1406,10 @@ function renderStep3() {
       };
       grid.appendChild(card);
     }
-    $("galleryHint").textContent = "点图片放大，点卡片切换风格";
+    const framing = state.gallery.framing;
+    $("galleryHint").textContent = framing
+      ? `${framing.recommended_size_km} km 推荐 · ${framing.reason}`
+      : "点图片放大，点卡片切换风格";
   } else {
     grid.style.display = "none";
     $("galleryHint").textContent = "自定义区域用自动参数（规则引擎按地貌适配）";
@@ -1475,7 +1488,7 @@ function syncGenerationProfileAvailability() {
   $("btnDraft").title = quality ? "精细模型直接生成正式文件" : "";
   $("fullModeHint").textContent = quality
     ? `${state.generationProfile === "quality_flat" ? "平整街区" : "地块起伏"} · 模型 + 预览图`
-    : "标准生成 · 模型 + 预览图";
+    : `完整 ${sizeKm()} km 取景 · 模型 + 预览图`;
 }
 
 $("profilePicker").addEventListener("change", (event) => {
@@ -1551,14 +1564,16 @@ async function startJob(mode) {
       ? "已找到相同配置的现成模型"
       : (resp.reused
         ? "相同配置正在生成，已接入现有任务"
-        : (mode === "draft" ? "生成 3D 预览中" : "生成打印模型中"));
+        : (mode === "draft"
+          ? "生成中心 5 km 快速 3D 预览中"
+          : `生成完整 ${sizeKm()} km 打印模型中`));
     $("jobStatus").textContent = baseStatus + styleLabel + extra;
     $("jobStatus").className = "pill";
     $("jobStage").textContent = "正在准备地图与高程数据";
     renderJobProgress({
       progress_pct: resp.cached ? 100 : 2,
       duration_hint: mode === "draft"
-        ? "通常需要 5–15 分钟"
+        ? "中心 5 km 预览通常需要 2–8 分钟"
         : "正式模型通常需要 15–40 分钟",
     });
     showJobToken(resp.job_id);

@@ -377,6 +377,7 @@ class GenerateRequest(BaseModel):
 # 产品端固定打印底层：改变该值必然让 GLB/3MF 全部重算，
 # 不作为用户参数也避免同一区域产生无意义的缓存分叉。
 PRODUCT_BASE_THICKNESS_MM = 0.4
+PRODUCT_PREVIEW_SIZE_KM = 5.0
 
 
 GENERATION_PROFILES = {
@@ -628,6 +629,10 @@ def _job_public(job: dict, include_log: bool = False) -> dict:
         out["bbox"] = list(bbox)
     if job.get("prototype"):
         out["prototype"] = job["prototype"]
+    preview_bbox = job.get("preview_bbox")
+    if isinstance(preview_bbox, (list, tuple)) and len(preview_bbox) == 4:
+        out["preview_bbox"] = list(preview_bbox)
+        out["preview_size_km"] = PRODUCT_PREVIEW_SIZE_KM
     log_tail = _read_job_log_tail(job)
     progress_pct, stage_label = _job_progress(job, log_tail)
     out["stage_label"] = stage_label
@@ -714,6 +719,19 @@ def _bbox_side_km(bbox: list[float] | tuple[float, ...]) -> float:
     north_south = abs(north - south) * 110.574
     east_west = abs(east - west) * 111.320 * max(0.01, math.cos(mid_lat))
     return max(north_south, east_west)
+
+
+def _centered_square_bbox(bbox: list[float] | tuple[float, ...],
+                          size_km: float) -> list[float]:
+    """Return a physical square centred on bbox, independent of latitude."""
+    south, west, north, east = bbox
+    lat = (south + north) / 2.0
+    lon = (west + east) / 2.0
+    half_lat = size_km / 2.0 / 110.574
+    half_lon = size_km / 2.0 / (
+        111.320 * max(0.2, math.cos(math.radians(lat))))
+    return [round(lat - half_lat, 7), round(lon - half_lon, 7),
+            round(lat + half_lat, 7), round(lon + half_lon, 7)]
 
 
 def _quota_cost(mode: str, bbox: list[float] | tuple[float, ...]) -> int:
@@ -982,6 +1000,65 @@ def _load_gallery(city: str):
     return meta
 
 
+_SHOWCASE_VERIFY_CACHE: dict[str, tuple[object, bool]] = {}
+_SHOWCASE_REQUIRED_STYLES = (
+    "baseline", "block_fill", "dense_detail", "minimal",
+)
+
+
+def _showcase_output_verified(slug: str, meta: dict,
+                              expected_area: float) -> bool:
+    """Cheap cached gate preventing false-success galleries reaching hero UI."""
+    profile = meta.get("profile", {})
+    area_km2 = float(profile.get("area_km2") or 0)
+    if not expected_area * 0.88 <= area_km2 <= expected_area * 1.12:
+        return False
+    feature_total = sum(float(profile.get(key) or 0) for key in (
+        "building_density", "road_density_km_per_km2", "water_ratio"))
+    if feature_total <= 0:
+        return False
+
+    gallery = GALLERY_DIR / slug
+    meta_path = gallery / "gallery_metadata.json"
+    paths = []
+    try:
+        for style in _SHOWCASE_REQUIRED_STYLES:
+            filename = (meta.get("styles", {}).get(style, {})
+                        .get("renders", {}).get("topdown"))
+            path = gallery / str(filename or "")
+            if not filename or not path.is_file():
+                return False
+            paths.append(path)
+        stamp = (meta_path.stat().st_mtime_ns, tuple(
+            (path.name, path.stat().st_size, path.stat().st_mtime_ns)
+            for path in paths))
+    except OSError:
+        return False
+    cached = _SHOWCASE_VERIFY_CACHE.get(slug)
+    if cached and cached[0] == stamp:
+        return cached[1]
+
+    try:
+        from PIL import Image, ImageStat
+        hashes = set()
+        visually_valid = True
+        for path in paths:
+            digest = hashlib.sha256()
+            with path.open("rb") as source:
+                for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            hashes.add(digest.hexdigest())
+            with Image.open(path) as image:
+                thumb = image.convert("L").resize((64, 64))
+                visually_valid = visually_valid and (
+                    ImageStat.Stat(thumb).stddev[0] >= 2.0)
+        verified = visually_valid and len(hashes) >= 2
+    except (OSError, ValueError):
+        verified = False
+    _SHOWCASE_VERIFY_CACHE[slug] = (stamp, verified)
+    return verified
+
+
 # ---------------------------------------------------------------------------
 # 自定义区域：照片 EXIF GPS（PBF 覆盖判定见顶部 _pbf_status）
 # ---------------------------------------------------------------------------
@@ -1085,7 +1162,7 @@ def api_cities():
 
 @app.get("/api/showcase")
 def api_showcase():
-    """Return only completed, physically verified 15×15 km samples."""
+    """Return curated 25 km work and completed, verified 15 km samples."""
     style_labels = {
         "baseline": "STANDARD",
         "block_fill": "BLOCK FILL",
@@ -1102,17 +1179,26 @@ def api_showcase():
     for city in plan.get("cities", []):
         if not city.get("featured", False):
             continue
+        static_asset = city.get("static_asset")
+        if static_asset:
+            path = STATIC_DIR / "assets" / Path(static_asset).name
+            if path.is_file():
+                city_size = int(city.get("size_km") or size_km)
+                samples.append({
+                    "title": city.get("caption") or city.get("title"),
+                    "location": city.get("location", "HANGZHOU / WEST LAKE"),
+                    "kind": f"真实 {city_size} × {city_size} KM 输出",
+                    "alt": (f"真实生成的{city.get('title', '')} "
+                            f"{city_size} 公里乘 {city_size} 公里风格图"),
+                    "size_km": city_size,
+                    "url": f"/assets/{path.name}",
+                })
+            continue
         slug = city.get("slug", "")
         meta = _load_gallery(slug)
         if not meta:
             continue
-        profile = meta.get("profile", {})
-        area_km2 = float(profile.get("area_km2") or 0)
-        if not expected_area * 0.88 <= area_km2 <= expected_area * 1.12:
-            continue
-        feature_total = sum(float(profile.get(key) or 0) for key in (
-            "building_density", "road_density_km_per_km2", "water_ratio"))
-        if feature_total <= 0:
+        if not _showcase_output_verified(slug, meta, expected_area):
             continue
         styles = [city.get("hero_style", "baseline")]
         styles.extend(city.get("extra_hero_styles", []))
@@ -1609,6 +1695,7 @@ def api_generate(req: GenerateRequest, request: Request = None):
 
     quality_profile = profile in ("quality_flat", "quality_textured")
     fast_draft_context = None
+    source_bbox = None
     if quality_profile:
         if req.area is not None or req.city != "westlake":
             raise HTTPException(400, "精细模型目前只支持‘杭州 · 西湖’预设")
@@ -1621,6 +1708,7 @@ def api_generate(req: GenerateRequest, request: Request = None):
         city = f"westlake_{profile}"
         city_title = f"杭州 · 西湖（{GENERATION_PROFILES[profile]['label']}）"
         quota_bbox = PRESETS["westlake"]["bbox"]
+        source_bbox = quota_bbox
         base_cmd = [
             sys.executable, "generate_city.py",
             "--city", city,
@@ -1634,6 +1722,7 @@ def api_generate(req: GenerateRequest, request: Request = None):
     elif req.area is not None:
         bbox = req.area.bbox
         quota_bbox = bbox
+        source_bbox = bbox
         if len(bbox) != 4:
             raise HTTPException(400, "bbox 需为 [south, west, north, east]")
         s, w, n, e = bbox
@@ -1672,6 +1761,7 @@ def api_generate(req: GenerateRequest, request: Request = None):
         city = req.city
         city_title = PRESETS[city]["title"]
         quota_bbox = PRESETS[city]["bbox"]
+        source_bbox = quota_bbox
         base_cmd = [sys.executable, "generate_city_legacy.py", "--preset", city,
                     "--auto-params"]
     elif req.city in _landmark_presets():
@@ -1679,6 +1769,7 @@ def api_generate(req: GenerateRequest, request: Request = None):
         lm_info = _landmark_presets()[req.city]
         bbox = lm_info["bbox"]
         quota_bbox = bbox
+        source_bbox = bbox
         s, w, n, e = bbox
         st = _pbf_status(bbox)
         if st["state"] == "fetchable":
@@ -1701,6 +1792,44 @@ def api_generate(req: GenerateRequest, request: Request = None):
     else:
         raise HTTPException(400, f"未知城市: {req.city}")
 
+    # A quick 3D is a composition proof, not a second full render.  Preserve
+    # the selected 15/25 km frame as the task identity, while draft geometry is
+    # built only for its central physical 5 km square.  Full generation keeps
+    # the selected source bbox unchanged.
+    preview_bbox = None
+    if not quality_profile and req.mode == "draft":
+        preview_bbox = _centered_square_bbox(
+            source_bbox or quota_bbox, PRODUCT_PREVIEW_SIZE_KM)
+        preview_status = _pbf_status(preview_bbox)
+        if preview_status["state"] != "local":
+            raise HTTPException(422, "中心预览区域地图数据尚未就绪")
+        ps, pw, pn, pe = preview_bbox
+        base_cmd = [
+            sys.executable, "generate_city_legacy.py",
+            "--bbox", f"{ps},{pw},{pn},{pe}",
+            "--pbf", preview_status["pbf"],
+            "--city", city, "--auto-params",
+        ]
+        fast_draft_context = {
+            "bbox": preview_bbox,
+            "source_bbox": list(source_bbox or quota_bbox),
+            "pbf": preview_status["pbf"],
+        }
+
+    # Keep both regions on disk.  Task recovery must never present the central
+    # preview crop as if it were the formal framing selected by the user.
+    if req.area is not None:
+        area_dir = OUTPUT_DIR / city
+        area_dir.mkdir(parents=True, exist_ok=True)
+        (area_dir / "area.json").write_text(json.dumps({
+            "name": city_title,
+            "bbox": list(source_bbox),
+            "preview_bbox": preview_bbox,
+            "preview_size_km": (
+                PRODUCT_PREVIEW_SIZE_KM if preview_bbox else None),
+            "markers": req.markers,
+        }, ensure_ascii=False), encoding="utf-8")
+
     request_key = _request_key("generate", {
         "city": city,
         "mode": req.mode,
@@ -1708,6 +1837,8 @@ def api_generate(req: GenerateRequest, request: Request = None):
         "generation_profile": profile,
         "markers": req.markers,
         "gallery_slug": req.gallery_slug.strip(),
+        "source_bbox": source_bbox,
+        "preview_bbox": preview_bbox,
     })
     job_id = uuid.uuid4().hex[:8]
     log_path = JOB_LOG_DIR / f"{job_id}_{city}_{req.mode}.log"
@@ -1760,6 +1891,8 @@ def api_generate(req: GenerateRequest, request: Request = None):
             "--city", city,
             "--prototype", gallery_meta.get("prototype", "landscape"),
             "--scene-type", gallery_meta.get("scene_type", "urban"),
+            "--source-bbox", ",".join(
+                str(value) for value in fast_draft_context["source_bbox"]),
             "--params-json", str(params_path),
             "--base-thickness-mm",
             f"{PRODUCT_BASE_THICKNESS_MM:.2f}",
@@ -1790,6 +1923,10 @@ def api_generate(req: GenerateRequest, request: Request = None):
             job["bbox"] = list(req.area.bbox)
             if gallery_meta:
                 job["prototype"] = gallery_meta.get("prototype", "landscape")
+        elif source_bbox is not None:
+            job["bbox"] = list(source_bbox)
+        if preview_bbox is not None:
+            job["preview_bbox"] = list(preview_bbox)
         _attach_job_account(job, user, quota_bbox)
         claimed, reused, cached = _claim_or_reuse_job(job)
         if reused and params_path is not None:
@@ -1811,6 +1948,10 @@ def api_generate(req: GenerateRequest, request: Request = None):
         job["bbox"] = list(req.area.bbox)
         if gallery_meta:
             job["prototype"] = gallery_meta.get("prototype", "landscape")
+    elif source_bbox is not None:
+        job["bbox"] = list(source_bbox)
+    if preview_bbox is not None:
+        job["preview_bbox"] = list(preview_bbox)
     _attach_job_account(job, user, quota_bbox)
     claimed, reused, cached = _claim_or_reuse_job(job)
     if reused:

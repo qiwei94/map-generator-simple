@@ -50,7 +50,11 @@ def test_quality_profiles_use_isolated_westlake_entry(profile, block_mode):
     assert job["generation_profile"] == profile
 
 
-def test_classic_profile_keeps_legacy_entry():
+def test_classic_profile_keeps_legacy_entry(monkeypatch):
+    monkeypatch.setattr(server, "_pbf_status", lambda bbox: {
+        "state": "local", "pbf": "pbf_cache/zhejiang-latest.osm.pbf",
+        "region": "zhejiang", "fetch": None,
+    })
     response = server.api_generate(server.GenerateRequest(
         city="westlake",
         mode="draft",
@@ -66,6 +70,9 @@ def test_classic_profile_keeps_legacy_entry():
     assert "--review-png" not in job["spec"]["cmd"]
     assert job["spec"]["cmd"][
         job["spec"]["cmd"].index("--base-thickness-mm") + 1] == "0.40"
+    assert server._bbox_side_km(job["preview_bbox"]) == pytest.approx(
+        5.0, abs=0.02)
+    assert server._bbox_side_km(job["bbox"]) > 20
 
 
 def test_custom_draft_reuses_selected_gallery_cache(monkeypatch, tmp_path):
@@ -95,6 +102,13 @@ def test_custom_draft_reuses_selected_gallery_cache(monkeypatch, tmp_path):
     assert cmd[cmd.index("--scene-type") + 1] == "water_landscape"
     assert "--png" not in cmd
     assert job["fast_draft"] is True
+    preview_arg = cmd[cmd.index("--bbox") + 1]
+    preview_bbox = [float(value) for value in preview_arg.split(",")]
+    assert server._bbox_side_km(preview_bbox) == pytest.approx(5.0, abs=0.02)
+    assert cmd[cmd.index("--source-bbox") + 1] == (
+        "29.5372,118.89,29.6728,119.045")
+    assert job["bbox"] == [29.5372, 118.89, 29.6728, 119.045]
+    assert job["preview_bbox"] == preview_bbox
     assert "1–3 分钟" in server._job_duration_hint(job)
 
 
@@ -108,6 +122,15 @@ def test_classic_full_keeps_print_render_outputs():
     assert "--preview-fast" not in cmd
     assert "--png" in cmd
     assert "--review-png" in cmd
+
+
+def test_center_preview_bbox_is_physical_five_km_at_high_latitude():
+    source = [51.3944, -0.3075, 51.6204, 0.052]
+    preview = server._centered_square_bbox(source, 5)
+
+    assert server._bbox_side_km(preview) == pytest.approx(5.0, abs=0.02)
+    assert (preview[0] + preview[2]) / 2 == pytest.approx(
+        (source[0] + source[2]) / 2, abs=1e-7)
 
 
 @pytest.mark.parametrize(

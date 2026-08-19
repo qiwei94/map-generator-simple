@@ -36,6 +36,8 @@ def _args():
     parser.add_argument("--city", required=True)
     parser.add_argument("--prototype", default="landscape")
     parser.add_argument("--scene-type", default="urban")
+    parser.add_argument("--source-bbox", default=None,
+                        help="selected full framing bbox; draft bbox stays 5 km")
     parser.add_argument("--params-json", required=True)
     parser.add_argument("--marker", action="append", default=[])
     parser.add_argument("--output-dir", default=None)
@@ -107,6 +109,14 @@ def main() -> int:
         "schema_version": "1.0",
         "city": args.city,
         "bbox_wgs84": list(bbox),
+        "framing": {
+            "role": "center_preview",
+            "preview_bbox_wgs84": list(bbox),
+            "source_bbox_wgs84": (
+                [float(value) for value in args.source_bbox.split(",")]
+                if args.source_bbox else list(bbox)),
+            "preview_size_km": 5,
+        },
         "prototype": args.prototype,
         "scene_type": args.scene_type,
         "params": params,

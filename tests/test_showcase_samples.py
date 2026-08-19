@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from PIL import Image, ImageDraw
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -52,15 +53,22 @@ def test_showcase_api_omits_outputs_with_the_wrong_physical_area(
     for slug, area in (("valid", 225), ("small", 25)):
         target = gallery_dir / slug
         target.mkdir(parents=True)
-        (target / "baseline_topdown.png").write_bytes(b"image")
+        styles = {}
+        for index, style in enumerate(showcase.REQUIRED_STYLES):
+            filename = f"{style}_topdown.png"
+            image = Image.new("L", (96, 96), 240)
+            draw = ImageDraw.Draw(image)
+            draw.rectangle((0, 0, 30 + index, 95), fill=20 + index)
+            image.save(target / filename)
+            styles[style] = {"renders": {"topdown": filename}}
         (target / "gallery_metadata.json").write_text(json.dumps({
             "profile": {"area_km2": area, "building_density": 1},
-            "styles": {"baseline": {"renders": {
-                "topdown": "baseline_topdown.png"}}},
+            "styles": styles,
         }), encoding="utf-8")
 
     monkeypatch.setattr(server, "SHOWCASE_PLAN_PATH", plan_path)
     monkeypatch.setattr(server, "GALLERY_DIR", gallery_dir)
+    server._SHOWCASE_VERIFY_CACHE.clear()
 
     result = server.api_showcase()
 

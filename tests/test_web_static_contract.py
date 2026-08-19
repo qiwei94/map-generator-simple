@@ -39,20 +39,35 @@ def test_app_script_cache_key_is_bumped_for_hero_sample_carousel():
     html = INDEX_HTML.read_text(encoding="utf-8")
     source = APP_JS.read_text(encoding="utf-8")
 
-    assert '<script src="app.js?v=50"></script>' in html
-    assert '<link rel="stylesheet" href="style.css?v=50">' in html
+    assert '<script src="app.js?v=53"></script>' in html
+    assert '<link rel="stylesheet" href="style.css?v=53">' in html
     assert 'id="accountDialog"' in html
     assert 'id="myTasksCard"' in html
     assert 'id="heroShowcase"' in html
     assert 'id="heroShowcasePrev"' in html
     assert 'id="heroShowcaseNext"' in html
     assert 'id="showcaseTrack"' not in html
-    assert "15 KM" in html
+    assert "15 + 25 KM" in html
     assert 'id="baseThickness"' not in html
     assert "westlake-15km-standard.jpg" not in html
     assert "westlake-15km-block-fill.jpg" not in html
-    assert 'src="assets/paris-15km-dense.jpg"' in html
-    assert "westlake-15km-dense.jpg" not in source
+    assert 'src="assets/westlake-real-output.jpg"' in html
+    assert "westlake-real-output.jpg" in source
+    assert "chicago-15km-dense.jpg" in source
+
+
+def test_fixed_framing_tiers_and_center_preview_are_explained():
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    source = APP_JS.read_text(encoding="utf-8")
+
+    assert 'data-km="15"' in html
+    assert 'data-km="25"' in html
+    assert 'data-km="5"' not in html
+    assert 'data-km="10"' not in html
+    assert "const TIERS = [15, 25]" in source
+    assert "中心 5 km" in html
+    assert "完整 15 / 25 km" in html
+    assert "framing.recommended_size_km" in source
 
 
 def test_hero_samples_autoplay_and_keep_manual_controls():

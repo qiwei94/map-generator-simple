@@ -15,14 +15,17 @@
     },
     {
       "key": "hangzhou",
-      "slug": "showcase_westlake_15km_v2",
+      "slug": "showcase_westlake_25km_legacy",
       "title": "杭州 · 西湖",
-      "caption": "西湖群山、水岸与城市纹理",
+      "caption": "西湖、钱塘江与完整城市纹理",
+      "location": "HANGZHOU / WEST LAKE",
+      "size_km": 25,
+      "static_asset": "westlake-real-output.jpg",
       "center": [30.245, 120.15],
       "pbf": "zhejiang-latest.osm.pbf",
       "prototype": "landscape",
       "hero_style": "dense_detail",
-      "featured": false
+      "featured": true
     },
     {
       "key": "suzhou",
@@ -33,7 +36,7 @@
       "pbf": "zhejiang-latest.osm.pbf",
       "prototype": "landscape",
       "hero_style": "block_fill",
-      "featured": true
+      "featured": false
     },
     {
       "key": "chicago",
@@ -43,7 +46,7 @@
       "center": [41.8781, -87.6298],
       "pbf": "illinois-latest.osm.pbf",
       "prototype": "skyline",
-      "hero_style": "block_fill",
+      "hero_style": "dense_detail",
       "featured": true
     },
     {
