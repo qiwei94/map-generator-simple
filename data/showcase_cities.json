@@ -15,14 +15,14 @@
     },
     {
       "key": "hangzhou",
-      "slug": "custom_65d6da",
+      "slug": "showcase_westlake_15km_v2",
       "title": "杭州 · 西湖",
       "caption": "西湖群山、水岸与城市纹理",
-      "center": [30.23695, 120.10855],
+      "center": [30.245, 120.15],
       "pbf": "zhejiang-latest.osm.pbf",
       "prototype": "landscape",
       "hero_style": "dense_detail",
-      "featured": true
+      "featured": false
     },
     {
       "key": "suzhou",
@@ -54,7 +54,30 @@
       "center": [51.5074, -0.1278],
       "pbf": "great-britain-latest.osm.pbf",
       "prototype": "skyline",
-      "hero_style": "baseline"
+      "hero_style": "baseline",
+      "featured": true
+    },
+    {
+      "key": "rome",
+      "slug": "showcase_rome_15km",
+      "title": "罗马 · 永恒之城",
+      "caption": "台伯河与罗马古城肌理",
+      "center": [41.9028, 12.4964],
+      "pbf": "centro-latest.osm.pbf",
+      "prototype": "skyline",
+      "hero_style": "dense_detail",
+      "featured": true
+    },
+    {
+      "key": "milan",
+      "slug": "showcase_milan_15km",
+      "title": "米兰 · 城市中心",
+      "caption": "米兰大教堂与放射街区",
+      "center": [45.4642, 9.1900],
+      "pbf": "nord-ovest-latest.osm.pbf",
+      "prototype": "skyline",
+      "hero_style": "dense_detail",
+      "featured": true
     },
     {
       "key": "new_york",
@@ -64,7 +87,8 @@
       "center": [40.7128, -74.0060],
       "pbf": "new-york-latest.osm.pbf",
       "prototype": "skyline",
-      "hero_style": "dense_detail"
+      "hero_style": "dense_detail",
+      "featured": true
     },
     {
       "key": "tokyo",
@@ -74,7 +98,8 @@
       "center": [35.6762, 139.6503],
       "pbf": "kanto-latest.osm.pbf",
       "prototype": "skyline",
-      "hero_style": "baseline"
+      "hero_style": "baseline",
+      "featured": true
     },
     {
       "key": "singapore",
@@ -104,7 +129,19 @@
       "center": [31.2304, 121.4737],
       "pbf": "shanghai-latest.osm.pbf",
       "prototype": "skyline",
-      "hero_style": "block_fill"
+      "hero_style": "block_fill",
+      "featured": true
+    },
+    {
+      "key": "guangzhou",
+      "slug": "showcase_guangzhou_15km",
+      "title": "广州 · 珠江新城",
+      "caption": "珠江水岸与广州城市中轴",
+      "center": [23.1291, 113.2644],
+      "pbf": "guangdong-latest.osm.pbf",
+      "prototype": "skyline",
+      "hero_style": "block_fill",
+      "featured": true
     },
     {
       "key": "beijing",
@@ -124,7 +161,8 @@
       "center": [52.5200, 13.4050],
       "pbf": "berlin-latest.osm.pbf",
       "prototype": "skyline",
-      "hero_style": "baseline"
+      "hero_style": "baseline",
+      "featured": true
     },
     {
       "key": "madrid",
@@ -174,7 +212,8 @@
       "center": [-37.8136, 144.9631],
       "pbf": "victoria-latest.osm.pbf",
       "prototype": "skyline",
-      "hero_style": "baseline"
+      "hero_style": "baseline",
+      "featured": true
     },
     {
       "key": "mexico_city",

@@ -37,9 +37,10 @@ def test_restored_gallery_also_loads_existing_preview_artifacts():
 
 def test_app_script_cache_key_is_bumped_for_hero_sample_carousel():
     html = INDEX_HTML.read_text(encoding="utf-8")
+    source = APP_JS.read_text(encoding="utf-8")
 
-    assert '<script src="app.js?v=49"></script>' in html
-    assert '<link rel="stylesheet" href="style.css?v=49">' in html
+    assert '<script src="app.js?v=50"></script>' in html
+    assert '<link rel="stylesheet" href="style.css?v=50">' in html
     assert 'id="accountDialog"' in html
     assert 'id="myTasksCard"' in html
     assert 'id="heroShowcase"' in html
@@ -51,6 +52,7 @@ def test_app_script_cache_key_is_bumped_for_hero_sample_carousel():
     assert "westlake-15km-standard.jpg" not in html
     assert "westlake-15km-block-fill.jpg" not in html
     assert 'src="assets/paris-15km-dense.jpg"' in html
+    assert "westlake-15km-dense.jpg" not in source
 
 
 def test_hero_samples_autoplay_and_keep_manual_controls():

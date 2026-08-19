@@ -369,13 +369,6 @@ const FALLBACK_HERO_SAMPLES = [
     alt: "真实生成的巴黎 15 公里乘 15 公里精细风格图",
   },
   {
-    url: "assets/westlake-15km-dense.jpg",
-    kind: "真实 15 × 15 KM 输出",
-    location: "HANGZHOU / DENSE DETAIL",
-    title: "西湖群山、水岸与城市纹理",
-    alt: "真实生成的杭州西湖 15 公里乘 15 公里精细风格图",
-  },
-  {
     url: "assets/suzhou-15km-block-fill.jpg",
     kind: "真实 15 × 15 KM 输出",
     location: "SUZHOU / BLOCK FILL",
