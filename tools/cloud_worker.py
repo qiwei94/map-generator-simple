@@ -38,7 +38,7 @@ def sha256_file(path: Path) -> str:
 
 
 def run_task(spec: dict, dry_run: bool = False, heartbeat=None,
-             timeout_s: int = 2700) -> tuple[bool, str, list[Path]]:
+             timeout_s: int = 7200) -> tuple[bool, str, list[Path]]:
     """执行 spec.cmd，返回 (ok, error_msg, produced_files)。
 
     注意：spec["cwd"] 是云端路径，本机 worker 必须用自己的 _ROOT。
@@ -190,12 +190,17 @@ def main():
                     help="不真跑管线，生成假产物验证回路")
     ap.add_argument("--worker-id", default=socket.gethostname(),
                     help="稳定的计算节点 ID（默认主机名）")
+    ap.add_argument("--task-timeout", type=int, default=7200,
+                    help="单任务最长秒数（默认 7200，即 2 小时）")
+    ap.add_argument("--max-tasks", type=int, default=0,
+                    help="完成指定数量后退出；0 表示持续轮询")
     args = ap.parse_args()
 
     server = args.server.rstrip("/")
     print(f"[worker] 连接 {server}，轮询间隔 {args.poll_interval}s"
           f"{'（DRY-RUN）' if args.dry_run else ''}")
 
+    completed_tasks = 0
     while True:
         try:
             r = requests.get(f"{server}/api/worker/next",
@@ -232,7 +237,8 @@ def main():
             return response.status_code == 200
 
         ok, err, produced = run_task(
-            spec, dry_run=args.dry_run, heartbeat=send_heartbeat)
+            spec, dry_run=args.dry_run, heartbeat=send_heartbeat,
+            timeout_s=args.task_timeout)
 
         if ok and produced:
             try:
@@ -254,6 +260,10 @@ def main():
             print(f"  [worker] finish → {r.status_code} {r.json()}")
         except requests.RequestException as e:
             print(f"  [worker] finish 请求失败: {e}")
+        completed_tasks += 1
+        if args.max_tasks and completed_tasks >= args.max_tasks:
+            print(f"[worker] 已完成 {completed_tasks} 个任务，按配置退出")
+            return
 
 
 if __name__ == "__main__":

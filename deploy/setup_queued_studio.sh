@@ -55,6 +55,7 @@ Type=simple
 WorkingDirectory=${ROOT_DIR}
 EnvironmentFile=${ENV_FILE}
 Environment="PATH=/opt/pyshim:/usr/local/python3.9/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="OSMIUM_BIN=/opt/osmium-native/bin/osmium"
 ExecStart=/usr/local/python3.9/bin/python3.9 tools/cloud_worker.py --server http://127.0.0.1 --token \${WORKER_TOKEN} --worker-id local-primary --poll-interval 3
 Restart=always
 RestartSec=5
