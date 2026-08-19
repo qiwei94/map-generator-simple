@@ -362,31 +362,33 @@ async function loadCities() {
 
 const FALLBACK_HERO_SAMPLES = [
   {
-    url: "assets/westlake-15km-standard.jpg",
-    kind: "真实 15 × 15 KM 输出",
-    location: "HANGZHOU / STANDARD",
-    title: "西湖水岸与城市纹理",
-    alt: "真实生成的杭州西湖 15 公里乘 15 公里标准风格图",
-  },
-  {
-    url: "assets/westlake-15km-block-fill.jpg",
-    kind: "真实 15 × 15 KM 输出",
-    location: "HANGZHOU / BLOCK FILL",
-    title: "西湖与饱满街区",
-    alt: "真实生成的杭州西湖 15 公里乘 15 公里街区填充风格图",
-  },
-  {
     url: "assets/paris-15km-dense.jpg",
     kind: "真实 15 × 15 KM 输出",
     location: "PARIS / DENSE DETAIL",
     title: "塞纳河与巴黎城市肌理",
     alt: "真实生成的巴黎 15 公里乘 15 公里精细风格图",
   },
+  {
+    url: "assets/westlake-15km-dense.jpg",
+    kind: "真实 15 × 15 KM 输出",
+    location: "HANGZHOU / DENSE DETAIL",
+    title: "西湖群山、水岸与城市纹理",
+    alt: "真实生成的杭州西湖 15 公里乘 15 公里精细风格图",
+  },
+  {
+    url: "assets/suzhou-15km-block-fill.jpg",
+    kind: "真实 15 × 15 KM 输出",
+    location: "SUZHOU / BLOCK FILL",
+    title: "金鸡湖水岸与苏州城市纹理",
+    alt: "真实生成的苏州金鸡湖 15 公里乘 15 公里街区填充风格图",
+  },
 ];
 
 let heroSamples = FALLBACK_HERO_SAMPLES;
 let heroSampleIndex = 0;
 let heroTouchStartX = null;
+let heroAutoplayTimer = null;
+const HERO_AUTOPLAY_MS = 5200;
 
 function showHeroSample(index, immediate = false) {
   if (!heroSamples.length) return;
@@ -411,10 +413,25 @@ function showHeroSample(index, immediate = false) {
   }
 }
 
+function restartHeroAutoplay() {
+  window.clearInterval(heroAutoplayTimer);
+  heroAutoplayTimer = null;
+  if (heroSamples.length < 2) return;
+  heroAutoplayTimer = window.setInterval(
+    () => showHeroSample(heroSampleIndex + 1), HERO_AUTOPLAY_MS);
+}
+
 function initHeroShowcase() {
   showHeroSample(0, true);
-  $("heroShowcasePrev").onclick = () => showHeroSample(heroSampleIndex - 1);
-  $("heroShowcaseNext").onclick = () => showHeroSample(heroSampleIndex + 1);
+  restartHeroAutoplay();
+  $("heroShowcasePrev").onclick = () => {
+    showHeroSample(heroSampleIndex - 1);
+    restartHeroAutoplay();
+  };
+  $("heroShowcaseNext").onclick = () => {
+    showHeroSample(heroSampleIndex + 1);
+    restartHeroAutoplay();
+  };
   const frame = $("heroShowcase");
   frame.addEventListener("touchstart", (event) => {
     heroTouchStartX = event.changedTouches[0]?.clientX ?? null;
@@ -423,7 +440,10 @@ function initHeroShowcase() {
     if (heroTouchStartX === null) return;
     const delta = (event.changedTouches[0]?.clientX ?? heroTouchStartX) - heroTouchStartX;
     heroTouchStartX = null;
-    if (Math.abs(delta) >= 45) showHeroSample(heroSampleIndex + (delta < 0 ? 1 : -1));
+    if (Math.abs(delta) >= 45) {
+      showHeroSample(heroSampleIndex + (delta < 0 ? 1 : -1));
+      restartHeroAutoplay();
+    }
   }, { passive: true });
   FALLBACK_HERO_SAMPLES.slice(1).forEach((sample) => {
     const image = new Image();
@@ -439,6 +459,7 @@ async function loadShowcase() {
     if (!samples.length) return;
     heroSamples = samples;
     showHeroSample(0, true);
+    restartHeroAutoplay();
     heroSamples.slice(1, 4).forEach((sample) => {
       const image = new Image();
       image.src = sample.url;

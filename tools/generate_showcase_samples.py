@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import hashlib
 import json
 import math
 import os
@@ -13,7 +14,7 @@ import sys
 import time
 from pathlib import Path
 
-from PIL import Image
+from PIL import Image, ImageStat
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -54,14 +55,20 @@ def load_metadata(slug: str) -> dict | None:
 
 
 def validate_gallery(city: dict, size_km: float) -> tuple[bool, str]:
-    """Require all renders, square images, and a plausible physical area."""
+    """Reject false-success galleries as well as missing or malformed renders."""
     meta = load_metadata(city["slug"])
     if not meta:
         return False, "missing gallery_metadata.json"
-    area = float(meta.get("profile", {}).get("area_km2") or 0)
+    profile = meta.get("profile", {})
+    area = float(profile.get("area_km2") or 0)
     expected_area = size_km * size_km
     if not expected_area * 0.88 <= area <= expected_area * 1.12:
         return False, f"area {area:.1f} km2 is not {expected_area:.0f} km2"
+    feature_total = sum(float(profile.get(key) or 0) for key in (
+        "building_density", "road_density_km_per_km2", "water_ratio"))
+    if feature_total <= 0:
+        return False, "OSM extraction returned zero buildings, roads, and water"
+    render_hashes: set[str] = set()
     for style in REQUIRED_STYLES:
         filename = (meta.get("styles", {}).get(style, {})
                     .get("renders", {}).get("topdown"))
@@ -72,8 +79,14 @@ def validate_gallery(city: dict, size_km: float) -> tuple[bool, str]:
             with Image.open(path) as image:
                 if image.width < 1600 or image.width != image.height:
                     return False, f"invalid {style} image size {image.size}"
+                thumb = image.convert("L").resize((64, 64))
+                if ImageStat.Stat(thumb).stddev[0] < 2.0:
+                    return False, f"{style} render is visually blank"
+            render_hashes.add(hashlib.sha256(path.read_bytes()).hexdigest())
         except OSError as exc:
             return False, f"cannot read {style}: {exc}"
+    if len(render_hashes) < 2:
+        return False, "all style renders are byte-identical"
     return True, "verified"
 
 

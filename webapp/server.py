@@ -1100,12 +1100,19 @@ def api_showcase():
     size_km = int(plan.get("size_km") or 15)
     expected_area = size_km * size_km
     for city in plan.get("cities", []):
+        if not city.get("featured", False):
+            continue
         slug = city.get("slug", "")
         meta = _load_gallery(slug)
         if not meta:
             continue
-        area_km2 = float(meta.get("profile", {}).get("area_km2") or 0)
+        profile = meta.get("profile", {})
+        area_km2 = float(profile.get("area_km2") or 0)
         if not expected_area * 0.88 <= area_km2 <= expected_area * 1.12:
+            continue
+        feature_total = sum(float(profile.get(key) or 0) for key in (
+            "building_density", "road_density_km_per_km2", "water_ratio"))
+        if feature_total <= 0:
             continue
         styles = [city.get("hero_style", "baseline")]
         styles.extend(city.get("extra_hero_styles", []))

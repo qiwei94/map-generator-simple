@@ -3,17 +3,6 @@
   "size_km": 15,
   "cities": [
     {
-      "key": "hangzhou",
-      "slug": "custom_694256",
-      "title": "杭州 · 西湖",
-      "caption": "西湖水岸与城市纹理",
-      "center": [30.2741, 120.1551],
-      "pbf": "zhejiang-latest.osm.pbf",
-      "prototype": "landscape",
-      "hero_style": "baseline",
-      "extra_hero_styles": ["block_fill"]
-    },
-    {
       "key": "paris",
       "slug": "custom_327de4",
       "title": "巴黎 · 塞纳河",
@@ -21,17 +10,41 @@
       "center": [48.8566, 2.3522],
       "pbf": "ile-de-france-latest.osm.pbf",
       "prototype": "skyline",
-      "hero_style": "dense_detail"
+      "hero_style": "dense_detail",
+      "featured": true
+    },
+    {
+      "key": "hangzhou",
+      "slug": "custom_65d6da",
+      "title": "杭州 · 西湖",
+      "caption": "西湖群山、水岸与城市纹理",
+      "center": [30.23695, 120.10855],
+      "pbf": "zhejiang-latest.osm.pbf",
+      "prototype": "landscape",
+      "hero_style": "dense_detail",
+      "featured": true
+    },
+    {
+      "key": "suzhou",
+      "slug": "custom_694256",
+      "title": "苏州 · 金鸡湖",
+      "caption": "金鸡湖水岸与苏州城市纹理",
+      "center": [31.2883, 120.66565],
+      "pbf": "zhejiang-latest.osm.pbf",
+      "prototype": "landscape",
+      "hero_style": "block_fill",
+      "featured": true
     },
     {
       "key": "chicago",
       "slug": "showcase_chicago_15km",
-      "title": "芝加哥 · 湖岸",
-      "caption": "密歇根湖岸与棋盘街区",
+      "title": "芝加哥 · 密歇根湖岸",
+      "caption": "湖岸天际线与棋盘街区",
       "center": [41.8781, -87.6298],
       "pbf": "illinois-latest.osm.pbf",
       "prototype": "skyline",
-      "hero_style": "block_fill"
+      "hero_style": "block_fill",
+      "featured": true
     },
     {
       "key": "london",
