@@ -111,6 +111,17 @@ class TestBuildDeepseekTerrain:
         z_min = solid.vertices[:, 2].min()
         assert z_min == pytest.approx(Z_TERRAIN_BASE, abs=0.5)
 
+    def test_requested_print_base_moves_formal_terrain_base(self):
+        from _TEXTURE_STYLE_OF_DEEPSEEK.config import Z_WATER_BASE_MM
+        from _TEXTURE_STYLE_OF_DEEPSEEK.terrain import build_deepseek_terrain
+
+        grid = np.linspace(0, 100, 400).reshape(20, 20)
+        solid = build_deepseek_terrain(
+            grid, 1000.0, 1000.0, 1.0, 0.196,
+            base_thickness_mm=0.8)
+        assert solid.vertices[:, 2].min() == pytest.approx(
+            Z_WATER_BASE_MM + 0.8, abs=0.02)
+
 
 class TestSampleDeepseekTerrainZ:
 

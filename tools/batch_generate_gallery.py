@@ -87,6 +87,87 @@ STYLE_VARIANTS = {
     },
 }
 
+# 山水区域不能复用城市海报的道路权重。保留相同 style key 以兼容前端
+# 和历史任务，但标签与参数意图按场景重解释。
+LANDSCAPE_STYLE_VARIANTS = {
+    "baseline": {
+        "label": "山水均衡",
+        "desc": "以湖面与地形为主体，道路退到背景",
+        "delta": {
+            "building_v2_road_tier": ("set", 3),
+            "road_width_multiplier": ("set", 2.0),
+        },
+    },
+    "block_fill": {
+        "label": "聚落点缀",
+        "desc": "保留少量村镇体量，不用街区块面填满山野",
+        "delta": {
+            "bo_mode": "density_fill",
+            "building_density_threshold": ("set", 0.01),
+            "building_count_threshold": ("set", 2),
+            "building_v2_road_tier": ("set", 3),
+            "road_width_multiplier": ("set", 2.0),
+            "building_height_mm_max": ("scale", 0.8),
+        },
+    },
+    "dense_detail": {
+        "label": "岸线与聚落",
+        "desc": "保留更多岸边聚落与次级连接，但不强化公路",
+        "delta": {
+            "bo_mode": "oriented_bbox",
+            "building_print_limit_m2": ("set", 1000.0),
+            "building_simplify_tol_m": ("set", 8.0),
+            "building_v2_road_tier": ("set", 4),
+            "road_width_multiplier": ("set", 2.0),
+            "aggregate_simplify_m": ("set", 16.0),
+            "building_height_mm_max": ("scale", 0.75),
+        },
+    },
+    "minimal": {
+        "label": "山水留白",
+        "desc": "只留主要交通和少量聚落，让湖湾与群山主导构图",
+        "delta": {
+            "bo_mode": "oriented_bbox",
+            "building_print_limit_m2": ("set", 8000.0),
+            "building_simplify_tol_m": ("set", 40.0),
+            "building_v2_road_tier": ("set", 2),
+            "road_width_multiplier": ("set", 2.0),
+            "aggregate_simplify_m": ("set", 80.0),
+            "building_height_mm_max": ("scale", 0.7),
+        },
+    },
+}
+
+
+def classify_scene_type(profile, requested_prototype: str) -> str:
+    """Classify the visual scene from measured density, relief and water.
+
+    The requested prototype is only a hint.  This keeps a sparse lake/mountain
+    bbox from receiving dense-city road and block styling even when its OSM
+    building coverage is poor.
+    """
+    if requested_prototype == "skyline":
+        return "urban"
+    sparse = profile.building_density < 200
+    nature_evidence = (
+        profile.water_ratio >= 0.05
+        or profile.elevation_range_m >= 100
+        or profile.vegetation_ratio >= 0.10
+    )
+    if sparse and profile.water_ratio >= 0.08:
+        return "water_landscape"
+    if (sparse and nature_evidence
+            or requested_prototype in ("landscape", "terrain")
+            and profile.building_density < 500):
+        return "landscape"
+    return "urban"
+
+
+def variants_for_scene(scene_type: str) -> dict:
+    return (LANDSCAPE_STYLE_VARIANTS
+            if scene_type in ("landscape", "water_landscape")
+            else STYLE_VARIANTS)
+
 
 def _clamp_to_space(name: str, value):
     """按 PARAM_SPACE 边界收口；不在空间内的参数（bo_mode）原样返回。"""
@@ -160,19 +241,31 @@ def generate_city_gallery(city: str, styles: list, out_root: str,
     harness = CityHarness(preset, use_cache=use_cache)
     harness.prepare()
     seed = harness.seed_params()
+    scene_type = classify_scene_type(harness.profile, preset.prototype)
+    from aesthetic.framing import analyze_water_framing
+    framing = analyze_water_framing(
+        harness.ctx.get("water"), harness.ctx["bbox_local"],
+        harness.profile.water_ratio)
+    variants = variants_for_scene(scene_type)
+    print(f"  [gallery] scene_type={scene_type} "
+          f"(prototype={preset.prototype}, "
+          f"buildings={harness.profile.building_density:.1f}/km2, "
+          f"water={harness.profile.water_ratio:.1%})")
 
     meta = {
         "city": city,
         "prototype": preset.prototype,
+        "scene_type": scene_type,
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "profile": harness.profile.to_dict(),
+        "framing": framing,
         "seed_params": seed,
         "styles": {},
     }
     sheet_entries = []
 
     for style in styles:
-        spec = STYLE_VARIANTS[style]
+        spec = variants[style]
         params = build_style_params(seed, spec["delta"])
         t0 = time.time()
         try:
@@ -180,7 +273,7 @@ def generate_city_gallery(city: str, styles: list, out_root: str,
             bundle = render_review_bundle(
                 layers, harness.ctx,
                 road_width_multiplier=float(params["road_width_multiplier"]),
-                out_dir=out_dir, tag=style)
+                out_dir=out_dir, tag=style, scene_type=scene_type)
             result = compute_metrics(layers, bundle, preset.prototype)
             score = result["overall"]
         except Exception as e:

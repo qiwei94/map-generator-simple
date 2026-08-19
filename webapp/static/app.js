@@ -2,12 +2,24 @@
 "use strict";
 
 const $ = (id) => document.getElementById(id);
+const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({
+  "&": "&amp;",
+  "<": "&lt;",
+  ">": "&gt;",
+  '"': "&quot;",
+  "'": "&#39;",
+})[char]);
 
 const state = {
   cities: [],
   gallery: null,       // 当前预设城市的画廊元数据
+  gallerySlug: null,   // 画廊对应的服务端区域身份
+  galleryBbox: null,   // 画廊生成时的原始 bbox；生成模型必须复用
   renderKind: "topdown",
   selectedStyle: null,
+  generationProfile: "classic",
+  authConfig: null,
+  account: null,
   job: null,           // {id, mode}
   /* 当前目标：预设城市 or 自定义区域 */
   target: { kind: "area", city: null, title: "自定义区域" },
@@ -35,6 +47,7 @@ function getSession() {
     createdAt: Date.now(),
     target: null,          // {kind, city, title, prototype}
     selectedStyle: null,
+    generationProfile: "classic",
     areaName: "",
     photoPoints: [],       // [{lat, lon, name}] 照片 GPS 坐标（不含原图）
     journeyClusters: null, // [{lat, lon, name, count}]
@@ -81,6 +94,9 @@ async function restoreSession() {
   }
   if (s.selectedStyle) {
     state.selectedStyle = s.selectedStyle;
+  }
+  if (s.generationProfile) {
+    state.generationProfile = s.generationProfile;
   }
   if (s.areaName) {
     const el = $("areaName");
@@ -140,6 +156,7 @@ function persistState() {
   const patch = {
     target: state.target,
     selectedStyle: state.selectedStyle,
+    generationProfile: state.generationProfile,
     areaName: ($("areaName") || {}).value || "",
     lastCity: state.target.city || (lastArtifacts ? state.jobSlug : null),
     lastBbox: map.state.map ? currentBbox() : null,
@@ -166,10 +183,156 @@ async function fetchJSON(url, opts) {
   if (!r.ok) {
     let msg = `HTTP ${r.status}`;
     try { msg = (await r.json()).detail || msg; } catch (_) {}
+    if (r.status === 401) openAccountDialog();
     throw new Error(msg);
   }
   return r.json();
 }
+
+/* ---------------- 账号与我的任务 ---------------- */
+
+function openAccountDialog() {
+  const dialog = $("accountDialog");
+  if (dialog.open) return;
+  if (dialog.showModal) dialog.showModal();
+  else dialog.setAttribute("open", "");
+}
+
+function closeAccountDialog() {
+  const dialog = $("accountDialog");
+  if (dialog.close) dialog.close();
+  else dialog.removeAttribute("open");
+}
+
+function renderAccount() {
+  const user = state.account;
+  $("accountLoginView").hidden = Boolean(user);
+  $("accountUserView").hidden = !user;
+  $("myTasksCard").hidden = !user;
+  if (!user) {
+    $("accountLabel").textContent = "登录";
+    $("accountQuota").textContent = "保存我的任务";
+    return;
+  }
+  const shortEmail = user.email.length > 24
+    ? user.email.slice(0, 21) + "…" : user.email;
+  $("accountLabel").textContent = shortEmail;
+  $("accountQuota").textContent = `本月剩余 ${user.quota_remaining}`;
+  $("accountEmail").textContent = user.email;
+  $("accountQuotaLarge").textContent = `${user.quota_remaining} / ${user.quota_limit}`;
+  $("accountQuotaPeriod").textContent =
+    `${user.quota_period} · 按计算量扣除，缓存结果不重复扣费`;
+}
+
+async function refreshAccount() {
+  if (window.location.protocol === "file:") return;
+  try {
+    const config = await fetchJSON("/api/auth/config");
+    state.authConfig = config;
+    const result = await fetchJSON("/api/auth/me");
+    state.account = result.user || null;
+    renderAccount();
+    if (state.account) await loadMyTasks();
+    else if (config.required) openAccountDialog();
+  } catch (_) {
+    renderAccount();
+  }
+}
+
+async function sendEmailCode() {
+  const email = $("authEmail").value.trim();
+  if (!email) { $("authMessage").textContent = "请先输入邮箱"; return; }
+  const button = $("btnSendCode");
+  button.disabled = true;
+  $("authMessage").textContent = "正在发送…";
+  try {
+    const result = await fetchJSON("/api/auth/email/start", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email }),
+    });
+    $("authMessage").textContent = result.message;
+    if (result.dev_code) $("authCode").value = result.dev_code;
+    let left = 60;
+    button.textContent = `${left}s 后重发`;
+    const timer = setInterval(() => {
+      left -= 1;
+      button.textContent = left > 0 ? `${left}s 后重发` : "获取验证码";
+      if (left <= 0) { clearInterval(timer); button.disabled = false; }
+    }, 1000);
+  } catch (error) {
+    $("authMessage").textContent = error.message;
+    button.disabled = false;
+  }
+}
+
+async function verifyEmailCode() {
+  const email = $("authEmail").value.trim();
+  const code = $("authCode").value.trim();
+  if (!email || !/^\d{6}$/.test(code)) {
+    $("authMessage").textContent = "请输入邮箱和 6 位验证码";
+    return;
+  }
+  try {
+    const result = await fetchJSON("/api/auth/email/verify", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, code }),
+    });
+    state.account = result.user;
+    renderAccount();
+    await loadMyTasks();
+    closeAccountDialog();
+  } catch (error) {
+    $("authMessage").textContent = error.message;
+  }
+}
+
+async function logoutAccount() {
+  await fetchJSON("/api/auth/logout", { method: "POST" });
+  state.account = null;
+  renderAccount();
+}
+
+async function loadMyTasks() {
+  if (!state.account) return;
+  try {
+    const result = await fetchJSON("/api/jobs?mine=true");
+    const jobs = result.jobs || [];
+    $("myTasksSummary").textContent = jobs.length
+      ? `共 ${jobs.length} 个，点击即可继续` : "还没有任务";
+    $("myTaskList").innerHTML = jobs.length ? jobs.map((job) => {
+      const status = { pending: "排队中", running: "生成中", done: "已完成",
+                       failed: "失败" }[job.status] || job.status;
+      const queue = job.status === "pending" && job.queue_position
+        ? ` · 队列第 ${job.queue_position} 位` : "";
+      return `<button class="my-task" type="button" data-job-id="${esc(job.id)}">
+        <span><strong>${esc(job.city_title || job.city)}</strong>
+          <small>${esc(job.mode === "styles" ? "风格方案" :
+            (job.mode === "draft" ? "快速预览" : "正式模型"))}</small></span>
+        <span class="my-task-status ${esc(job.status)}">${esc(status + queue)}</span>
+      </button>`;
+    }).join("") : '<p class="my-task-empty">从选择一个地点开始，第一件作品会出现在这里。</p>';
+  } catch (error) {
+    $("myTaskList").innerHTML = `<p class="my-task-empty">${esc(error.message)}</p>`;
+  }
+}
+
+$("accountTrigger").onclick = openAccountDialog;
+$("accountClose").onclick = closeAccountDialog;
+$("btnSendCode").onclick = sendEmailCode;
+$("btnVerifyCode").onclick = verifyEmailCode;
+$("authCode").onkeydown = (event) => {
+  if (event.key === "Enter") verifyEmailCode();
+};
+$("btnLogout").onclick = logoutAccount;
+$("btnRefreshTasks").onclick = loadMyTasks;
+$("btnOpenTasks").onclick = () => {
+  closeAccountDialog();
+  $("myTasksCard").scrollIntoView({ behavior: "smooth", block: "start" });
+};
+$("myTaskList").onclick = (event) => {
+  const item = event.target.closest("[data-job-id]");
+  if (item) lookupJob(item.dataset.jobId);
+};
 
 /* ---------------- Step 1 Tab 切换 ---------------- */
 
@@ -195,6 +358,115 @@ async function loadCities() {
   renderStep3();
   renderViewer();
   renderDownloads();
+}
+
+const FALLBACK_HERO_SAMPLES = [
+  {
+    url: "assets/westlake-real-output.jpg",
+    kind: "真实 25 × 25 KM 输出",
+    location: "HANGZHOU / WEST LAKE",
+    title: "西湖、钱塘江与完整城市纹理",
+    alt: "真实生成的杭州西湖与钱塘江 25 公里乘 25 公里风格图",
+  },
+  {
+    url: "assets/paris-15km-dense.jpg",
+    kind: "真实 15 × 15 KM 输出",
+    location: "PARIS / DENSE DETAIL",
+    title: "塞纳河与巴黎城市肌理",
+    alt: "真实生成的巴黎 15 公里乘 15 公里精细风格图",
+  },
+  {
+    url: "assets/chicago-15km-dense.jpg",
+    kind: "真实 15 × 15 KM 输出",
+    location: "CHICAGO / DENSE DETAIL",
+    title: "湖岸天际线与棋盘街区",
+    alt: "真实生成的芝加哥密歇根湖岸 15 公里乘 15 公里精细风格图",
+  },
+];
+
+let heroSamples = FALLBACK_HERO_SAMPLES;
+let heroSampleIndex = 0;
+let heroTouchStartX = null;
+let heroAutoplayTimer = null;
+const HERO_AUTOPLAY_MS = 5200;
+
+function showHeroSample(index, immediate = false) {
+  if (!heroSamples.length) return;
+  heroSampleIndex = (index + heroSamples.length) % heroSamples.length;
+  const sample = heroSamples[heroSampleIndex];
+  const image = $("heroShowcaseImage");
+  const apply = () => {
+    image.src = sample.url;
+    image.alt = sample.alt || `${sample.title}，真实城市浮雕输出`;
+    $("heroShowcaseKind").textContent = sample.kind || "真实 15 × 15 KM 输出";
+    $("heroShowcaseLocation").textContent = sample.location || "15 KM × 15 KM";
+    $("heroShowcaseTitle").textContent = sample.title;
+    $("heroShowcaseCount").textContent =
+      `${String(heroSampleIndex + 1).padStart(2, "0")} / ${String(heroSamples.length).padStart(2, "0")}`;
+    image.classList.remove("is-changing");
+  };
+  if (immediate || image.getAttribute("src") === sample.url) {
+    apply();
+  } else {
+    image.classList.add("is-changing");
+    window.setTimeout(apply, 130);
+  }
+}
+
+function restartHeroAutoplay() {
+  window.clearInterval(heroAutoplayTimer);
+  heroAutoplayTimer = null;
+  if (heroSamples.length < 2) return;
+  heroAutoplayTimer = window.setInterval(
+    () => showHeroSample(heroSampleIndex + 1), HERO_AUTOPLAY_MS);
+}
+
+function initHeroShowcase() {
+  showHeroSample(0, true);
+  restartHeroAutoplay();
+  $("heroShowcasePrev").onclick = () => {
+    showHeroSample(heroSampleIndex - 1);
+    restartHeroAutoplay();
+  };
+  $("heroShowcaseNext").onclick = () => {
+    showHeroSample(heroSampleIndex + 1);
+    restartHeroAutoplay();
+  };
+  const frame = $("heroShowcase");
+  frame.addEventListener("touchstart", (event) => {
+    heroTouchStartX = event.changedTouches[0]?.clientX ?? null;
+  }, { passive: true });
+  frame.addEventListener("touchend", (event) => {
+    if (heroTouchStartX === null) return;
+    const delta = (event.changedTouches[0]?.clientX ?? heroTouchStartX) - heroTouchStartX;
+    heroTouchStartX = null;
+    if (Math.abs(delta) >= 45) {
+      showHeroSample(heroSampleIndex + (delta < 0 ? 1 : -1));
+      restartHeroAutoplay();
+    }
+  }, { passive: true });
+  FALLBACK_HERO_SAMPLES.slice(1).forEach((sample) => {
+    const image = new Image();
+    image.src = sample.url;
+  });
+}
+
+async function loadShowcase() {
+  try {
+    const result = await fetchJSON("/api/showcase");
+    const samples = (result.samples || []).filter(
+      (sample) => sample.url && sample.title && [15, 25].includes(sample.size_km));
+    if (!samples.length) return;
+    heroSamples = samples;
+    showHeroSample(0, true);
+    restartHeroAutoplay();
+    heroSamples.slice(1, 4).forEach((sample) => {
+      const image = new Image();
+      image.src = sample.url;
+    });
+  } catch (_) {
+    // file:// previews and an unavailable API keep the bundled verified samples.
+  }
 }
 
 /** 构建国家分组下拉（去重 + 精选置顶） */
@@ -302,7 +574,7 @@ async function selectCity(name) {
 
 /* ---------------- 地图与取景 ---------------- */
 
-const TIERS = [5, 10, 15];              // 取景三挡（km）
+const TIERS = [15, 25];                 // 正式成品固定两挡（km）
 
 const map = {
   state: { map: null, rect: null },
@@ -313,7 +585,7 @@ const map = {
 
 function sizeKm() {
   const b = $("tierSeg").querySelector("button.active");
-  return b ? parseFloat(b.dataset.km) : 10;
+  return b ? parseFloat(b.dataset.km) : 15;
 }
 
 /** 选中最接近给定尺寸的挡位 */
@@ -326,7 +598,10 @@ function setTierNear(km) {
 
 function syncSize() {
   const km = sizeKm();
-  $("tierHint").textContent = `${km} km 见方 · 金色框即成品范围`;
+  $("tierHint").textContent = km === 25
+    ? "25 km 见方 · 完整城市叙事，河流转折场景优先推荐"
+    : "15 km 见方 · 城市细节与生成时间更均衡";
+  if ($("fullModeHint")) syncGenerationProfileAvailability();
 }
 
 function bboxFromCenter(lat, lon, km) {
@@ -347,13 +622,48 @@ function kmFromBbox(b) {
   return Math.max(latKm, lonKm);
 }
 
+function normalizeBbox(value) {
+  if (!Array.isArray(value) || value.length !== 4) return null;
+  const bbox = value.map(Number);
+  if (!bbox.every(Number.isFinite)) return null;
+  const [s, w, n, e] = bbox;
+  return n > s && e > w ? bbox : null;
+}
+
+/** 用服务端任务记录恢复区域上下文，杜绝“巴黎画廊 + 西湖选框”。 */
+function restoreJobArea(job) {
+  const bbox = normalizeBbox(job.bbox);
+  if (!bbox) return false;
+  const title = job.city_title || "自定义区域";
+  state.target = {
+    kind: "area", city: null, title,
+    prototype: job.prototype || "landscape",
+  };
+  state.gallerySlug = job.city;
+  state.galleryBbox = bbox;
+  $("areaName").value = title;
+  initMap();
+  map.userMoved = false;
+  setTierNear(kmFromBbox(bbox));
+  syncSize();
+  map.state.map.fitBounds(
+    [[bbox[0], bbox[1]], [bbox[2], bbox[3]]],
+    { padding: [16, 16] },
+  );
+  setTimeout(updateRect, 120);
+  renderTabs();
+  lockView();
+  saveSession({ target: state.target, areaName: title, lastBbox: bbox });
+  return true;
+}
+
 function updateRect() {
   if (!map.state.map) return;
   const [s, w, n, e] = currentBbox();
   const bounds = [[s, w], [n, e]];
   if (map.state.rect) map.state.rect.setBounds(bounds);
   else map.state.rect = L.rectangle(bounds, {
-    color: "#e23d3d", weight: 2, fillOpacity: 0.08, dashArray: "6 4",
+    color: "#d18a5f", weight: 2, fillOpacity: 0.08, dashArray: "6 4",
     interactive: false,
   }).addTo(map.state.map);
 }
@@ -404,6 +714,8 @@ $("tierSeg").querySelectorAll("button").forEach((b) => {
 function invalidateStyles() {
   if (state.target.kind === "preset") return;   // 预设城市画廊不变
   state.gallery = null;
+  state.gallerySlug = null;
+  state.galleryBbox = null;
   state.selectedStyle = null;
   renderStep3();
   renderViewer();
@@ -471,10 +783,24 @@ async function confirmArea() {
     });
     state.job = { id: r.job_id, mode: "styles", city: r.slug, slug: r.slug };
     state.pendingArea = { bbox, slug: r.slug };
+    state.gallerySlug = r.slug;
+    state.galleryBbox = bbox;
     $("jobPanel").hidden = false;
-    $("jobStatus").textContent = "生成 4 种风格的平面图中";
+    $("jobStatus").textContent = r.cached
+      ? "已找到该区域的现成结果"
+      : (r.reused ? "相同区域正在生成，已接入现有任务" : "生成 4 种风格的平面图中");
     $("jobStatus").className = "pill";
-    $("galleryHint").textContent = "正在生成…约 1 分钟";
+    $("galleryHint").textContent = r.cached
+      ? "正在载入…"
+      : (r.reused
+        ? "已接入相同区域的生成任务，完成后会自动显示"
+        : "正在分析地图并生成 4 种风格，预计 8–12 分钟，请耐心等待");
+    renderJobProgress({
+      progress_pct: r.cached ? 100 : 2,
+      duration_hint: "首次生成通常需要 8–12 分钟；相同区域会直接复用",
+    });
+    showJobToken(r.job_id);
+    refreshAccount();
     lockView();   // 任务已开始，锁定取景框
     pollJob();
   } catch (err) {
@@ -595,9 +921,18 @@ $("lmInput").oninput = () => {
 };
 $("lmInput").onfocus = () => {
   // 聚焦且未输入时，展示预取的可生成目录（发现入口）
-  if (!$("lmInput").value.trim() && lmCatalogCache) {
-    renderLmResults(lmCatalogCache);
+  if ($("lmInput").value.trim()) return;
+  if (window.location.protocol === "file:") {
+    renderLmResults([], "当前是静态文件预览，景点目录需要通过网页服务打开");
+    return;
   }
+  if (lmCatalogCache !== null) {
+    renderLmResults(lmCatalogCache);
+    return;
+  }
+  // 修复启动竞态：预取尚未完成时用户先聚焦，不能一直显示空白。
+  renderLmResults([], "正在载入景点目录…");
+  lmSearch("", true);
 };
 document.addEventListener("click", (e) => {
   if (!e.target.closest(".lm-search")) $("lmResults").hidden = true;
@@ -1042,6 +1377,10 @@ function renderStep3() {
   $("renderToggle").style.display = has ? "" : "none";
 
   if (has) {
+    if (!state.selectedStyle || !state.gallery.styles[state.selectedStyle]) {
+      state.selectedStyle = state.gallery.styles.baseline
+        ? "baseline" : Object.keys(state.gallery.styles)[0];
+    }
     grid.style.display = "";
     for (const [key, s] of Object.entries(state.gallery.styles)) {
       const card = document.createElement("div");
@@ -1061,13 +1400,16 @@ function renderStep3() {
         openLightbox(img, `${s.label} · ★${s.score.toFixed(2)}`);
       };
       card.onclick = () => {
-        state.selectedStyle = (state.selectedStyle === key) ? null : key;
+        state.selectedStyle = key;
         renderStep3();
         renderViewer();      // 选中风格后，Step 4 上方的 2D 图跟着换
       };
       grid.appendChild(card);
     }
-    $("galleryHint").textContent = "点图片放大，点卡片选中";
+    const framing = state.gallery.framing;
+    $("galleryHint").textContent = framing
+      ? `${framing.recommended_size_km} km 推荐 · ${framing.reason}`
+      : "点图片放大，点卡片切换风格";
   } else {
     grid.style.display = "none";
     $("galleryHint").textContent = "自定义区域用自动参数（规则引擎按地貌适配）";
@@ -1087,13 +1429,14 @@ function renderStep3() {
       box.appendChild(el);
     }
   }
+  syncGenerationProfileAvailability();
 }
 
 function updateStyleHint() {
   const el = $("styleHint");
   if (state.selectedStyle && state.gallery) {
     const s = state.gallery.styles[state.selectedStyle];
-    el.textContent = `将按风格生成：${s.label}（再次点击卡片可取消）`;
+    el.textContent = `快速预览和正式模型将使用：${s.label}`;
     el.classList.add("on");
   } else if (state.gallery) {
     el.textContent = "未选风格，将用自动参数生成；可先在上方选一个";
@@ -1115,19 +1458,80 @@ $("renderToggle").querySelectorAll("button").forEach((b) => {
 
 /* ---------------- Step 4/5：生成 ---------------- */
 
+function qualityProfileAvailable() {
+  return state.target.kind === "preset" && state.target.city === "westlake";
+}
+
+function syncGenerationProfileAvailability() {
+  const available = qualityProfileAvailable();
+  const qualityInputs = $("profilePicker").querySelectorAll(
+    'input[value="quality_flat"], input[value="quality_textured"]');
+  qualityInputs.forEach((input) => { input.disabled = !available; });
+
+  if (!available && state.generationProfile !== "classic") {
+    state.generationProfile = "classic";
+  }
+  const selected = $("profilePicker").querySelector(
+    `input[value="${state.generationProfile}"]`);
+  if (selected) selected.checked = true;
+  $("profilePicker").querySelectorAll(".profile-option").forEach((label) => {
+    const input = label.querySelector("input");
+    label.classList.toggle("active", input.checked);
+  });
+
+  const quality = state.generationProfile !== "classic";
+  $("profileNote").textContent = available
+    ? "精细模型已开放：直接生成 25km 正式模型；两种街区表现会分别保存。"
+    : "精细模型暂在“杭州 · 西湖”开放；其他区域使用标准生成。";
+  $("profileNote").classList.toggle("available", available);
+  $("btnDraft").disabled = !!state.job || quality;
+  $("btnDraft").title = quality ? "精细模型直接生成正式文件" : "";
+  $("fullModeHint").textContent = quality
+    ? `${state.generationProfile === "quality_flat" ? "平整街区" : "地块起伏"} · 模型 + 预览图`
+    : `完整 ${sizeKm()} km 取景 · 模型 + 预览图`;
+}
+
+$("profilePicker").addEventListener("change", (event) => {
+  const input = event.target.closest('input[name="generationProfile"]');
+  if (!input || input.disabled) return;
+  state.generationProfile = input.value;
+  state.selectedStyle = state.generationProfile === "classic"
+    ? state.selectedStyle : null;
+  syncGenerationProfileAvailability();
+  updateStyleHint();
+  persistState();
+});
+
 /** 组装请求体：预设城市 or 自定义区域，统一入口 */
 function buildRequest(mode) {
-  const body = { mode };
+  const body = {
+    mode,
+    generation_profile: state.generationProfile,
+  };
+  if (mode === "draft" && state.generationProfile !== "classic") {
+    throw new Error("精细模型直接生成正式打印文件，不提供快速预览");
+  }
   if (state.target.kind === "preset") {
     body.city = state.target.city;
-    if (state.selectedStyle) body.style = state.selectedStyle;
+    if (state.selectedStyle && state.generationProfile === "classic") {
+      body.style = state.selectedStyle;
+    }
     return body;
   }
   if (!map.state.map) throw new Error("请先在上方选择位置");
-  const bbox = currentBbox();
+  const bbox = state.gallery && state.galleryBbox
+    ? [...state.galleryBbox]
+    : currentBbox();
   const [s, w, n, e] = bbox;
   const inBox = (lat, lon) => lat >= s && lat <= n && lon >= w && lon <= e;
   body.area = { bbox, name: $("areaName").value.trim() };
+  if (state.selectedStyle && state.gallery) {
+    if (!state.gallerySlug) {
+      throw new Error("风格图缺少区域身份，请重新找回任务或确认位置");
+    }
+    body.style = state.selectedStyle;
+    body.gallery_slug = state.gallerySlug;
+  }
   body.markers = [];
   if (map.journey) {
     const cs = map.journey.clusters.filter((c) => inBox(c.lat, c.lon));
@@ -1149,16 +1553,31 @@ async function startJob(mode) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
-    state.job = { id: resp.job_id, mode, city: resp.city };
+    state.job = { id: resp.job_id, mode, city: resp.city,
+                  generationProfile: body.generation_profile };
     $("jobPanel").hidden = false;
     const extra = body.markers && body.markers.length
       ? ` · ${body.markers.length} 处标注` : "";
     const styleLabel = body.style && state.gallery
       ? ` · ${state.gallery.styles[body.style].label}` : "";
-    $("jobStatus").textContent =
-      (mode === "draft" ? "生成 3D 预览中" : "生成打印模型中") + styleLabel + extra;
+    const baseStatus = resp.cached
+      ? "已找到相同配置的现成模型"
+      : (resp.reused
+        ? "相同配置正在生成，已接入现有任务"
+        : (mode === "draft"
+          ? "生成中心 5 km 快速 3D 预览中"
+          : `生成完整 ${sizeKm()} km 打印模型中`));
+    $("jobStatus").textContent = baseStatus + styleLabel + extra;
     $("jobStatus").className = "pill";
+    $("jobStage").textContent = "正在准备地图与高程数据";
+    renderJobProgress({
+      progress_pct: resp.cached ? 100 : 2,
+      duration_hint: mode === "draft"
+        ? "中心 5 km 预览通常需要 2–8 分钟"
+        : "正式模型通常需要 15–40 分钟",
+    });
     showJobToken(resp.job_id);
+    refreshAccount();
     setBusy(true);
     pollJob();
   } catch (err) {
@@ -1167,7 +1586,7 @@ async function startJob(mode) {
 }
 
 function setBusy(busy) {
-  $("btnDraft").disabled = busy;
+  $("btnDraft").disabled = busy || state.generationProfile !== "classic";
   $("btnFull").disabled = busy;
 }
 
@@ -1196,31 +1615,58 @@ async function fetchPbf(region) {
   }
 }
 
+function renderJobProgress(job) {
+  const pct = Math.max(0, Math.min(100, Math.round(job.progress_pct || 0)));
+  const progress = $("jobProgress");
+  progress.setAttribute("aria-valuenow", String(pct));
+  $("jobProgressBar").style.width = `${pct}%`;
+  $("jobProgressText").textContent = pct >= 100
+    ? "已完成"
+    : `阶段进度（估算）${pct}%`;
+  $("jobEstimate").textContent = job.duration_hint
+    ? `${job.duration_hint} · 可复制任务链接稍后回来`
+    : "正在估算耗时，请耐心等待";
+}
+
 async function pollJob() {
   if (!state.job) return;
   try {
     const j = await fetchJSON(`/api/jobs/${state.job.id}`);
     $("jobElapsed").textContent = fmtDuration(j.elapsed_s);
+    renderJobProgress(j);
     // 运行日志不外露；只展示友好状态，失败时显示归类后的异常提示
     const hint = $("jobHint");
+    renderQualityChecks(j.quality_checks || []);
     // pending = 排队等 worker 拉取；running = 正在计算
     if (j.status === "pending") {
-      $("jobStatus").textContent = "⏳ 排队中，等待计算节点接单…";
+      const queueText = j.queue_position
+        ? `当前队列第 ${j.queue_position} 位` : "等待计算节点接单";
+      $("jobStatus").textContent = `⏳ 排队中 · ${queueText}`;
       $("jobStatus").className = "pill";
+      $("jobStage").textContent = state.account
+        ? "任务已保存到账号，可以关闭页面稍后回来"
+        : "任务已保存，可以稍后凭令牌找回";
       setTimeout(pollJob, 3000);
       return;
     }
     if (j.status === "running") {
       $("jobStatus").textContent = "⏳ 正在生成，请耐心等待…";
       $("jobStatus").className = "pill";
+      $("jobStage").textContent = j.stage_label || "正在构建地图图层与模型几何";
       setTimeout(pollJob, 2500);
       return;
     }
     const failed = j.status !== "done";
     $("jobStatus").textContent = failed ? "✕ 失败" : "✓ 完成";
     $("jobStatus").className = "pill " + j.status;
+    $("jobStage").textContent = failed
+      ? "生成未完成，请查看下方说明"
+      : "模型与交付文件已经生成";
     if (failed) {
       hint.textContent = j.error_msg || "生成失败，请稍后重试";
+      hint.hidden = false;
+    } else if (j.quality_warnings && j.quality_warnings.length) {
+      hint.textContent = `生成完成，但需要检查：${j.quality_warnings.join("；")}`;
       hint.hidden = false;
     } else {
       hint.hidden = true;
@@ -1229,6 +1675,7 @@ async function pollJob() {
     state.jobSlug = slug;
     state.job = null;
     setBusy(false);
+    refreshAccount();
     if (mode === "fetch") {
       // 数据到位 → 重查当前位置状态，清掉提示里的下载按钮
       if (j.status === "done") {
@@ -1245,7 +1692,14 @@ async function pollJob() {
         // 拉回刚生成的风格画廊，填到 Step 3
         try {
           state.gallery = await fetchJSON(`/api/gallery/${state.jobSlug}`);
+          state.gallerySlug = state.jobSlug;
+          if (state.pendingArea && state.pendingArea.slug === state.jobSlug) {
+            state.galleryBbox = [...state.pendingArea.bbox];
+          }
           state.selectedStyle = null;
+          // 风格任务与模型任务共用区域 slug。找回已完成风格任务时，
+          // 同时恢复该区域后来生成的最新 GLB/PNG；否则预览区会永久空白。
+          await refreshArtifacts(state.jobSlug);
           renderStep3();
           renderViewer();
           $("step3").scrollIntoView({ behavior: "smooth", block: "start" });
@@ -1265,6 +1719,25 @@ async function pollJob() {
   }
 }
 
+function renderQualityChecks(checks) {
+  const el = $("qualityChecks");
+  if (!checks.length) {
+    el.hidden = true;
+    el.innerHTML = "";
+    return;
+  }
+  el.innerHTML = checks.map((check) => {
+    const status = check.status === "pass" || check.status === "warning"
+      ? check.status : "";
+    return `
+    <div class="quality-check ${status}">
+      <strong>${esc(check.label)}</strong>
+      <span>${esc(check.detail)}</span>
+    </div>`;
+  }).join("");
+  el.hidden = false;
+}
+
 /* ---------------- 任务令牌：展示 + 找回 ---------------- */
 
 /** 从令牌或完整链接中提取 job_id */
@@ -1280,13 +1753,28 @@ function parseJobToken(input) {
 function showJobToken(job_id) {
   $("jobTokenRow").hidden = false;
   $("jobToken").textContent = job_id;
+  $("jobLookup").value = job_id;
+  const taskUrl = new URL(location.href);
+  taskUrl.searchParams.set("job", job_id);
+  history.replaceState({}, "", taskUrl);
   $("btnCopyJob").onclick = () => {
-    const url = `${location.origin}${location.pathname}?job=${job_id}`;
+    const url = taskUrl.toString();
     const done = () => { $("btnCopyJob").textContent = "已复制✓";
       setTimeout(() => { $("btnCopyJob").textContent = "复制链接"; }, 1500); };
+    const fallbackCopy = () => {
+      const input = document.createElement("textarea");
+      input.value = url;
+      input.style.position = "fixed";
+      input.style.opacity = "0";
+      document.body.appendChild(input);
+      input.select();
+      document.execCommand("copy");
+      input.remove();
+      done();
+    };
     if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(url).then(done);
-    } else { done(); }
+      navigator.clipboard.writeText(url).then(done).catch(fallbackCopy);
+    } else { fallbackCopy(); }
   };
 }
 
@@ -1296,6 +1784,7 @@ async function lookupJob(input) {
   if (!id) { alert("令牌格式不对，请输入 6-16 位字母数字或完整链接"); return; }
   try {
     const j = await fetchJSON(`/api/jobs/${id}`);
+    if (j.mode === "styles") restoreJobArea(j);
     state.job = { id, mode: j.mode, city: j.city, slug: j.city };
     $("jobPanel").hidden = false;
     showJobToken(id);
@@ -1430,6 +1919,14 @@ function renderDownloads() {
     a.innerHTML = '<span class="dl-name">🖼 旅程纪念平面图 PNG（高清）</span><span class="meta">查看</span>';
     dls.appendChild(a);
   }
+  if (art.design_spec) {
+    const a = document.createElement("a");
+    a.className = "dl-item";
+    a.href = art.design_spec.url;
+    a.download = art.design_spec.name || "design_spec.json";
+    a.innerHTML = '<span class="dl-name">⚙️ Design Spec（生成参数与验收证据）</span><span class="meta">JSON</span>';
+    dls.appendChild(a);
+  }
 }
 
 function fmtDuration(s) {
@@ -1482,16 +1979,27 @@ $("lightbox").onclick = closeLightbox;
 $("lightboxClose").onclick = closeLightbox;
 
 syncSize();
+initHeroShowcase();
 window.addEventListener("load", async () => {
   initMap();
-  lmSearch("", false);   // 预取目录缓存，不弹下拉
+  if (window.location.protocol !== "file:") {
+    lmSearch("", false);   // 预取目录缓存，不弹下拉
+  }
+  await refreshAccount();
+  await loadShowcase();
   await restoreSession();  // 恢复上次会话
+  syncGenerationProfileAvailability();
   // 任务链接 ?job=xxx → 自动找回该任务
   const jobParam = new URLSearchParams(window.location.search).get("job");
   if (jobParam) { $("jobLookup").value = jobParam; lookupJob(jobParam); }
 });
 
 loadCities().catch((e) => {
+  if (window.location.protocol === "file:") {
+    const input = $("lmInput");
+    input.placeholder = "静态预览不含景点数据，请通过网页服务打开";
+    return;
+  }
   document.body.insertAdjacentHTML("beforeend",
-    `<div style="color:#d97762;text-align:center;padding:20px">加载失败: ${e.message}</div>`);
+    `<div style="color:#d97762;text-align:center;padding:20px">景点目录加载失败: ${e.message}</div>`);
 });

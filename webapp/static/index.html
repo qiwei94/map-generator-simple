@@ -3,9 +3,9 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-<meta name="theme-color" content="#14161c">
-<title>旅程回忆</title>
-<link rel="stylesheet" href="style.css?v=35">
+<meta name="theme-color" content="#171916">
+<title>旅程浮雕 Studio</title>
+<link rel="stylesheet" href="style.css?v=53">
 <link rel="stylesheet" href="vendor/leaflet/leaflet.css">
 <!-- 本地自托管，无 CDN 依赖 -->
 <script type="module" src="vendor/model-viewer.min.js"
@@ -16,15 +16,54 @@
 
 <header class="topbar">
   <div class="brand">
-    <span class="brand-mark">◆</span>
     <div>
-      <h1>旅程回忆</h1>
-      <p class="sub">照片 → 轨迹 → 浮雕 → 独一无二的回忆实体</p>
+      <p class="brand-overline">RELIEF STUDIO</p>
+      <h1>旅程浮雕</h1>
     </div>
   </div>
+  <nav class="flow-nav" aria-label="制作进度">
+    <a href="#step1"><span>01</span>定位</a>
+    <a href="#step2"><span>02</span>取景</a>
+    <a href="#step4"><span>03</span>生成</a>
+  </nav>
+  <button class="account-trigger" id="accountTrigger" type="button">
+    <span id="accountLabel">登录</span>
+    <small id="accountQuota">保存我的任务</small>
+  </button>
+  <p class="top-spec">3MF · PRINT READY</p>
 </header>
 
 <main id="main">
+
+  <section class="product-hero" aria-labelledby="heroTitle">
+    <div class="hero-copy">
+      <p class="hero-kicker">MAP RELIEF / 15 + 25 KM</p>
+      <h2 id="heroTitle">把走过的城市，<br>留在手里。<br>把旅途的回忆，<br>放在桌上。</h2>
+      <p>把旅行中念念不忘的山河、街巷与城市轮廓，做成可以触摸的城市浮雕。从地点或照片开始，完成取景与风格选择，然后交付可打印的模型。</p>
+      <a class="hero-cta" href="#step1">制作我的城市 <span>↓</span></a>
+      <div class="hero-specs">
+        <span><strong>15 / 25 km</strong>两档正式取景</span>
+        <span><strong>200 mm</strong>标准成品宽度</span>
+        <span><strong>12 / 12</strong>项目规则通过</span>
+      </div>
+    </div>
+    <figure class="hero-visual" id="heroShowcase" aria-roledescription="轮播图">
+      <img id="heroShowcaseImage" src="assets/westlake-real-output.jpg"
+           alt="真实生成的杭州西湖与钱塘江 25 公里乘 25 公里风格图">
+      <div class="hero-visual-meta">
+        <span id="heroShowcaseKind">真实 25 × 25 KM 输出</span>
+        <div class="hero-visual-nav">
+          <button id="heroShowcasePrev" type="button" aria-label="上一张样品">←</button>
+          <span id="heroShowcaseCount" aria-live="polite">01 / 04</span>
+          <button id="heroShowcaseNext" type="button" aria-label="下一张样品">→</button>
+        </div>
+      </div>
+      <figcaption aria-live="polite">
+        <p id="heroShowcaseLocation">HANGZHOU / WEST LAKE</p>
+        <strong id="heroShowcaseTitle">西湖、钱塘江与完整城市纹理</strong>
+      </figcaption>
+    </figure>
+  </section>
 
   <!-- ══ Step 1 · 选位置 ══ -->
   <section class="card step" id="step1">
@@ -32,12 +71,12 @@
 
     <!-- Tab 切换：搜索 / 照片 -->
     <div class="s1-tabs" id="s1Tabs">
-      <button class="s1-tab active" data-tab="photo">📷 照片定位</button>
-      <button class="s1-tab" data-tab="search">🔍 搜索地名</button>
+      <button class="s1-tab active" data-tab="search">搜索地点</button>
+      <button class="s1-tab" data-tab="photo">用照片还原旅程</button>
     </div>
 
     <!-- 搜索面板 -->
-    <div class="s1-panel" id="s1Search" hidden>
+    <div class="s1-panel" id="s1Search">
       <div class="lm-search">
         <input type="text" id="lmInput" class="text-input" maxlength="40"
                placeholder="西湖 / 拙政园 / 埃菲尔铁塔 / 浙大紫金港…"
@@ -47,7 +86,7 @@
     </div>
 
     <!-- 照片面板 -->
-    <div class="s1-panel" id="s1Photo">
+    <div class="s1-panel" id="s1Photo" hidden>
       <div class="privacy-note">🔒 照片仅用于读取 GPS 坐标标记地点，不会以任何形式存储或上传至第三方服务器。解析完成后立即从内存中丢弃。</div>
       <div class="photo-row">
         <label class="btn btn-ghost btn-file">📷 选择照片
@@ -93,17 +132,16 @@
     <div class="custom-row tier-row">
       <span class="tier-label">取景范围</span>
       <div class="seg tier-seg" id="tierSeg">
-        <button data-km="5">5 km</button>
-        <button data-km="10" class="active">10 km</button>
-        <button data-km="15">15 km</button>
+        <button data-km="15" class="active">15 km</button>
+        <button data-km="25">25 km</button>
       </div>
-      <span class="hint" id="tierHint">金色框即成品范围</span>
+      <span class="hint" id="tierHint">15 km 细节均衡 · 25 km 城市叙事</span>
     </div>
     <div class="custom-row">
       <input type="text" id="areaName" class="text-input" maxlength="24"
              placeholder="给这段旅途起个名字吧">
       <button class="btn btn-primary" id="btnConfirmArea">✓ 确定，看风格
-        <small>约 1 分钟出 4 种风格图</small></button>
+        <small>首次生成约 8–12 分钟</small></button>
     </div>
     <div class="lock-row" id="lockRow" hidden>
       <span>🔒 取景已锁定（风格图基于此框生成）</span>
@@ -131,9 +169,25 @@
   <section class="card step" id="step4">
     <h2 class="section-title"><span class="step-num">4</span>预览
       <span class="hint" id="glbInfo">确认构图与风格，满意后再出打印文件</span></h2>
+    <fieldset class="profile-picker" id="profilePicker">
+      <legend>生成方式</legend>
+      <label class="profile-option active">
+        <input type="radio" name="generationProfile" value="classic" checked>
+        <span><strong>标准生成</strong><small>适用于所有城市 · 支持快速 3D 预览</small></span>
+      </label>
+      <label class="profile-option">
+        <input type="radio" name="generationProfile" value="quality_flat">
+        <span><strong>精细模型 · 平整街区</strong><small>轮廓清晰克制 · 道路与岸线自然留白</small></span>
+      </label>
+      <label class="profile-option">
+        <input type="radio" name="generationProfile" value="quality_textured">
+        <span><strong>精细模型 · 地块起伏</strong><small>保留不同地块的细微高低变化</small></span>
+      </label>
+      <p class="profile-note" id="profileNote">精细模型暂在“杭州 · 西湖”开放，并直接生成正式模型。</p>
+    </fieldset>
     <div class="actions">
-      <button class="btn btn-primary" id="btnDraft">⚡ 生成预览
-        <small>约 1–2 分钟（2D 图 + 3D 模型）</small></button>
+      <button class="btn btn-primary" id="btnDraft">生成快速预览
+        <small>只取正式画面中心 5 km · 可旋转 3D</small></button>
     </div>
     <div class="preview-2d" id="preview2d" hidden>
       <figure class="p2-item" id="p2Topdown" hidden>
@@ -153,10 +207,10 @@
   <!-- ══ Step 5 · 打印文件 ══ -->
   <section class="card step" id="step5">
     <h2 class="section-title"><span class="step-num">5</span>打印文件
-      <span class="hint">预览满意后再生成，避免白等</span></h2>
+      <span class="hint">正式文件使用完整 15 / 25 km 取景范围</span></h2>
     <div class="actions">
-      <button class="btn btn-primary" id="btnFull">🖨 生成打印模型 3MF
-        <small>约 3–5 分钟</small></button>
+      <button class="btn btn-primary" id="btnFull">生成正式打印文件
+        <small id="fullModeHint">标准生成 · 模型 + 预览图</small></button>
     </div>
     <div class="downloads" id="downloads"></div>
   </section>
@@ -167,6 +221,17 @@
       <span class="pill" id="jobStatus">运行中</span>
       <span class="mono" id="jobElapsed">0s</span>
     </div>
+    <p class="job-stage" id="jobStage">正在准备地图数据</p>
+    <div class="job-progress" id="jobProgress" role="progressbar"
+         aria-label="生成阶段进度（估算）" aria-valuemin="0" aria-valuemax="100"
+         aria-valuenow="0">
+      <span id="jobProgressBar"></span>
+    </div>
+    <div class="job-progress-meta">
+      <span id="jobProgressText">阶段进度（估算）0%</span>
+      <span id="jobEstimate">请耐心等待，页面可以暂时离开</span>
+    </div>
+    <div class="quality-checks" id="qualityChecks" hidden></div>
     <div class="job-token" id="jobTokenRow" hidden>
       <span>任务令牌</span>
       <code class="mono" id="jobToken"></code>
@@ -176,13 +241,52 @@
   </section>
 
   <!-- 找回任务 -->
-  <section class="card">
+  <section class="card task-lookup">
     <div class="custom-row">
       <input type="text" id="jobLookup" class="text-input" placeholder="输入任务令牌或粘贴任务链接，查询进度/结果">
       <button class="btn btn-ghost" id="btnJobLookup">找回任务</button>
     </div>
   </section>
+
+  <section class="card account-jobs" id="myTasksCard" hidden>
+    <div class="section-head">
+      <h2 class="section-title">我的任务 <span class="hint" id="myTasksSummary"></span></h2>
+      <button class="btn-inline" id="btnRefreshTasks" type="button">刷新</button>
+    </div>
+    <div class="my-task-list" id="myTaskList"></div>
+  </section>
 </main>
+
+<dialog class="account-dialog" id="accountDialog">
+  <button class="account-close" id="accountClose" type="button" aria-label="关闭">×</button>
+  <div id="accountLoginView">
+    <p class="account-kicker">YOUR RELIEF ARCHIVE</p>
+    <h2>找回每一段旅程</h2>
+    <p class="account-intro">用邮箱验证码登录。任务、进度与成品会保存在你的账号中，无需记住任务令牌。</p>
+    <label class="account-field">邮箱
+      <input class="text-input" id="authEmail" type="email" autocomplete="email" placeholder="name@example.com">
+    </label>
+    <div class="account-code-row">
+      <label class="account-field">验证码
+        <input class="text-input mono" id="authCode" inputmode="numeric" maxlength="6" autocomplete="one-time-code" placeholder="6 位数字">
+      </label>
+      <button class="btn btn-ghost" id="btnSendCode" type="button">获取验证码</button>
+    </div>
+    <button class="btn btn-primary" id="btnVerifyCode" type="button">登录 / 注册</button>
+    <p class="account-message" id="authMessage"></p>
+  </div>
+  <div id="accountUserView" hidden>
+    <p class="account-kicker">MY STUDIO</p>
+    <h2 id="accountEmail">—</h2>
+    <div class="quota-block">
+      <span>本月可用额度</span>
+      <strong id="accountQuotaLarge">—</strong>
+      <small id="accountQuotaPeriod">按计算量扣除；缓存结果不重复扣费</small>
+    </div>
+    <button class="btn btn-primary" id="btnOpenTasks" type="button">查看我的任务</button>
+    <button class="btn btn-ghost" id="btnLogout" type="button">退出登录</button>
+  </div>
+</dialog>
 
 <!-- 灯箱 -->
 <div class="lightbox" id="lightbox" hidden>
@@ -191,8 +295,8 @@
   <div class="lightbox-cap" id="lightboxCap"></div>
 </div>
 
-<footer class="foot">旅程回忆 · 把走过的路，凝固成独一无二的实体 · <a href="#" onclick="copyMyLink();return false" style="color:var(--accent)">🔗 复制我的链接</a> · <a href="#" onclick="localStorage.removeItem('jr_session');location.href=location.pathname;return false" style="color:var(--ink-dim)">重新开始</a></footer>
+<footer class="foot">旅程浮雕 · 把走过的路，凝固成可以触摸的实体 · <a href="#" onclick="copyMyLink();return false">复制我的链接</a> · <a href="#" onclick="localStorage.removeItem('jr_session');location.href=location.pathname;return false">重新开始</a></footer>
 
-<script src="app.js?v=35"></script>
+<script src="app.js?v=53"></script>
 </body>
 </html>

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 轻量 FastAPI 后端，不 import 重管线（geopandas/trimesh），只做三件事：
 1. 扫描 output/ 下已有产物（画廊、draft GLB、3MF、param_decision）
-2. 以子进程方式触发 generate_city.py（draft / full），异步跟踪任务
+2. 以子进程方式触发 generate_city_legacy.py（通用 draft / full），异步跟踪任务
 3. 托管前端静态页 + 产物文件
 
 启动：python webapp/server.py  （默认 0.0.0.0:8787，手机同局域网可访问）
@@ -13,6 +13,9 @@ import hashlib
 import json
 import math
 import os
+import re
+import secrets
+import smtplib
 import socket
 import subprocess
 import sys
@@ -20,13 +23,15 @@ import threading
 import time
 import uuid
 from pathlib import Path
+from email.message import EmailMessage
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import journey as journey_mod
+from auth_store import AuthError, AuthStore, AuthUser, store_from_env
 
 ROOT = Path(__file__).resolve().parent.parent
 # 以 `python webapp/server.py` 启动时 sys.path[0] 是 webapp/，
@@ -34,13 +39,61 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-OUTPUT_DIR = ROOT / "output"
+OUTPUT_DIR = Path(os.environ.get("STUDIO_OUTPUT_DIR", ROOT / "output"))
 GALLERY_DIR = OUTPUT_DIR / "style_gallery"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
-JOB_LOG_DIR = ROOT / "tmp" / "webapp_jobs"
+SHOWCASE_PLAN_PATH = ROOT / "data" / "showcase_cities.json"
+SHOWCASE_STATUS_PATH = ROOT / "tmp" / "showcase_batch_status.json"
+JOB_LOG_DIR = Path(os.environ.get(
+    "STUDIO_JOB_LOG_DIR", ROOT / "tmp" / "webapp_jobs"))
 JOB_LOG_DIR.mkdir(parents=True, exist_ok=True)
 
-# 与 generate_city.py PRESETS 保持一致（轻量副本，避免 import 重管线）
+AUTH_REQUIRED = os.environ.get("AUTH_REQUIRED", "").lower() in (
+    "1", "true", "yes", "on",
+)
+AUTH_COOKIE_NAME = "studio_session"
+AUTH_COOKIE_SECURE = os.environ.get("AUTH_COOKIE_SECURE", "").lower() in (
+    "1", "true", "yes", "on",
+)
+AUTH_DEV_ECHO_CODE = os.environ.get("AUTH_DEV_ECHO_CODE", "").lower() in (
+    "1", "true", "yes", "on",
+)
+_AUTH_STORE: AuthStore | None = None
+
+
+def _auth_store() -> AuthStore:
+    global _AUTH_STORE
+    if _AUTH_STORE is None:
+        if AUTH_REQUIRED and not os.environ.get("AUTH_SECRET"):
+            raise RuntimeError("AUTH_REQUIRED=1 时必须设置 AUTH_SECRET")
+        _AUTH_STORE = store_from_env(ROOT)
+    return _AUTH_STORE
+
+
+def _current_user(request: Request | None, *, required: bool = False
+                  ) -> AuthUser | None:
+    if request is None:
+        return None
+    token = request.cookies.get(AUTH_COOKIE_NAME, "")
+    user = _auth_store().get_session_user(token)
+    if user is None and (required or AUTH_REQUIRED):
+        raise HTTPException(401, "请先登录")
+    return user
+
+
+def _user_public(user: AuthUser) -> dict:
+    return {
+        "id": user.id,
+        "email": user.email,
+        "role": user.role,
+        "status": user.status,
+        "quota_limit": user.quota_limit,
+        "quota_used": user.quota_used,
+        "quota_remaining": user.quota_remaining,
+        "quota_period": user.quota_period,
+    }
+
+# 与 generate_city_legacy.py PRESETS 保持一致（轻量副本，避免 import 重管线）
 PRESETS = {
     "westlake": {
         "title": "杭州 · 西湖",
@@ -152,11 +205,158 @@ def _state_fields(bbox) -> dict:
 
 app = FastAPI(title="Map Relief Studio")
 
+
+# ---------------------------------------------------------------------------
+# 账号（邮箱验证码；微信 UnionID 使用同一 auth_identities 表后续接入）
+# ---------------------------------------------------------------------------
+
+class EmailCodeStart(BaseModel):
+    email: str
+
+
+class EmailCodeVerify(BaseModel):
+    email: str
+    code: str
+
+
+class AdminUserUpdate(BaseModel):
+    quota_limit: int | None = None
+    status: str | None = None
+
+
+def _send_login_email(email: str, code: str) -> None:
+    host = os.environ.get("SMTP_HOST", "").strip()
+    if not host:
+        if AUTH_DEV_ECHO_CODE:
+            return
+        raise AuthError("邮件服务尚未配置，请联系管理员")
+    port = int(os.environ.get("SMTP_PORT", "465"))
+    username = os.environ.get("SMTP_USERNAME", "")
+    password = os.environ.get("SMTP_PASSWORD", "")
+    sender = os.environ.get("SMTP_FROM", username).strip()
+    if not sender:
+        raise AuthError("邮件发件人尚未配置")
+    message = EmailMessage()
+    message["Subject"] = "旅程浮雕登录验证码"
+    message["From"] = sender
+    message["To"] = email
+    message.set_content(
+        f"你的登录验证码是：{code}\n\n验证码 10 分钟内有效。"
+        "如果不是你本人操作，请忽略此邮件。\n",
+    )
+    use_ssl = os.environ.get("SMTP_SSL", "1").lower() in (
+        "1", "true", "yes", "on",
+    )
+    smtp_cls = smtplib.SMTP_SSL if use_ssl else smtplib.SMTP
+    try:
+        with smtp_cls(host, port, timeout=15) as smtp:
+            if not use_ssl and os.environ.get("SMTP_STARTTLS", "1").lower() in (
+                    "1", "true", "yes", "on"):
+                smtp.starttls()
+            if username:
+                smtp.login(username, password)
+            smtp.send_message(message)
+    except (OSError, smtplib.SMTPException) as exc:
+        raise AuthError("验证码邮件发送失败，请稍后重试") from exc
+
+
+@app.get("/api/auth/config")
+def api_auth_config():
+    return {
+        "required": AUTH_REQUIRED,
+        "email_enabled": bool(os.environ.get("SMTP_HOST")) or
+                         AUTH_DEV_ECHO_CODE,
+        "wechat_enabled": bool(os.environ.get("WECHAT_APP_ID")),
+    }
+
+
+@app.post("/api/auth/email/start")
+def api_auth_email_start(req: EmailCodeStart):
+    try:
+        email = _auth_store().normalize_email(req.email)
+        code = f"{secrets.randbelow(1_000_000):06d}"
+        _auth_store().request_email_code(email, code)
+        _send_login_email(email, code)
+    except AuthError as exc:
+        raise HTTPException(429 if "频繁" in str(exc) else 503, str(exc))
+    result = {"ok": True, "message": "验证码已发送，请检查邮箱"}
+    if AUTH_DEV_ECHO_CODE:
+        result["dev_code"] = code
+    return result
+
+
+@app.post("/api/auth/email/verify")
+def api_auth_email_verify(req: EmailCodeVerify, response: Response):
+    try:
+        user, token = _auth_store().verify_email_code(req.email, req.code)
+    except AuthError as exc:
+        raise HTTPException(400, str(exc))
+    response.set_cookie(
+        AUTH_COOKIE_NAME, token, max_age=30 * 86400,
+        httponly=True, secure=AUTH_COOKIE_SECURE, samesite="lax", path="/",
+    )
+    return {"ok": True, "user": _user_public(user)}
+
+
+@app.get("/api/auth/me")
+def api_auth_me(request: Request):
+    user = _current_user(request)
+    return {"authenticated": user is not None,
+            "user": _user_public(user) if user else None}
+
+
+@app.post("/api/auth/logout")
+def api_auth_logout(request: Request, response: Response):
+    token = request.cookies.get(AUTH_COOKIE_NAME, "")
+    _auth_store().revoke_session(token)
+    response.delete_cookie(AUTH_COOKIE_NAME, path="/")
+    return {"ok": True}
+
+
+def _admin_user(request: Request) -> AuthUser:
+    user = _current_user(request, required=True)
+    if user is None or user.role != "admin":
+        raise HTTPException(403, "需要管理员账号")
+    return user
+
+
+@app.get("/api/admin/users")
+def api_admin_users(request: Request):
+    _admin_user(request)
+    with JOBS_LOCK:
+        jobs = list(JOBS.values())
+    rows = []
+    for user in _auth_store().list_users():
+        row = _user_public(user)
+        owned = [job for job in jobs
+                 if user.id in (job.get("owner_ids") or [])]
+        row["job_count"] = len(owned)
+        row["active_jobs"] = sum(
+            job.get("status") in _ACTIVE_JOB_STATUSES for job in owned)
+        rows.append(row)
+    return {"users": rows}
+
+
+@app.patch("/api/admin/users/{user_id}")
+def api_admin_user_update(user_id: str, req: AdminUserUpdate,
+                          request: Request):
+    admin = _admin_user(request)
+    if user_id == admin.id and req.status == "paused":
+        raise HTTPException(400, "不能暂停当前管理员账号")
+    try:
+        user = _auth_store().update_user_controls(
+            user_id, quota_limit=req.quota_limit, status=req.status)
+    except AuthError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"user": _user_public(user)}
+
 # ---------------------------------------------------------------------------
 # 任务管理（内存态，单机自用足够）
 # ---------------------------------------------------------------------------
 JOBS: dict = {}
 JOBS_LOCK = threading.Lock()
+JOB_SUBMIT_LOCK = threading.Lock()
+_ACTIVE_JOB_STATUSES = {"starting", "pending", "running"}
 
 
 class CustomArea(BaseModel):
@@ -168,8 +368,38 @@ class GenerateRequest(BaseModel):
     city: str = ""
     mode: str = "draft"  # draft | full
     style: str | None = None  # 画廊风格名（可选，带参生成）
+    generation_profile: str = "classic"
     area: CustomArea | None = None    # 自定义区域（与 city 二选一）
     markers: list[list[float]] = []   # [[lat, lon], ...] 标注点（附近最高处染红）
+    gallery_slug: str = ""            # 风格画廊身份；防止找回任务后区域串线
+
+
+# 产品端固定打印底层：改变该值必然让 GLB/3MF 全部重算，
+# 不作为用户参数也避免同一区域产生无意义的缓存分叉。
+PRODUCT_BASE_THICKNESS_MM = 0.4
+PRODUCT_PREVIEW_SIZE_KM = 5.0
+
+
+GENERATION_PROFILES = {
+    "classic": {
+        "label": "标准生成",
+        "description": "适用于所有区域，可先生成快速 3D 预览。",
+        "scope": "all",
+        "draft": True,
+    },
+    "quality_flat": {
+        "label": "精细模型 · 平整街区",
+        "description": "街区轮廓清晰克制，并与道路、岸线保持自然留白。",
+        "scope": "westlake",
+        "draft": False,
+    },
+    "quality_textured": {
+        "label": "精细模型 · 地块起伏",
+        "description": "保留不同地块的细微高低变化，触感更丰富。",
+        "scope": "westlake",
+        "draft": False,
+    },
+}
 
 
 # 面向用户的异常分类：内部日志不外露，失败时只返回其中一类
@@ -218,6 +448,149 @@ def _classify_job_error(job: dict, retcode: int) -> tuple:
     return _classify_error_text(tail, retcode)
 
 
+def _read_job_log_tail(job: dict, max_bytes: int = 20_000) -> str:
+    try:
+        with open(job["log_path"], "r", encoding="utf-8",
+                  errors="replace") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - max_bytes))
+            return f.read()
+    except OSError:
+        return ""
+
+
+def _job_progress(job: dict, log_tail: str) -> tuple[int, str]:
+    """Estimate coarse progress from real pipeline markers.
+
+    Percentages deliberately move in broad stages: they communicate that the
+    process is alive without pretending we can measure geometry work exactly.
+    """
+    status = job.get("status")
+    if status in ("starting", "pending"):
+        return 2, "等待计算节点开始处理"
+    if status == "done":
+        label = ("风格方案已经生成" if job.get("mode") == "styles"
+                 else "模型与交付文件已经生成")
+        return 100, label
+    if status == "failed":
+        return int(job.get("progress_pct", 0)), "生成未完成"
+
+    if job.get("fast_draft"):
+        stages = (
+            ("[glb] exported:", 97, "正在整理可旋转预览"),
+            ("[postcheck] PASS", 92, "正在检查图层与地形接触关系"),
+            ("[glb] block_base:", 76, "正在构建轻量 3D 图层"),
+            ("[cache HIT] preprocess", 62, "已复用风格图层，准备 3D 预览"),
+            ("[fast-draft] reopening", 18, "正在载入刚才选定的风格数据"),
+        )
+    elif job.get("mode") == "styles":
+        stages = (
+            ("contact sheet:", 98, "正在整理四种风格方案"),
+            ("/minimal]", 97, "四种风格已经渲染完成"),
+            ("/dense_detail]", 95, "正在渲染第 4 种风格"),
+            ("/block_fill]", 92, "正在渲染第 3 种风格"),
+            ("/baseline]", 89, "正在渲染第 2 种风格"),
+            ("[harness] prepared", 86, "正在渲染第 1 种风格"),
+            ("[Tile Cache] vegetation:", 64, "正在提取绿地与地表信息"),
+            ("[Tile Cache] water:", 44, "正在提取湖泊与河流信息"),
+            ("[Tile Cache] road:", 25, "正在提取道路网络"),
+            ("[Tile Cache] building:", 8, "正在提取建筑与街区"),
+            ("[area-gallery]", 4, "正在准备所选区域的地图数据"),
+        )
+    else:
+        stages = (
+            ("Exported:", 97, "正在整理与验证交付文件"),
+            ("[Stage 5", 90, "正在构建可打印模型几何"),
+            ("[Stage 4.8]", 83, "正在生成可旋转 3D 预览"),
+            ("[Stage 4.65]", 76, "正在渲染高清俯视图"),
+            ("[Stage 4.6]", 70, "正在渲染图层诊断图"),
+            ("[Stage 4.5]", 62, "正在整理道路、建筑与水体图层"),
+            ("[Stage 4]", 50, "正在构建地形与水体结构"),
+            ("[Stage 3", 35, "正在读取城市地图要素"),
+            ("[Stage 2", 20, "正在提取区域地图数据"),
+            ("[Stage 1", 10, "正在准备高程数据"),
+        )
+    for marker, progress, label in stages:
+        if marker in log_tail:
+            return progress, label
+    return 3, "正在准备地图与高程数据"
+
+
+def _job_stage_label(job: dict, log_tail: str) -> str:
+    return _job_progress(job, log_tail)[1]
+
+
+def _job_duration_hint(job: dict) -> str:
+    if job.get("mode") == "styles":
+        bbox = job.get("bbox") or []
+        if len(bbox) == 4:
+            south, west, north, east = bbox
+            mid_lat = math.radians((south + north) / 2.0)
+            area_km2 = ((north - south) * 111.32 *
+                        (east - west) * 111.32 * math.cos(mid_lat))
+            if area_km2 >= 100:
+                return "大范围首次生成通常需要 20–40 分钟；相同区域会直接复用"
+            if area_km2 >= 50:
+                return "较大范围首次生成通常需要 12–25 分钟；相同区域会直接复用"
+        return "首次生成通常需要 8–15 分钟；相同区域会直接复用"
+    if job.get("mode") == "draft":
+        if job.get("fast_draft"):
+            return "复用风格数据后通常约 1–3 分钟；复杂山水区域可能更久"
+        return "通常需要 5–15 分钟"
+    if job.get("generation_profile") in ("quality_flat", "quality_textured"):
+        return "精细模型通常需要 20–45 分钟"
+    return "正式模型通常需要 15–40 分钟"
+
+
+def _job_quality_warnings(log_tail: str) -> list[str]:
+    warnings = []
+    if "WL=0 WO=0" in log_tail:
+        warnings.append("生成日志中的主要水体与普通水体数量均为 0，请核对源数据和预览")
+    if "roads=0" in log_tail or "Roads: None" in log_tail:
+        warnings.append("生成日志中的道路数量为 0，请核对源数据和预览")
+    return warnings
+
+
+def _job_quality_checks(log_tail: str) -> list[dict]:
+    """把日志里的多源证据整理成前端可展示的验收项。
+
+    这里只报告已经发生的检查，不把缺少第三方地图凭据误报成失败。
+    """
+    checks = []
+    layer_match = re.search(r"WL=(\d+)\s+WO=(\d+).*?roads=(\d+)", log_tail)
+    if layer_match:
+        wl, wo, roads = (int(value) for value in layer_match.groups())
+        checks.append({
+            "id": "source_features",
+            "label": "源数据结构层",
+            "status": "pass" if (wl + wo > 0 and roads > 0) else "warning",
+            "detail": f"水体 {wl + wo} · 道路 {roads}",
+        })
+
+    satellite_match = re.search(
+        r"\[glb\] water: \+(\d+) satellite polys", log_tail)
+    gaode_match = re.search(
+        r"\[water_supplement\] \+(\d+) Gaode supplement polygons", log_tail)
+    supplement = satellite_match or gaode_match
+    if supplement:
+        checks.append({
+            "id": "secondary_map",
+            "label": "第二地图源补强",
+            "status": "pass",
+            "detail": f"补入 {int(supplement.group(1))} 个水体面",
+        })
+
+    if "[postcheck] PASS" in log_tail or "[glb postcheck] PASS" in log_tail:
+        checks.append({
+            "id": "grounding",
+            "label": "图层落地检查",
+            "status": "pass",
+            "detail": "道路、水体与地形接触关系通过",
+        })
+    return checks
+
+
 def _job_public(job: dict, include_log: bool = False) -> dict:
     """任务对外视图（去掉 proc 等内部字段）。
 
@@ -225,31 +598,58 @@ def _job_public(job: dict, include_log: bool = False) -> dict:
     失败时返回分类后的 error_code/error_msg，不返回原始日志。
     """
     elapsed = (job.get("ended") or time.time()) - job["started"]
+    public_status = "pending" if job["status"] == "starting" else job["status"]
     out = {
         "id": job["id"],
         "city": job["city"],
         "city_title": job.get("city_title") or job["city"],
         "mode": job["mode"],
         "style": job.get("style"),
-        "status": job["status"],
+        "generation_profile": job.get("generation_profile", "classic"),
+        "status": public_status,
         "elapsed_s": round(elapsed, 1),
     }
+    if job.get("quota_cost"):
+        out["quota_cost"] = int(job["quota_cost"])
+    if job.get("status") == "pending":
+        pending = sorted(
+            (item for item in list(JOBS.values())
+             if item.get("status") == "pending"),
+            key=lambda item: (item.get("queued_at", item.get("started", 0)),
+                              item.get("id", "")),
+        )
+        out["queue_position"] = next(
+            (index for index, item in enumerate(pending, 1)
+             if item.get("id") == job.get("id")), 1,
+        )
+    bbox = job.get("bbox")
+    if (isinstance(bbox, (list, tuple)) and len(bbox) == 4 and
+            all(isinstance(value, (int, float)) for value in bbox)):
+        # 找回风格任务时，前端必须恢复生成画廊时的原始取景框。
+        out["bbox"] = list(bbox)
+    if job.get("prototype"):
+        out["prototype"] = job["prototype"]
+    preview_bbox = job.get("preview_bbox")
+    if isinstance(preview_bbox, (list, tuple)) and len(preview_bbox) == 4:
+        out["preview_bbox"] = list(preview_bbox)
+        out["preview_size_km"] = PRODUCT_PREVIEW_SIZE_KM
+    log_tail = _read_job_log_tail(job)
+    progress_pct, stage_label = _job_progress(job, log_tail)
+    out["stage_label"] = stage_label
+    out["progress_pct"] = progress_pct
+    out["duration_hint"] = _job_duration_hint(job)
+    quality_warnings = _job_quality_warnings(log_tail)
+    if quality_warnings:
+        out["quality_warnings"] = quality_warnings
+    quality_checks = _job_quality_checks(log_tail)
+    if quality_checks:
+        out["quality_checks"] = quality_checks
     if job["status"] == "failed":
         out["error_code"] = job.get("error_code", "render_failed")
         out["error_msg"] = job.get("error_msg",
                                    ERROR_CATEGORIES["render_failed"])
     if include_log:
-        tail = ""
-        try:
-            with open(job["log_path"], "r", encoding="utf-8",
-                      errors="replace") as f:
-                f.seek(0, os.SEEK_END)
-                size = f.tell()
-                f.seek(max(0, size - 4000))
-                tail = f.read()
-        except OSError:
-            pass
-        out["log_tail"] = tail
+        out["log_tail"] = log_tail[-4000:]
     return out
 
 
@@ -279,6 +679,7 @@ def _watch_job(job: dict):
         job["status"] = "done" if ok else "failed"
         if not ok:
             job["error_code"], job["error_msg"] = _classify_job_error(job, ret)
+            _refund_job_quota(job)
         _save_jobs()
 
 
@@ -288,8 +689,156 @@ _COVERAGE_STATE_DIRTY = threading.Event()
 
 def _city_running(city: str) -> bool:
     with JOBS_LOCK:
-        return any(j["city"] == city and j["status"] == "running"
+        return any(j["city"] == city and
+                   j["status"] in _ACTIVE_JOB_STATUSES
                    for j in JOBS.values())
+
+
+def _request_key(kind: str, payload: dict) -> str:
+    """Return a stable identity for one shareable generation request."""
+    raw = json.dumps({"kind": kind, **payload}, ensure_ascii=False,
+                     sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
+
+
+def _job_artifacts_available(job: dict) -> bool:
+    """Only reuse a completed job while its expected output still exists."""
+    city = job["city"]
+    if job.get("mode") == "styles":
+        return bool(_load_gallery(city))
+    artifacts = _scan_artifacts(city)
+    if job.get("mode") == "draft":
+        return bool(artifacts["draft_glb"] or artifacts["preview_png"])
+    return bool(artifacts["models_3mf"])
+
+
+def _bbox_side_km(bbox: list[float] | tuple[float, ...]) -> float:
+    """Approximate the longest bbox side for predictable quota pricing."""
+    south, west, north, east = bbox
+    mid_lat = math.radians((south + north) / 2.0)
+    north_south = abs(north - south) * 110.574
+    east_west = abs(east - west) * 111.320 * max(0.01, math.cos(mid_lat))
+    return max(north_south, east_west)
+
+
+def _centered_square_bbox(bbox: list[float] | tuple[float, ...],
+                          size_km: float) -> list[float]:
+    """Return a physical square centred on bbox, independent of latitude."""
+    south, west, north, east = bbox
+    lat = (south + north) / 2.0
+    lon = (west + east) / 2.0
+    half_lat = size_km / 2.0 / 110.574
+    half_lon = size_km / 2.0 / (
+        111.320 * max(0.2, math.cos(math.radians(lat))))
+    return [round(lat - half_lat, 7), round(lon - half_lon, 7),
+            round(lat + half_lat, 7), round(lon + half_lon, 7)]
+
+
+def _quota_cost(mode: str, bbox: list[float] | tuple[float, ...]) -> int:
+    """Return coarse compute credits: task kind × each started 10 km."""
+    base = {"draft": 1, "styles": 2, "full": 5}.get(mode, 0)
+    if base == 0:
+        return 0
+    size_band = max(1, math.ceil(_bbox_side_km(bbox) / 10.0))
+    return base * size_band
+
+
+def _attach_job_account(job: dict, user: AuthUser | None,
+                        bbox: list[float] | tuple[float, ...]) -> None:
+    if user is None:
+        return
+    job["owner_ids"] = [user.id]
+    job["quota_payer_id"] = user.id
+    job["quota_cost"] = _quota_cost(job.get("mode", ""), bbox)
+
+
+def _refund_job_quota(job: dict) -> None:
+    """Refund a genuinely failed task once; cached/reused tasks were not billed."""
+    payer = job.get("quota_payer_id")
+    amount = int(job.get("quota_cost") or 0)
+    if not payer or amount <= 0 or job.get("quota_refunded"):
+        return
+    _auth_store().refund_quota(payer, job["id"])
+    job["quota_refunded"] = True
+
+
+def _share_job_with_owner(existing: dict, incoming: dict) -> bool:
+    """Attach an identical shared result to another account without rebilling."""
+    incoming_owners = incoming.get("owner_ids") or []
+    if not incoming_owners:
+        return False
+    owners = existing.setdefault("owner_ids", [])
+    changed = False
+    for owner_id in incoming_owners:
+        if owner_id not in owners:
+            owners.append(owner_id)
+            changed = True
+    return changed
+
+
+def _claim_or_reuse_job(job: dict) -> tuple[dict, bool, bool]:
+    """Atomically claim a city output slot or reuse an identical request.
+
+    Returns ``(job, reused, cached)``. Identical concurrent callers share one
+    job id; an identical completed request is returned from disk. A different
+    request for the same output directory must wait so two processes cannot
+    overwrite each other's artifacts.
+    """
+    city = job["city"]
+    request_key = job["request_key"]
+    output_group = "styles" if job.get("mode") == "styles" else "model"
+    with JOB_SUBMIT_LOCK:
+        with JOBS_LOCK:
+            city_jobs = sorted(
+                (existing for existing in JOBS.values()
+                 if existing.get("city") == city and
+                 ("styles" if existing.get("mode") == "styles" else
+                  "model") == output_group),
+                key=lambda existing: existing.get("started", 0),
+                reverse=True,
+            )
+            active = next(
+                (existing for existing in city_jobs
+                 if existing.get("status") in _ACTIVE_JOB_STATUSES),
+                None,
+            )
+            if active is not None:
+                if active.get("request_key") == request_key:
+                    if _share_job_with_owner(active, job):
+                        _save_jobs()
+                    return active, True, False
+                raise HTTPException(
+                    409, "该区域正在使用另一组参数生成，请等待当前任务完成",
+                )
+
+            latest_done = next(
+                (existing for existing in city_jobs
+                 if existing.get("status") == "done"),
+                None,
+            )
+            if (latest_done is not None and
+                    latest_done.get("request_key") == request_key and
+                    _job_artifacts_available(latest_done)):
+                if _share_job_with_owner(latest_done, job):
+                    _save_jobs()
+                return latest_done, True, True
+
+            payer = job.get("quota_payer_id")
+            amount = int(job.get("quota_cost") or 0)
+            if payer and amount > 0:
+                try:
+                    _auth_store().reserve_quota(payer, job["id"], amount)
+                except AuthError as exc:
+                    raise HTTPException(429, str(exc)) from exc
+            try:
+                JOBS[job["id"]] = job
+                _save_jobs()
+            except Exception:
+                JOBS.pop(job["id"], None)
+                if payer and amount > 0:
+                    _auth_store().refund_quota(payer, job["id"])
+                raise
+    return job, False, False
 
 
 def _fetch_running(region: str) -> bool:
@@ -318,8 +867,10 @@ def _env(name: str, default: str = "") -> str:
 
 WORKER_MODE = _env("WORKER_MODE") in ("1", "true", "yes", "on")
 WORKER_TOKEN = _env("WORKER_TOKEN")
+WORKER_LEASE_SECONDS = max(30, int(_env("WORKER_LEASE_SECONDS", "90")))
 JOBS_PATH = JOB_LOG_DIR / "_jobs.json"
 _SKIP_SERIALIZE = {"proc", "fetch_paths"}   # 运行时对象/本地路径，不入库
+_LAST_WORKER_OWNER: str | None = None
 
 
 def _serialize_job(job: dict) -> dict:
@@ -341,19 +892,21 @@ def _save_jobs():
 
 
 def _load_jobs():
-    """启动恢复任务表。proc 无法恢复：
-    worker 模式 running → pending（重派，产物覆盖式幂等）；
-    local 模式 running → failed（子进程随重启消失）。"""
+    """Restore jobs without duplicating a worker whose lease is still live."""
     if not JOBS_PATH.exists():
         return
     try:
         data = json.loads(JOBS_PATH.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return
+    now = time.time()
     for jid, j in data.items():
-        if j.get("status") == "running":
+        if j.get("status") in ("starting", "running"):
             if j.get("exec") == "worker":
-                j["status"] = "pending"
+                if float(j.get("lease_expires") or 0) <= now:
+                    j["status"] = "pending"
+                    j.pop("worker_id", None)
+                    j.pop("lease_expires", None)
             else:
                 j["status"] = "failed"
                 j["ended"] = time.time()
@@ -379,7 +932,7 @@ def _scan_artifacts(city: str) -> dict:
     d = OUTPUT_DIR / city
     art = {"models_3mf": [], "draft_glb": None, "preview_png": None,
            "topdown_png": None, "height_png": None,
-           "param_decision": None}
+           "param_decision": None, "design_spec": None}
     if not d.is_dir():
         return art
     for p in sorted(d.glob("*.3mf"), key=lambda p: p.stat().st_mtime,
@@ -422,6 +975,12 @@ def _scan_artifacts(city: str) -> dict:
             art["param_decision"] = json.loads(pd.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             pass
+    ds = d / "design_spec.json"
+    if ds.exists():
+        art["design_spec"] = {
+            "url": f"/files/{city}/{ds.name}",
+            "name": ds.name,
+        }
     return art
 
 
@@ -439,6 +998,65 @@ def _load_gallery(city: str):
         style["images"] = {k: f"{base}/{v}" for k, v in renders.items()}
     meta["contact_sheet_url"] = f"{base}/{meta.get('contact_sheet', '')}"
     return meta
+
+
+_SHOWCASE_VERIFY_CACHE: dict[str, tuple[object, bool]] = {}
+_SHOWCASE_REQUIRED_STYLES = (
+    "baseline", "block_fill", "dense_detail", "minimal",
+)
+
+
+def _showcase_output_verified(slug: str, meta: dict,
+                              expected_area: float) -> bool:
+    """Cheap cached gate preventing false-success galleries reaching hero UI."""
+    profile = meta.get("profile", {})
+    area_km2 = float(profile.get("area_km2") or 0)
+    if not expected_area * 0.88 <= area_km2 <= expected_area * 1.12:
+        return False
+    feature_total = sum(float(profile.get(key) or 0) for key in (
+        "building_density", "road_density_km_per_km2", "water_ratio"))
+    if feature_total <= 0:
+        return False
+
+    gallery = GALLERY_DIR / slug
+    meta_path = gallery / "gallery_metadata.json"
+    paths = []
+    try:
+        for style in _SHOWCASE_REQUIRED_STYLES:
+            filename = (meta.get("styles", {}).get(style, {})
+                        .get("renders", {}).get("topdown"))
+            path = gallery / str(filename or "")
+            if not filename or not path.is_file():
+                return False
+            paths.append(path)
+        stamp = (meta_path.stat().st_mtime_ns, tuple(
+            (path.name, path.stat().st_size, path.stat().st_mtime_ns)
+            for path in paths))
+    except OSError:
+        return False
+    cached = _SHOWCASE_VERIFY_CACHE.get(slug)
+    if cached and cached[0] == stamp:
+        return cached[1]
+
+    try:
+        from PIL import Image, ImageStat
+        hashes = set()
+        visually_valid = True
+        for path in paths:
+            digest = hashlib.sha256()
+            with path.open("rb") as source:
+                for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            hashes.add(digest.hexdigest())
+            with Image.open(path) as image:
+                thumb = image.convert("L").resize((64, 64))
+                visually_valid = visually_valid and (
+                    ImageStat.Stat(thumb).stddev[0] >= 2.0)
+        verified = visually_valid and len(hashes) >= 2
+    except (OSError, ValueError):
+        verified = False
+    _SHOWCASE_VERIFY_CACHE[slug] = (stamp, verified)
+    return verified
 
 
 # ---------------------------------------------------------------------------
@@ -540,6 +1158,91 @@ def api_cities():
             "group": info.get("country", ""),
         })
     return {"cities": cities}
+
+
+@app.get("/api/showcase")
+def api_showcase():
+    """Return curated 25 km work and completed, verified 15 km samples."""
+    style_labels = {
+        "baseline": "STANDARD",
+        "block_fill": "BLOCK FILL",
+        "dense_detail": "DENSE DETAIL",
+        "minimal": "MINIMAL",
+    }
+    samples = []
+    try:
+        plan = json.loads(SHOWCASE_PLAN_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        plan = {"size_km": 15, "cities": []}
+    size_km = int(plan.get("size_km") or 15)
+    expected_area = size_km * size_km
+    for city in plan.get("cities", []):
+        if not city.get("featured", False):
+            continue
+        static_asset = city.get("static_asset")
+        if static_asset:
+            path = STATIC_DIR / "assets" / Path(static_asset).name
+            if path.is_file():
+                city_size = int(city.get("size_km") or size_km)
+                samples.append({
+                    "title": city.get("caption") or city.get("title"),
+                    "location": city.get("location", "HANGZHOU / WEST LAKE"),
+                    "kind": f"真实 {city_size} × {city_size} KM 输出",
+                    "alt": (f"真实生成的{city.get('title', '')} "
+                            f"{city_size} 公里乘 {city_size} 公里风格图"),
+                    "size_km": city_size,
+                    "url": f"/assets/{path.name}",
+                })
+            continue
+        slug = city.get("slug", "")
+        meta = _load_gallery(slug)
+        if not meta:
+            continue
+        if not _showcase_output_verified(slug, meta, expected_area):
+            continue
+        styles = [city.get("hero_style", "baseline")]
+        styles.extend(city.get("extra_hero_styles", []))
+        for style in styles:
+            filename = (meta.get("styles", {}).get(style, {})
+                        .get("renders", {}).get("topdown"))
+            path = GALLERY_DIR / slug / str(filename or "")
+            if not filename or not path.is_file():
+                continue
+            label = style_labels.get(style, style.upper())
+            title = city.get("caption") or city.get("title") or slug
+            if style != city.get("hero_style"):
+                title = f"{city.get('title', title)} · {label.title()}"
+            samples.append({
+                "title": title,
+                "location": f"{city.get('key', slug).replace('_', ' ').upper()} / {label}",
+                "kind": "真实 15 × 15 KM 输出",
+                "alt": f"真实生成的{city.get('title', title)} 15 公里乘 15 公里{label}风格图",
+                "size_km": size_km,
+                "url": f"/files/style_gallery/{slug}/{filename}",
+            })
+    return {"samples": samples}
+
+
+@app.get("/api/showcase/status")
+def api_showcase_status():
+    """Expose overnight sample progress without leaking worker internals."""
+    try:
+        plan = json.loads(SHOWCASE_PLAN_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        plan = {"cities": []}
+    try:
+        batch = json.loads(SHOWCASE_STATUS_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        batch = {"state": "not_started"}
+    completed = 0
+    for city in plan.get("cities", []):
+        meta = _load_gallery(city.get("slug", ""))
+        style = city.get("hero_style", "baseline")
+        if (meta and meta.get("styles", {}).get(style, {})
+                .get("renders", {}).get("topdown")):
+            completed += 1
+    return {"planned": len(plan.get("cities", [])),
+            "completed": completed, "batch": batch}
 
 
 @app.get("/api/gallery/{city}")
@@ -847,13 +1550,14 @@ class StylesRequest(BaseModel):
 
 
 @app.post("/api/styles")
-def api_styles(req: StylesRequest):
+def api_styles(req: StylesRequest, request: Request = None):
     """为任意区域生成风格画廊（4 种风格的 2D 图）。
 
     实测 10km 见方 ≈ 49s 出 4 张（每张 7–8s + 一次 prepare）。
     同 bbox 命中 PipelineCache 后更快。
     """
     bbox = req.bbox
+    user = _current_user(request, required=AUTH_REQUIRED)
     if len(bbox) != 4:
         raise HTTPException(400, "bbox 需为 [south, west, north, east]")
     s, w, n, e = bbox
@@ -866,9 +1570,10 @@ def api_styles(req: StylesRequest):
         raise HTTPException(422, "该区域即将开放，敬请期待")
 
     slug = req.slug.strip() if req.slug.strip() else _custom_slug(bbox)
-    if _city_running(slug):
-        raise HTTPException(409, "该区域正在处理中")
-
+    request_key = _request_key("styles", {
+        "bbox": [round(value, 7) for value in bbox],
+        "prototype": req.prototype,
+    })
     job_id = uuid.uuid4().hex[:8]
     log_path = JOB_LOG_DIR / f"{job_id}_styles_{slug}.log"
     cmd = [sys.executable, "tools/gen_area_gallery.py",
@@ -879,36 +1584,61 @@ def api_styles(req: StylesRequest):
 
     env = os.environ.copy()
     env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUNBUFFERED"] = "1"
     env["PATH"] = str(ROOT / "tools") + os.pathsep + env.get("PATH", "")
 
     if WORKER_MODE:
         job = {"id": job_id, "city": slug,
                "city_title": req.name.strip() or "自定义区域",
                "mode": "styles", "style": None, "exec": "worker",
+               "request_key": request_key, "prototype": req.prototype,
+               "bbox": bbox,
                "log_path": str(log_path), "status": "pending",
-               "started": time.time(), "ended": None,
+               "started": time.time(), "queued_at": time.time(), "ended": None,
                "spec": {"cmd": cmd, "cwd": str(ROOT), "env_extra": {
                    "PYTHONIOENCODING": "utf-8",
+                   "PYTHONUNBUFFERED": "1",
                    "PATH": env["PATH"]}}}
-        with JOBS_LOCK:
-            JOBS[job_id] = job
-            _save_jobs()
-        return {"job_id": job_id, "slug": slug, "queued": True}
+        _attach_job_account(job, user, bbox)
+        claimed, reused, cached = _claim_or_reuse_job(job)
+        return {"job_id": claimed["id"], "slug": slug,
+                "queued": claimed["status"] == "pending",
+                "reused": reused, "cached": cached}
 
-    log_f = open(log_path, "w", encoding="utf-8")
-    proc = subprocess.Popen(cmd, cwd=str(ROOT), stdout=log_f,
-                            stderr=subprocess.STDOUT, env=env)
     job = {"id": job_id, "city": slug,
            "city_title": req.name.strip() or "自定义区域",
            "mode": "styles", "style": None, "exec": "local",
-           "proc": proc,
-           "log_path": str(log_path), "status": "running",
+           "request_key": request_key, "prototype": req.prototype,
+           "bbox": bbox,
+           "log_path": str(log_path), "status": "starting",
            "started": time.time(), "ended": None}
+    _attach_job_account(job, user, bbox)
+    claimed, reused, cached = _claim_or_reuse_job(job)
+    if reused:
+        return {"job_id": claimed["id"], "slug": slug,
+                "queued": claimed["status"] in ("starting", "pending"),
+                "reused": True, "cached": cached}
+
+    try:
+        with open(log_path, "w", encoding="utf-8") as log_f:
+            proc = subprocess.Popen(cmd, cwd=str(ROOT), stdout=log_f,
+                                    stderr=subprocess.STDOUT, env=env)
+    except (OSError, subprocess.SubprocessError):
+        with JOBS_LOCK:
+            job["status"] = "failed"
+            job["ended"] = time.time()
+            job["error_code"] = "render_failed"
+            job["error_msg"] = "生成任务无法启动，请稍后重试"
+            _refund_job_quota(job)
+            _save_jobs()
+        raise HTTPException(500, "生成任务无法启动，请稍后重试")
     with JOBS_LOCK:
-        JOBS[job_id] = job
+        job["proc"] = proc
+        job["status"] = "running"
         _save_jobs()
     threading.Thread(target=_watch_job, args=(job,), daemon=True).start()
-    return {"job_id": job_id, "slug": slug}
+    return {"job_id": job_id, "slug": slug,
+            "reused": False, "cached": False}
 
 
 @app.get("/api/geocode")
@@ -955,13 +1685,44 @@ def api_geocode(q: str = "", near_lat: float | None = None,
 
 
 @app.post("/api/generate")
-def api_generate(req: GenerateRequest):
+def api_generate(req: GenerateRequest, request: Request = None):
+    user = _current_user(request, required=AUTH_REQUIRED)
     if req.mode not in ("draft", "full"):
         raise HTTPException(400, f"未知模式: {req.mode}")
+    profile = req.generation_profile.strip() or "classic"
+    if profile not in GENERATION_PROFILES:
+        raise HTTPException(400, f"未知生成方式: {profile}")
+
+    quality_profile = profile in ("quality_flat", "quality_textured")
+    fast_draft_context = None
+    source_bbox = None
+    if quality_profile:
+        if req.area is not None or req.city != "westlake":
+            raise HTTPException(400, "精细模型目前只支持‘杭州 · 西湖’预设")
+        if req.mode != "full":
+            raise HTTPException(400, "精细模型直接生成正式文件，不提供快速预览")
+        if req.style:
+            raise HTTPException(400, "精细模型使用已验证的固定视觉参数，不叠加画廊风格")
+
+        block_mode = "flat" if profile == "quality_flat" else "textured"
+        city = f"westlake_{profile}"
+        city_title = f"杭州 · 西湖（{GENERATION_PROFILES[profile]['label']}）"
+        quota_bbox = PRESETS["westlake"]["bbox"]
+        source_bbox = quota_bbox
+        base_cmd = [
+            sys.executable, "generate_city.py",
+            "--city", city,
+            "--output-dir", str(OUTPUT_DIR / city),
+            "--block-base-mode", block_mode,
+            "--block-base-edge-retreat-mm", "2",
+            "--png", "--review-png",
+        ]
 
     # ── 目标解析：预设城市 / 景点目录 / 自定义区域 ──
-    if req.area is not None:
+    elif req.area is not None:
         bbox = req.area.bbox
+        quota_bbox = bbox
+        source_bbox = bbox
         if len(bbox) != 4:
             raise HTTPException(400, "bbox 需为 [south, west, north, east]")
         s, w, n, e = bbox
@@ -971,15 +1732,22 @@ def api_generate(req: GenerateRequest):
             raise HTTPException(400, "区域太小（每边至少约 0.5km）")
         if (n - s) > 0.4 or (e - w) > 0.5:
             raise HTTPException(400, "区域太大（建议单边不超过约 40km）")
+        city = _custom_slug(bbox)
+        gallery_slug = req.gallery_slug.strip()
+        if gallery_slug and gallery_slug != city:
+            raise HTTPException(
+                409,
+                "风格图与当前取景不是同一区域，请重新找回任务或确认位置",
+            )
         st = _pbf_status(bbox)
         if st["state"] == "fetchable":
             raise HTTPException(409, "该区域数据正在准备中，敬请期待")
         if st["state"] == "none":
             raise HTTPException(422, "该区域即将开放，敬请期待")
         pbf = st["pbf"]
-        city = _custom_slug(bbox)
         city_title = req.area.name.strip() or "自定义区域"
-        base_cmd = [sys.executable, "generate_city.py",
+        fast_draft_context = {"bbox": bbox, "pbf": pbf}
+        base_cmd = [sys.executable, "generate_city_legacy.py",
                     "--bbox", f"{s},{w},{n},{e}", "--pbf", pbf,
                     "--city", city, "--auto-params"]
         # 记录区域信息，刷新后前端仍能展示
@@ -992,12 +1760,16 @@ def api_generate(req: GenerateRequest):
     elif req.city in PRESETS:
         city = req.city
         city_title = PRESETS[city]["title"]
-        base_cmd = [sys.executable, "generate_city.py", "--preset", city,
+        quota_bbox = PRESETS[city]["bbox"]
+        source_bbox = quota_bbox
+        base_cmd = [sys.executable, "generate_city_legacy.py", "--preset", city,
                     "--auto-params"]
     elif req.city in _landmark_presets():
         # 景点目录城市：用 bbox + pbf 路径（与自定义区域相同）
         lm_info = _landmark_presets()[req.city]
         bbox = lm_info["bbox"]
+        quota_bbox = bbox
+        source_bbox = bbox
         s, w, n, e = bbox
         st = _pbf_status(bbox)
         if st["state"] == "fetchable":
@@ -1007,7 +1779,8 @@ def api_generate(req: GenerateRequest):
         pbf = st["pbf"]
         city = req.city
         city_title = lm_info["title"]
-        base_cmd = [sys.executable, "generate_city.py",
+        fast_draft_context = {"bbox": bbox, "pbf": pbf}
+        base_cmd = [sys.executable, "generate_city_legacy.py",
                     "--bbox", f"{s},{w},{n},{e}", "--pbf", pbf,
                     "--city", city, "--auto-params"]
         area_dir = OUTPUT_DIR / city
@@ -1019,80 +1792,245 @@ def api_generate(req: GenerateRequest):
     else:
         raise HTTPException(400, f"未知城市: {req.city}")
 
-    if _city_running(city):
-        raise HTTPException(409, f"{city_title} 已有任务在运行")
+    # A quick 3D is a composition proof, not a second full render.  Preserve
+    # the selected 15/25 km frame as the task identity, while draft geometry is
+    # built only for its central physical 5 km square.  Full generation keeps
+    # the selected source bbox unchanged.
+    preview_bbox = None
+    if not quality_profile and req.mode == "draft":
+        preview_bbox = _centered_square_bbox(
+            source_bbox or quota_bbox, PRODUCT_PREVIEW_SIZE_KM)
+        preview_status = _pbf_status(preview_bbox)
+        if preview_status["state"] != "local":
+            raise HTTPException(422, "中心预览区域地图数据尚未就绪")
+        ps, pw, pn, pe = preview_bbox
+        base_cmd = [
+            sys.executable, "generate_city_legacy.py",
+            "--bbox", f"{ps},{pw},{pn},{pe}",
+            "--pbf", preview_status["pbf"],
+            "--city", city, "--auto-params",
+        ]
+        fast_draft_context = {
+            "bbox": preview_bbox,
+            "source_bbox": list(source_bbox or quota_bbox),
+            "pbf": preview_status["pbf"],
+        }
 
+    # Keep both regions on disk.  Task recovery must never present the central
+    # preview crop as if it were the formal framing selected by the user.
+    if req.area is not None:
+        area_dir = OUTPUT_DIR / city
+        area_dir.mkdir(parents=True, exist_ok=True)
+        (area_dir / "area.json").write_text(json.dumps({
+            "name": city_title,
+            "bbox": list(source_bbox),
+            "preview_bbox": preview_bbox,
+            "preview_size_km": (
+                PRODUCT_PREVIEW_SIZE_KM if preview_bbox else None),
+            "markers": req.markers,
+        }, ensure_ascii=False), encoding="utf-8")
+
+    request_key = _request_key("generate", {
+        "city": city,
+        "mode": req.mode,
+        "style": req.style,
+        "generation_profile": profile,
+        "markers": req.markers,
+        "gallery_slug": req.gallery_slug.strip(),
+        "source_bbox": source_bbox,
+        "preview_bbox": preview_bbox,
+    })
     job_id = uuid.uuid4().hex[:8]
     log_path = JOB_LOG_DIR / f"{job_id}_{city}_{req.mode}.log"
     # draft 也出 2D 图：诊断图（带图例统计）+ 画廊级俯视图（无文字）
-    cmd = base_cmd + ["--png", "--review-png"]
-    if req.mode == "draft":
-        cmd.append("--draft")
+    if quality_profile:
+        cmd = base_cmd
+    else:
+        cmd = base_cmd + [
+            "--base-thickness-mm", f"{PRODUCT_BASE_THICKNESS_MM:.2f}",
+        ]
+        if req.mode == "draft":
+            # Draft is a composition check, not a print artifact.  Avoid both
+            # PNG render passes, full vegetation/landuse, and print-grade mesh
+            # density; the formal 3MF path remains unchanged.
+            cmd.extend(["--draft", "--preview-fast", "--no-vegetation"])
+        else:
+            cmd.extend(["--png", "--review-png"])
 
     # 标注点（照片 GPS 点）：draft GLB 将其附近最高处染红
-    for mk in req.markers:
-        if len(mk) == 2:
-            cmd += ["--marker", f"{mk[0]},{mk[1]}"]
+    if not quality_profile:
+        for mk in req.markers:
+            if len(mk) == 2:
+                cmd += ["--marker", f"{mk[0]},{mk[1]}"]
 
     # 画廊风格参数 → 落盘 JSON → --params-json（管线内最高优先级覆盖）
-    if req.style:
-        meta = _load_gallery(city)
-        if not meta or req.style not in meta.get("styles", {}):
+    params_path = None
+    gallery_meta = None
+    if req.style and not quality_profile:
+        gallery_meta = _load_gallery(city)
+        if not gallery_meta or req.style not in gallery_meta.get("styles", {}):
             raise HTTPException(400, f"{city} 无风格: {req.style}")
-        params = meta["styles"][req.style].get("params", {})
+        params = gallery_meta["styles"][req.style].get("params", {})
         params_path = JOB_LOG_DIR / f"{job_id}_params.json"
         params_path.write_text(json.dumps(params, ensure_ascii=False, indent=2),
                                encoding="utf-8")
         cmd += ["--params-json", str(params_path)]
 
+    # 用户刚完成风格画廊时，快速预览直接复用同一个 CityHarness cache。
+    # 这条路径不再提取 draft 不消费的 landuse，也不重复生成诊断 PNG。
+    fast_draft = bool(
+        req.mode == "draft" and req.style and fast_draft_context
+        and gallery_meta and params_path
+    )
+    if fast_draft:
+        fast_bbox = fast_draft_context["bbox"]
+        cmd = [
+            sys.executable, "tools/generate_gallery_draft.py",
+            "--bbox", ",".join(str(value) for value in fast_bbox),
+            "--pbf", fast_draft_context["pbf"],
+            "--city", city,
+            "--prototype", gallery_meta.get("prototype", "landscape"),
+            "--scene-type", gallery_meta.get("scene_type", "urban"),
+            "--source-bbox", ",".join(
+                str(value) for value in fast_draft_context["source_bbox"]),
+            "--params-json", str(params_path),
+            "--base-thickness-mm",
+            f"{PRODUCT_BASE_THICKNESS_MM:.2f}",
+        ]
+        for mk in req.markers:
+            if len(mk) == 2:
+                cmd += ["--marker", f"{mk[0]},{mk[1]}"]
+
     env = os.environ.copy()
     env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUNBUFFERED"] = "1"
     env["PATH"] = str(ROOT / "tools") + os.pathsep + env.get("PATH", "")
 
     if WORKER_MODE:
         # ── Worker 模式：入队等本机 worker 拉取，不本地起进程 ──
         job = {"id": job_id, "city": city, "city_title": city_title,
-               "mode": req.mode, "style": req.style, "exec": "worker",
+               "mode": req.mode, "style": req.style,
+               "generation_profile": profile, "exec": "worker",
+               "fast_draft": fast_draft,
+               "request_key": request_key,
                "log_path": str(log_path), "status": "pending",
-               "started": time.time(), "ended": None,
+               "started": time.time(), "queued_at": time.time(), "ended": None,
                "spec": {"cmd": cmd, "cwd": str(ROOT), "env_extra": {
                    "PYTHONIOENCODING": "utf-8",
+                   "PYTHONUNBUFFERED": "1",
                    "PATH": env["PATH"]}}}
-        with JOBS_LOCK:
-            JOBS[job_id] = job
-            _save_jobs()
-        return {"job_id": job_id, "city": city, "queued": True}
+        if req.area is not None:
+            job["bbox"] = list(req.area.bbox)
+            if gallery_meta:
+                job["prototype"] = gallery_meta.get("prototype", "landscape")
+        elif source_bbox is not None:
+            job["bbox"] = list(source_bbox)
+        if preview_bbox is not None:
+            job["preview_bbox"] = list(preview_bbox)
+        _attach_job_account(job, user, quota_bbox)
+        claimed, reused, cached = _claim_or_reuse_job(job)
+        if reused and params_path is not None:
+            params_path.unlink(missing_ok=True)
+        return {"job_id": claimed["id"], "city": city,
+                "generation_profile": profile,
+                "queued": claimed["status"] == "pending",
+                "reused": reused, "cached": cached}
 
     # ── 本地模式：直接起子进程 ──
-    log_f = open(log_path, "w", encoding="utf-8")
-    proc = subprocess.Popen(cmd, cwd=str(ROOT), stdout=log_f,
-                            stderr=subprocess.STDOUT, env=env)
     job = {"id": job_id, "city": city, "city_title": city_title,
-           "mode": req.mode, "style": req.style, "exec": "local",
-           "proc": proc,
-           "log_path": str(log_path), "status": "running",
+           "mode": req.mode, "style": req.style,
+           "generation_profile": profile, "exec": "local",
+           "fast_draft": fast_draft,
+           "request_key": request_key,
+           "log_path": str(log_path), "status": "starting",
            "started": time.time(), "ended": None}
+    if req.area is not None:
+        job["bbox"] = list(req.area.bbox)
+        if gallery_meta:
+            job["prototype"] = gallery_meta.get("prototype", "landscape")
+    elif source_bbox is not None:
+        job["bbox"] = list(source_bbox)
+    if preview_bbox is not None:
+        job["preview_bbox"] = list(preview_bbox)
+    _attach_job_account(job, user, quota_bbox)
+    claimed, reused, cached = _claim_or_reuse_job(job)
+    if reused:
+        if params_path is not None:
+            params_path.unlink(missing_ok=True)
+        return {"job_id": claimed["id"], "city": city,
+                "generation_profile": profile,
+                "queued": claimed["status"] in ("starting", "pending"),
+                "reused": True, "cached": cached}
+
+    try:
+        with open(log_path, "w", encoding="utf-8") as log_f:
+            proc = subprocess.Popen(cmd, cwd=str(ROOT), stdout=log_f,
+                                    stderr=subprocess.STDOUT, env=env)
+    except (OSError, subprocess.SubprocessError):
+        with JOBS_LOCK:
+            job["status"] = "failed"
+            job["ended"] = time.time()
+            job["error_code"] = "render_failed"
+            job["error_msg"] = "生成任务无法启动，请稍后重试"
+            _refund_job_quota(job)
+            _save_jobs()
+        raise HTTPException(500, "生成任务无法启动，请稍后重试")
     with JOBS_LOCK:
-        JOBS[job_id] = job
+        job["proc"] = proc
+        job["status"] = "running"
         _save_jobs()
     threading.Thread(target=_watch_job, args=(job,), daemon=True).start()
-    return {"job_id": job_id, "city": city}
+    return {"job_id": job_id, "city": city,
+            "generation_profile": profile,
+            "reused": False, "cached": False}
+
+
+@app.get("/api/generation-profiles")
+def api_generation_profiles():
+    return {"profiles": GENERATION_PROFILES}
+
+
+def _can_access_job(job: dict, user: AuthUser | None) -> bool:
+    if user and user.role == "admin":
+        return True
+    owners = job.get("owner_ids") or []
+    if not owners:
+        return True  # legacy jobs created before accounts were activated
+    return bool(user and user.id in owners)
 
 
 @app.get("/api/jobs/{job_id}")
-def api_job(job_id: str, include_log: bool = False):
+def api_job(job_id: str, include_log: bool = False,
+            request: Request = None):
+    user = _current_user(request, required=AUTH_REQUIRED)
     with JOBS_LOCK:
         job = JOBS.get(job_id)
     if job is None:
         raise HTTPException(404, "任务不存在")
-    return _job_public(job, include_log=include_log)
+    if AUTH_REQUIRED and not _can_access_job(job, user):
+        raise HTTPException(404, "任务不存在")
+    if include_log and not (user and user.role == "admin"):
+        raise HTTPException(403, "需要管理员账号")
+    allow_log = bool(include_log and user and user.role == "admin")
+    return _job_public(job, include_log=allow_log)
 
 
 @app.get("/api/jobs")
-def api_jobs(include_log: bool = False):
+def api_jobs(include_log: bool = False, mine: bool = False,
+             request: Request = None):
+    user = _current_user(request, required=AUTH_REQUIRED)
     with JOBS_LOCK:
         jobs = list(JOBS.values())
-    return {"jobs": [_job_public(j, include_log=include_log) for j in
+    if mine:
+        if user is None:
+            raise HTTPException(401, "请先登录")
+        jobs = [job for job in jobs if user.id in (job.get("owner_ids") or [])]
+    elif AUTH_REQUIRED and not (user and user.role == "admin"):
+        jobs = [job for job in jobs if _can_access_job(job, user)]
+    if include_log and not (user and user.role == "admin"):
+        raise HTTPException(403, "需要管理员账号")
+    allow_log = bool(include_log and user and user.role == "admin")
+    return {"jobs": [_job_public(j, include_log=allow_log) for j in
                      sorted(jobs, key=lambda j: j["started"], reverse=True)]}
 
 
@@ -1103,25 +2041,98 @@ def api_jobs(include_log: bool = False):
 class WorkerFinish(BaseModel):
     job_id: str
     token: str
+    worker_id: str = "legacy-worker"
     ok: bool = True
     error: str = ""
     files: list[dict] = []   # [{name, sha256, size}]
 
 
+class WorkerHeartbeat(BaseModel):
+    job_id: str
+    token: str
+    worker_id: str
+    log_tail: str = ""
+
+
+def _worker_owner(job: dict) -> str:
+    return str(job.get("quota_payer_id") or
+               ((job.get("owner_ids") or [""])[0]) or "anonymous")
+
+
+def _reclaim_expired_worker_jobs(now: float) -> bool:
+    changed = False
+    for job in JOBS.values():
+        if (job.get("exec") == "worker" and job.get("status") == "running"
+                and float(job.get("lease_expires") or 0) <= now):
+            job["status"] = "pending"
+            job["retry_count"] = int(job.get("retry_count") or 0) + 1
+            job.pop("worker_id", None)
+            job.pop("lease_expires", None)
+            changed = True
+    return changed
+
+
+def _next_fair_worker_job() -> dict | None:
+    """Oldest job, alternating account when another account is waiting."""
+    global _LAST_WORKER_OWNER
+    pending = sorted(
+        (job for job in JOBS.values()
+         if job.get("status") == "pending" and job.get("exec") == "worker"),
+        key=lambda job: (job.get("queued_at", job.get("started", 0)),
+                         job.get("id", "")),
+    )
+    if not pending:
+        return None
+    other_owner = [job for job in pending
+                   if _worker_owner(job) != _LAST_WORKER_OWNER]
+    chosen = other_owner[0] if other_owner else pending[0]
+    _LAST_WORKER_OWNER = _worker_owner(chosen)
+    return chosen
+
+
 @app.get("/api/worker/next")
-def worker_next(token: str = ""):
-    """Worker 拉取一个 pending 任务（乐观锁：pending → running 原子落盘）。"""
+def worker_next(token: str = "", worker_id: str = "legacy-worker"):
+    """Lease one queued task; expired leases are safely made available again."""
     _check_worker_token(token)
+    worker_id = worker_id.strip() or "legacy-worker"
     with JOBS_LOCK:
-        for jid, j in JOBS.items():
-            if j.get("status") == "pending" and j.get("exec") == "worker":
-                j["status"] = "running"
-                j["started"] = time.time()
-                _save_jobs()
-                return {"job_id": jid, "spec": j.get("spec"),
-                        "city": j["city"], "mode": j["mode"],
-                        "style": j.get("style")}
+        now = time.time()
+        changed = _reclaim_expired_worker_jobs(now)
+        job = _next_fair_worker_job()
+        if job is not None:
+            job["status"] = "running"
+            job["claimed_at"] = now
+            job["worker_id"] = worker_id
+            job["lease_expires"] = now + WORKER_LEASE_SECONDS
+            _save_jobs()
+            return {"job_id": job["id"], "spec": job.get("spec"),
+                    "city": job["city"], "mode": job["mode"],
+                    "style": job.get("style"),
+                    "lease_seconds": WORKER_LEASE_SECONDS}
+        if changed:
+            _save_jobs()
     return {"job_id": None}  # 无待处理任务
+
+
+@app.post("/api/worker/heartbeat")
+def worker_heartbeat(req: WorkerHeartbeat):
+    _check_worker_token(req.token)
+    with JOBS_LOCK:
+        job = JOBS.get(req.job_id)
+        if not job:
+            raise HTTPException(404, "任务不存在")
+        if job.get("status") != "running":
+            raise HTTPException(409, "任务已不在运行")
+        if job.get("worker_id") != req.worker_id:
+            raise HTTPException(409, "任务租约属于其他计算节点")
+        job["lease_expires"] = time.time() + WORKER_LEASE_SECONDS
+        job["last_heartbeat"] = time.time()
+        _save_jobs()
+        log_path = Path(job["log_path"])
+    if req.log_tail:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text(req.log_tail[-20_000:], encoding="utf-8")
+    return {"ok": True, "lease_seconds": WORKER_LEASE_SECONDS}
 
 
 @app.post("/api/worker/upload")
@@ -1141,7 +2152,7 @@ async def worker_upload(token: str = "", job_id: str = "",
     safe_name = Path(filename).name
     if not safe_name or safe_name != filename:
         raise HTTPException(400, "非法文件名")
-    dest_dir = OUTPUT_DIR / city
+    dest_dir = GALLERY_DIR / city if job.get("mode") == "styles" else OUTPUT_DIR / city
     dest_dir.mkdir(parents=True, exist_ok=True)
     part_path = dest_dir / (safe_name + ".part")
     # 流式写入 .part
@@ -1182,8 +2193,11 @@ def worker_finish(req: WorkerFinish):
     # 幂等：已 done 直接返回
     if job.get("status") == "done":
         return {"ok": True, "already_done": True}
+    if (job.get("worker_id") and job.get("worker_id") != req.worker_id and
+            float(job.get("lease_expires") or 0) > time.time()):
+        raise HTTPException(409, "任务租约属于其他计算节点")
     city = job["city"]
-    dest_dir = OUTPUT_DIR / city
+    dest_dir = GALLERY_DIR / city if job.get("mode") == "styles" else OUTPUT_DIR / city
 
     if req.ok:
         # 验证所有产物文件
@@ -1206,6 +2220,7 @@ def worker_finish(req: WorkerFinish):
         with JOBS_LOCK:
             job["status"] = "done"
             job["ended"] = time.time()
+            job.pop("lease_expires", None)
             _save_jobs()
     else:
         # worker 报告失败
@@ -1216,6 +2231,8 @@ def worker_finish(req: WorkerFinish):
             job["error_code"], job["error_msg"] = _classify_error_text(
                 req.error)
             job["error"] = req.error
+            job.pop("lease_expires", None)
+            _refund_job_quota(job)
             _save_jobs()
         # 清理可能的 .part 残留
         for finfo in req.files:

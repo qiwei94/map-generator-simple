@@ -1,0 +1,16 @@
+[Unit]
+Description=Map Relief verified 15 km showcase batch
+After=network-online.target studio.service
+Wants=network-online.target
+Conflicts=worker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/map-generator-simple
+EnvironmentFile=/etc/map-generator/studio.env
+Environment="PATH=/opt/pyshim:/usr/local/python3.9/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+ExecStart=/usr/local/python3.9/bin/python3.9 tools/generate_showcase_samples.py
+ExecStopPost=/bin/systemctl --no-block start worker.service
+Nice=10
+TimeoutStartSec=infinity
+

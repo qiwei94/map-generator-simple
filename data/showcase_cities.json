@@ -1,0 +1,262 @@
+{
+  "version": 1,
+  "size_km": 15,
+  "cities": [
+    {
+      "key": "paris",
+      "slug": "custom_327de4",
+      "title": "巴黎 · 塞纳河",
+      "caption": "塞纳河与巴黎城市肌理",
+      "center": [48.8566, 2.3522],
+      "pbf": "ile-de-france-latest.osm.pbf",
+      "prototype": "skyline",
+      "hero_style": "dense_detail",
+      "featured": true
+    },
+    {
+      "key": "hangzhou",
+      "slug": "showcase_westlake_25km_legacy",
+      "title": "杭州 · 西湖",
+      "caption": "西湖、钱塘江与完整城市纹理",
+      "location": "HANGZHOU / WEST LAKE",
+      "size_km": 25,
+      "static_asset": "westlake-real-output.jpg",
+      "center": [30.245, 120.15],
+      "pbf": "zhejiang-latest.osm.pbf",
+      "prototype": "landscape",
+      "hero_style": "dense_detail",
+      "featured": true
+    },
+    {
+      "key": "suzhou",
+      "slug": "custom_694256",
+      "title": "苏州 · 金鸡湖",
+      "caption": "金鸡湖水岸与苏州城市纹理",
+      "center": [31.2883, 120.66565],
+      "pbf": "zhejiang-latest.osm.pbf",
+      "prototype": "landscape",
+      "hero_style": "block_fill",
+      "featured": false
+    },
+    {
+      "key": "chicago",
+      "slug": "showcase_chicago_15km",
+      "title": "芝加哥 · 密歇根湖岸",
+      "caption": "湖岸天际线与棋盘街区",
+      "center": [41.8781, -87.6298],
+      "pbf": "illinois-latest.osm.pbf",
+      "prototype": "skyline",
+      "hero_style": "dense_detail",
+      "featured": true
+    },
+    {
+      "key": "london",
+      "slug": "showcase_london_15km",
+      "title": "伦敦 · 泰晤士河",
+      "caption": "泰晤士河与伦敦街巷",
+      "center": [51.5074, -0.1278],
+      "pbf": "great-britain-latest.osm.pbf",
+      "prototype": "skyline",
+      "hero_style": "baseline",
+      "featured": true
+    },
+    {
+      "key": "rome",
+      "slug": "showcase_rome_15km",
+      "title": "罗马 · 永恒之城",
+      "caption": "台伯河与罗马古城肌理",
+      "center": [41.9028, 12.4964],
+      "pbf": "centro-latest.osm.pbf",
+      "prototype": "skyline",
+      "hero_style": "dense_detail",
+      "featured": true
+    },
+    {
+      "key": "milan",
+      "slug": "showcase_milan_15km",
+      "title": "米兰 · 城市中心",
+      "caption": "米兰大教堂与放射街区",
+      "center": [45.4642, 9.1900],
+      "pbf": "nord-ovest-latest.osm.pbf",
+      "prototype": "skyline",
+      "hero_style": "dense_detail",
+      "featured": true
+    },
+    {
+      "key": "new_york",
+      "slug": "showcase_new_york_15km",
+      "title": "纽约 · 曼哈顿",
+      "caption": "曼哈顿岛与纽约网格",
+      "center": [40.7128, -74.0060],
+      "pbf": "new-york-latest.osm.pbf",
+      "prototype": "skyline",
+      "hero_style": "dense_detail",
+      "featured": true
+    },
+    {
+      "key": "tokyo",
+      "slug": "showcase_tokyo_15km",
+      "title": "东京 · 都心",
+      "caption": "东京水系与高密街区",
+      "center": [35.6762, 139.6503],
+      "pbf": "kanto-latest.osm.pbf",
+      "prototype": "skyline",
+      "hero_style": "baseline",
+      "featured": true
+    },
+    {
+      "key": "singapore",
+      "slug": "showcase_singapore_15km",
+      "title": "新加坡 · 滨海湾",
+      "caption": "滨海水岸与花园城市",
+      "center": [1.2903, 103.8519],
+      "pbf": "malaysia-singapore-brunei-latest.osm.pbf",
+      "prototype": "landscape",
+      "hero_style": "baseline"
+    },
+    {
+      "key": "hong_kong",
+      "slug": "showcase_hong_kong_15km",
+      "title": "香港 · 维多利亚港",
+      "caption": "山海之间的维港城市",
+      "center": [22.3027, 114.1772],
+      "pbf": "hong-kong-latest.osm.pbf",
+      "prototype": "terrain",
+      "hero_style": "baseline"
+    },
+    {
+      "key": "shanghai",
+      "slug": "showcase_shanghai_15km",
+      "title": "上海 · 黄浦江",
+      "caption": "黄浦江两岸与城市纹理",
+      "center": [31.2304, 121.4737],
+      "pbf": "shanghai-latest.osm.pbf",
+      "prototype": "skyline",
+      "hero_style": "block_fill",
+      "featured": true
+    },
+    {
+      "key": "guangzhou",
+      "slug": "showcase_guangzhou_15km",
+      "title": "广州 · 珠江新城",
+      "caption": "珠江水岸与广州城市中轴",
+      "center": [23.1291, 113.2644],
+      "pbf": "guangdong-latest.osm.pbf",
+      "prototype": "skyline",
+      "hero_style": "block_fill",
+      "featured": true
+    },
+    {
+      "key": "beijing",
+      "slug": "showcase_beijing_15km",
+      "title": "北京 · 中轴线",
+      "caption": "中轴秩序与北京城廓",
+      "center": [39.9042, 116.4074],
+      "pbf": "beijing-latest.osm.pbf",
+      "prototype": "skyline",
+      "hero_style": "baseline"
+    },
+    {
+      "key": "berlin",
+      "slug": "showcase_berlin_15km",
+      "title": "柏林 · 市中心",
+      "caption": "施普雷河与柏林街区",
+      "center": [52.5200, 13.4050],
+      "pbf": "berlin-latest.osm.pbf",
+      "prototype": "skyline",
+      "hero_style": "baseline",
+      "featured": true
+    },
+    {
+      "key": "madrid",
+      "slug": "showcase_madrid_15km",
+      "title": "马德里 · 城心",
+      "caption": "放射大道与马德里街区",
+      "center": [40.4168, -3.7038],
+      "pbf": "madrid-latest.osm.pbf",
+      "prototype": "skyline",
+      "hero_style": "baseline"
+    },
+    {
+      "key": "barcelona",
+      "slug": "showcase_barcelona_15km",
+      "title": "巴塞罗那 · 扩展区",
+      "caption": "海岸线与棋盘城市",
+      "center": [41.3874, 2.1686],
+      "pbf": "cataluna-latest.osm.pbf",
+      "prototype": "skyline",
+      "hero_style": "block_fill"
+    },
+    {
+      "key": "seoul",
+      "slug": "showcase_seoul_15km",
+      "title": "首尔 · 汉江",
+      "caption": "汉江两岸与山城肌理",
+      "center": [37.5665, 126.9780],
+      "pbf": "south-korea-latest.osm.pbf",
+      "prototype": "terrain",
+      "hero_style": "baseline"
+    },
+    {
+      "key": "sydney",
+      "slug": "showcase_sydney_15km",
+      "title": "悉尼 · 海港",
+      "caption": "悉尼海港与曲折水岸",
+      "center": [-33.8688, 151.2093],
+      "pbf": "new-south-wales-latest.osm.pbf",
+      "prototype": "landscape",
+      "hero_style": "baseline"
+    },
+    {
+      "key": "melbourne",
+      "slug": "showcase_melbourne_15km",
+      "title": "墨尔本 · 亚拉河",
+      "caption": "亚拉河与墨尔本网格",
+      "center": [-37.8136, 144.9631],
+      "pbf": "victoria-latest.osm.pbf",
+      "prototype": "skyline",
+      "hero_style": "baseline",
+      "featured": true
+    },
+    {
+      "key": "mexico_city",
+      "slug": "showcase_mexico_city_15km",
+      "title": "墨西哥城 · 城心",
+      "caption": "高原都会的密集街巷",
+      "center": [19.4326, -99.1332],
+      "pbf": "mexico-latest.osm.pbf",
+      "prototype": "terrain",
+      "hero_style": "baseline"
+    },
+    {
+      "key": "buenos_aires",
+      "slug": "showcase_buenos_aires_15km",
+      "title": "布宜诺斯艾利斯 · 拉普拉塔",
+      "caption": "河口都会与方格街区",
+      "center": [-34.6037, -58.3816],
+      "pbf": "argentina-latest.osm.pbf",
+      "prototype": "skyline",
+      "hero_style": "block_fill"
+    },
+    {
+      "key": "cairo",
+      "slug": "showcase_cairo_15km",
+      "title": "开罗 · 尼罗河",
+      "caption": "尼罗河与沙漠都会",
+      "center": [30.0444, 31.2357],
+      "pbf": "egypt-latest.osm.pbf",
+      "prototype": "skyline",
+      "hero_style": "baseline"
+    },
+    {
+      "key": "cape_town",
+      "slug": "showcase_cape_town_15km",
+      "title": "开普敦 · 桌山",
+      "caption": "桌山、海湾与城市边界",
+      "center": [-33.9249, 18.4241],
+      "pbf": "south-africa-latest.osm.pbf",
+      "prototype": "terrain",
+      "hero_style": "baseline"
+    }
+  ]
+}

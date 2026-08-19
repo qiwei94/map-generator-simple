@@ -253,7 +253,7 @@
 
 ---
 
-## 14. CLI 开关（generate_city.py）
+## 14. 旧通用 CLI 开关（generate_city_legacy.py）
 
 | 开关 | 默认 | 含义 |
 |------|------|------|

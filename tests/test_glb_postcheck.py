@@ -119,6 +119,32 @@ class TestTerrainBase:
         zs = m.vertices[:, 2]
         assert zs.max() == pytest.approx(0.0), "平地顶面应在 z=0"
 
+    def test_shared_print_contract_uses_formal_base_and_relief(self):
+        """GLB 顶面/底面必须复用 3MF 的解析参数，不再按区域宽度猜。"""
+        from _TEXTURE_STYLE_OF_DEEPSEEK.config import Z_WATER_BASE_MM
+
+        grid = np.tile(np.linspace(0, 100, 32), (32, 1))
+        base_mm = 0.8
+        relief_mm = 4.6
+        terrain_base = Z_WATER_BASE_MM + base_mm
+        m = _terrain_heightfield(
+            grid, (0, 0, 1000, 1000), scale=0.1,
+            z_gamma=1.0, relief_mm_max=relief_mm,
+            surface_base_mm=terrain_base, bottom_z_mm=Z_WATER_BASE_MM)
+
+        n_top = grid.size
+        top_z = m.vertices[:n_top, 2]
+        assert m.vertices[:, 2].min() == pytest.approx(Z_WATER_BASE_MM)
+        assert top_z.min() == pytest.approx(terrain_base)
+        assert top_z.max() == pytest.approx(terrain_base + relief_mm)
+
+        sampler = _TerrainSampler(
+            grid, (0, 0, 1000, 1000), scale=0.1,
+            z_gamma=1.0, relief_mm_max=relief_mm,
+            z_base_mm=terrain_base)
+        assert sampler.z_mm(0, 500) == pytest.approx(top_z.min())
+        assert sampler.z_mm(1000, 500) == pytest.approx(top_z.max())
+
 
 # ─── 网格朝向（历史 bug：row 0 = 南的网格被按 row 0 = 北处理，
 #     地形起伏南北翻转，水体坐到镜像高地 → 水面突出地表）───

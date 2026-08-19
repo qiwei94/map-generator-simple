@@ -20,6 +20,8 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 import numpy as np
+import geopandas as gpd
+import pandas as pd
 
 from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.processors.coords import (
     bbox_to_utm, project_geodataframe,
@@ -95,6 +97,42 @@ class CityHarness:
                 gdfs[key] = project_geodataframe(g, utm_crs, origin,
                                                  clip_bbox=utm_bbox)
 
+        # 国内山水区域的 OSM 水面经常只有零碎 polygon/中心线。画廊若只
+        # 看 OSM 会把千岛湖一类区域误判成“低水体城市”。高德无标注图层
+        # 是产品已有的第二地图源；这里一次提取后放进 ctx，2D 与 GLB 共用。
+        amap_water_polys = []
+        try:
+            from _TEXTURE_STYLE_OF_DEEPSEEK._water_supplement import (
+                fetch_amap_water_local,
+            )
+            amap_water_polys = fetch_amap_water_local(
+                p.bbox, utm_crs, origin, bbox_local=bbox_local)
+        except Exception as e:
+            print(f"  [harness] secondary water unavailable: {e}")
+
+        if amap_water_polys:
+            water = gdfs.get("water")
+            water_crs = getattr(water, "crs", None) or utm_crs
+            supplement = gpd.GeoDataFrame(
+                {
+                    "natural": ["water"] * len(amap_water_polys),
+                    "water": ["lake"] * len(amap_water_polys),
+                    "source": ["amap_nolabel"] * len(amap_water_polys),
+                    "geometry": amap_water_polys,
+                },
+                geometry="geometry", crs=water_crs,
+            )
+            if water is None or len(water) == 0:
+                gdfs["water"] = supplement
+            else:
+                gdfs["water"] = gpd.GeoDataFrame(
+                    pd.concat([water, supplement], ignore_index=True,
+                              sort=False),
+                    geometry="geometry", crs=water_crs,
+                )
+            print(f"  [harness] secondary water: +{len(amap_water_polys)} "
+                  "full-shape polygons")
+
         # ── elevation（瓦片级 npy 缓存，偏移请求可部分复用；失败回退平面）──
         try:
             tiled_grid = fetch_elevation_grid_tiled(
@@ -149,6 +187,8 @@ class CityHarness:
             "bbox_local": bbox_local,
             "width_m": bbox["width_m"], "height_m": bbox["height_m"],
             "elevation_grid": elevation_grid,
+            "bbox_wgs84": p.bbox,
+            "amap_water_polys": amap_water_polys,
             **gdfs,
         }
         self._prepared = True
@@ -184,6 +224,9 @@ class CityHarness:
 
         # 高度杠杆：猴补丁（buildings._compress_height 已函数级 import）
         _cfg.BUILDING_HEIGHT_MAX_MM = float(params["building_height_mm_max"])
+        # GLB 预览与正式管线共用同一已解析地形起伏。
+        _cfg.TERRAIN_THICKNESS_MM = float(params.get(
+            "terrain_thickness_mm", self.base_params.terrain_thickness_mm))
         # BL 轮廓简化杠杆（_extract_BL 两条路径均已函数级 import）
         _cfg.BUILDING_SIMPLIFY_TOL_M = float(params.get(
             "building_simplify_tol_m", self.base_params.building_simplify_tol_m))
@@ -222,8 +265,11 @@ class CityHarness:
                 enable_hotspot=True,
                 hotspot_relax=_cfg.BUILDING_V2_HOTSPOT_RELAX,
                 area_km2=ctx["area_km2"],
+                bbox_wgs84=ctx["bbox_wgs84"],
+                utm_crs=ctx["utm_crs"],
+                origin=ctx["origin"],
                 **overrides,
             )
 
         return self.cache.get_or_compute(
-            "preprocess_v2", cache_key, _compute, label="preprocess")
+            "preprocess_v3", cache_key, _compute, label="preprocess")
