@@ -4,7 +4,7 @@
 
 标准流程（所有要素类型，包括水体）：
 1. osmium extract - 区域裁剪
-2. osmium tags-filter - 标签过滤（水体用 natural=water water waterway landuse=reservoir）
+2. osmium tags-filter - 标签过滤（水体含 coastline，后续闭合为海面）
 3. osmium export - 导出 GeoJSON
 4. Python 读取 GeoJSON → GeoDataFrame
 """
@@ -56,6 +56,10 @@ class OsmiumCLIFetcher:
         'railway', 'intermittent',
     )
 
+    # Water v2 adds coastline ways.  Keep it in a separate namespace so old
+    # GeoJSON/tile caches (which cannot contain coastlines) are never reused.
+    _CACHE_NAMESPACES = {'water': 'water_coastline_v2'}
+
     # 标准标签过滤表达式（使用 nwr = node/way/relation）
     # 适用于建筑、道路、植被等普通要素
     TAG_FILTERS = {
@@ -83,9 +87,9 @@ class OsmiumCLIFetcher:
         ),
         'park': 'nwr/leisure=park,garden nwr/landuse=recreation_ground',
         'wetland': 'nwr/natural=wetland,marsh,swamp',
-        # 水体全量过滤：江河湖泊一网打尽
-        # 去掉了 r/ 前缀和 =* 后缀，让 Way 和 Relation 都能匹配
-        'water': 'natural=water water waterway landuse=reservoir',
+        # 水体全量过滤：江河湖泊 + OSM 以定向线表达的海岸。
+        'water': ('nwr/natural=water,coastline nwr/water nwr/waterway '
+                  'nwr/landuse=reservoir'),
         # 自然/植被地标：保护区 + 国家公园 + 命名湿地 / 景区
         # （西溪 OSM: boundary=national_park + leisure=nature_reserve + wikidata=Q1089272）
         'protected_area': ('nwr/boundary=national_park,protected_area '
@@ -369,7 +373,8 @@ class OsmiumCLIFetcher:
         # 输出到项目 tmp/ 目录下（不缓存）
         project_tmp = os.path.join(os.path.dirname(__file__), '..', '..', '..', 'tmp')
         os.makedirs(project_tmp, exist_ok=True)
-        output_path = os.path.join(project_tmp, f"osmium_{tag_type}_{south:.4f}_{west:.4f}_{north:.4f}_{east:.4f}.geojson")
+        cache_tag = self._CACHE_NAMESPACES.get(tag_type, tag_type)
+        output_path = os.path.join(project_tmp, f"osmium_{cache_tag}_{south:.4f}_{west:.4f}_{north:.4f}_{east:.4f}.geojson")
 
         logger.info(f"使用 CLI 方式获取 {tag_type} 数据...")
         logger.info(f"边界框: ({south:.4f}, {west:.4f}, {north:.4f}, {east:.4f})")
@@ -519,7 +524,8 @@ class OsmiumCLIFetcher:
     def _tile_cache_path(self, tag_type, ix, iy):
         project_root = os.path.dirname(os.path.dirname(os.path.dirname(
             os.path.dirname(os.path.abspath(__file__)))))
-        d = os.path.join(project_root, 'cache', 'tiles', tag_type)
+        cache_tag = self._CACHE_NAMESPACES.get(tag_type, tag_type)
+        d = os.path.join(project_root, 'cache', 'tiles', cache_tag)
         os.makedirs(d, exist_ok=True)
         return os.path.join(d, f"{ix}_{iy}.geojson")
 
@@ -601,9 +607,10 @@ class OsmiumCLIFetcher:
         # 1) 全框缓存快路径（与 Phase 1 全框缓存兼容）
         project_tmp = os.path.join(os.path.dirname(__file__), '..', '..', '..', 'tmp')
         os.makedirs(project_tmp, exist_ok=True)
+        cache_tag = self._CACHE_NAMESPACES.get(tag_type, tag_type)
         full_path = os.path.join(
             project_tmp,
-            f"osmium_{tag_type}_{fs:.4f}_{fw:.4f}_{fn:.4f}_{fe:.4f}.geojson")
+            f"osmium_{cache_tag}_{fs:.4f}_{fw:.4f}_{fn:.4f}_{fe:.4f}.geojson")
         gdf = self._try_read_geojson_cache(full_path, tag_type)
         if gdf is not None:
             print(f"  [CLI Pipeline] Using cached GeoJSON (full-frame): {full_path}")

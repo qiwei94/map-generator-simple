@@ -135,7 +135,7 @@ FEATURE_CONFIGS: Dict[str, dict] = {
     },
     "water": {
         "tag_filters": {
-            "natural": "water",
+            "natural": ["water", "coastline"],
             "waterway": True,
             "landuse": "reservoir",
             "water": True,
@@ -729,6 +729,19 @@ def fetch_water(
     config = FEATURE_CONFIGS["water"]
     pipeline = OSMPipeline(pbf_path, "water", (south, west, north, east), config)
     result = pipeline.run(export_gpkg=export_gpkg)
+
+    # Oceans are usually directed natural=coastline ways in OSM, not water
+    # polygons.  Materialize a bbox-clipped sea polygon here so PNG, quick GLB
+    # and formal 3MF all consume the exact same water geometry.
+    if not result.empty:
+        from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.coastline import (
+            materialize_coastal_water,
+        )
+        result = materialize_coastal_water(
+            result, (south, west, north, east))
+        if export_gpkg:
+            export_step_to_gpkg(result, export_gpkg,
+                                "step5_coastal_water")
 
     # Apply WATER_MIN_AREA_M2 filter for polygons
     if not result.empty:

@@ -87,7 +87,13 @@ class CityHarness:
             }
 
         gdfs = self.cache.get_or_compute(
-            "gdfs_v1", {"bbox": p.bbox, "pbf": os.path.basename(p.pbf)},
+            "gdfs_v1", {
+                "bbox": p.bbox,
+                "pbf": os.path.basename(p.pbf),
+                # Invalidate combined gdfs cached before coastline ways were
+                # materialized as sea polygons.
+                "water_schema": "coastline_v2",
+            },
             _fetch_all, label="fetch gdfs")
 
         # 投影到本地坐标（origin 相对）
