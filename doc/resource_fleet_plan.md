@@ -16,7 +16,7 @@ availability, and network transfer.
 | Node | Measured / reported resources | Intended role |
 | --- | --- | --- |
 | Local MacBook Pro | Apple M1 Pro, 10 cores, 16 GB RAM, 460 GiB SSD, about 378 GiB free | Primary development, visual QA, and latency-sensitive render worker |
-| Intel Mac | 6 cores, 16 GB RAM, 256 GB SSD | Secondary render worker, PNG batches, tests, and validation |
+| Intel Mac | 4 cores / 8 threads, 16 GB RAM, 256 GB SSD, about 123 GiB free | Secondary render worker, PNG batches, tests, and validation |
 | Windows desktop | 6 cores, 32 GB RAM, 1 TB SSD, 4 TB HDD | High-memory render worker; hot cache on SSD; global cold PBF/DEM and artifact archive on HDD |
 | `118.31.184.240` | 2 vCPU, 15 GiB RAM, 118 GiB root, about 15 GiB free | Public web/API, accounts, durable queue, artifact delivery, and emergency fallback worker |
 | `8.136.0.235` | 2 vCPU, 1.8 GiB RAM; 316 GiB virtual disk but only a 135.8 GiB root partition | Data downloader/catalog, hot-cloud cache mirror, backup, and worker control plane; no heavy geometry |
