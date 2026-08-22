@@ -42,6 +42,15 @@ def test_size_override_uses_an_isolated_output_slug():
     assert city["slug"] == "custom_327de4"
 
 
+def test_suzhou_showcase_uses_jiangsu_extract():
+    plan = json.loads((ROOT / "data" / "showcase_cities.json").read_text(
+        encoding="utf-8"))
+    suzhou = next(city for city in plan["cities"]
+                  if city["key"] == "suzhou")
+
+    assert suzhou["pbf"] == "jiangsu-latest.osm.pbf"
+
+
 def test_showcase_api_omits_outputs_with_the_wrong_physical_area(
         monkeypatch, tmp_path):
     plan = {

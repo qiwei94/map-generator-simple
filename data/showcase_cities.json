@@ -33,7 +33,7 @@
       "title": "苏州 · 金鸡湖",
       "caption": "金鸡湖水岸与苏州城市纹理",
       "center": [31.2883, 120.66565],
-      "pbf": "zhejiang-latest.osm.pbf",
+      "pbf": "jiangsu-latest.osm.pbf",
       "prototype": "landscape",
       "hero_style": "block_fill",
       "featured": false
