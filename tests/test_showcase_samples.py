@@ -32,6 +32,16 @@ def test_bbox_around_is_a_physical_15_km_square():
     assert east_west == pytest.approx(15, abs=0.02)
 
 
+def test_size_override_uses_an_isolated_output_slug():
+    city = {"key": "paris", "slug": "custom_327de4", "title": "Paris"}
+
+    runtime = showcase.city_for_size(city, 25)
+
+    assert runtime["slug"] == "showcase_paris_25km"
+    assert runtime["sample_size_km"] == 25
+    assert city["slug"] == "custom_327de4"
+
+
 def test_showcase_api_omits_outputs_with_the_wrong_physical_area(
         monkeypatch, tmp_path):
     plan = {

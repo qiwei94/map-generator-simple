@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Generate verified 15 km city samples sequentially for the landing page."""
+"""Generate verified city samples sequentially for the landing page.
+
+The checked-in plan keeps the production gallery defaults.  Operators can use
+``--size-km`` for an isolated comparison batch without rewriting that plan or
+overwriting its canonical output directories.
+"""
 from __future__ import annotations
 
 import argparse
@@ -33,6 +38,15 @@ def bbox_around(center: list[float], size_km: float) -> list[float]:
     lat_delta = half / 110.574
     lon_delta = half / (111.320 * max(0.01, math.cos(math.radians(lat))))
     return [lat - lat_delta, lon - lon_delta, lat + lat_delta, lon + lon_delta]
+
+
+def city_for_size(city: dict, size_km: float) -> dict:
+    """Return an isolated runtime entry for a non-default sample size."""
+    runtime = dict(city)
+    size_label = f"{size_km:g}".replace(".", "p")
+    runtime["slug"] = f"showcase_{city['key']}_{size_label}km"
+    runtime["sample_size_km"] = size_km
+    return runtime
 
 
 def write_status(**payload) -> None:
@@ -108,23 +122,30 @@ def generate(city: dict, size_km: float) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="顺序生成首页 15×15 km 全球城市样品")
+        description="顺序生成首页全球城市样品")
     parser.add_argument("--only", default="",
                         help="逗号分隔的城市 key；默认计划内全部")
     parser.add_argument("--limit", type=int, default=0,
                         help="最多处理几个尚未完成的城市")
     parser.add_argument("--force", action="store_true",
                         help="即使已有合格结果也重新生成")
+    parser.add_argument("--size-km", type=float, default=None,
+                        help="覆盖计划尺寸；输出隔离为 showcase_<key>_<size>km")
     parser.add_argument("--fail-fast", action="store_true")
     parser.add_argument("--min-free-gb", type=float, default=8.0,
                         help="每个城市开始前要求的最小磁盘余量（默认 8GB）")
     args = parser.parse_args()
 
     plan = json.loads(PLAN_PATH.read_text(encoding="utf-8"))
-    size_km = float(plan["size_km"])
+    size_km = (float(args.size_km) if args.size_km is not None
+               else float(plan["size_km"]))
+    if not 1 <= size_km <= 100:
+        parser.error("--size-km must be between 1 and 100")
     selected = {key.strip() for key in args.only.split(",") if key.strip()}
     cities = [city for city in plan["cities"]
               if not selected or city["key"] in selected]
+    if args.size_km is not None:
+        cities = [city_for_size(city, size_km) for city in cities]
     if selected:
         missing = selected - {city["key"] for city in cities}
         if missing:
@@ -143,6 +164,7 @@ def main() -> int:
     failed: dict[str, str] = {}
     processed = 0
     write_status(state="running", total=len(cities), current=None,
+                 size_km=size_km,
                  done=done, skipped=skipped, failed=failed)
 
     for city in cities:
@@ -152,6 +174,7 @@ def main() -> int:
                 f"stopped safely: only {free_gb:.1f}GB free "
                 f"(< {args.min_free_gb:.1f}GB)")
             write_status(state="blocked_low_disk", total=len(cities),
+                         size_km=size_km,
                          current=None, done=done, skipped=skipped,
                          failed=failed, free_gb=round(free_gb, 2))
             print(f"[showcase] {failed[city['key']]}", file=sys.stderr,
@@ -170,6 +193,7 @@ def main() -> int:
             break
         processed += 1
         write_status(state="running", total=len(cities), current=city["key"],
+                     size_km=size_km, slug=city["slug"],
                      done=done, skipped=skipped, failed=failed)
         code = generate(city, size_km)
         valid, detail = validate_gallery(city, size_km)
@@ -185,6 +209,7 @@ def main() -> int:
 
     state = "done" if not failed else "done_with_failures"
     write_status(state=state, total=len(cities), current=None,
+                 size_km=size_km,
                  done=done, skipped=skipped, failed=failed)
     print(f"\n[showcase] {state}: generated={len(done)} "
           f"skipped={len(skipped)} failed={len(failed)}", flush=True)
