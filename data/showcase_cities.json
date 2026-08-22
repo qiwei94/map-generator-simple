@@ -43,6 +43,8 @@
       "slug": "showcase_chicago_15km",
       "title": "芝加哥 · 密歇根湖岸",
       "caption": "湖岸天际线与棋盘街区",
+      "location": "CHICAGO / DENSE DETAIL",
+      "static_asset": "chicago-15km-dense.jpg",
       "center": [41.8781, -87.6298],
       "pbf": "illinois-latest.osm.pbf",
       "prototype": "skyline",
