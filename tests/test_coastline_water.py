@@ -87,4 +87,4 @@ def test_gallery_combined_cache_is_invalidated_for_coastline_data():
     source = (Path(__file__).resolve().parents[1] / "aesthetic" /
               "rerun_harness.py").read_text(encoding="utf-8")
 
-    assert '"water_schema": "coastline_v2"' in source
+    assert '"water_schema": "large_relations_v3"' in source

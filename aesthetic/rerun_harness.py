@@ -92,7 +92,7 @@ class CityHarness:
                 "pbf": os.path.basename(p.pbf),
                 # Invalidate combined gdfs cached before coastline ways were
                 # materialized as sea polygons.
-                "water_schema": "coastline_v2",
+                "water_schema": "large_relations_v3",
             },
             _fetch_all, label="fetch gdfs")
 
