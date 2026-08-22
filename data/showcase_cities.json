@@ -45,6 +45,7 @@
       "caption": "湖岸天际线与棋盘街区",
       "location": "CHICAGO / DENSE DETAIL",
       "static_asset": "chicago-15km-dense.jpg",
+      "asset_version": "chicago-water-gap-v52",
       "center": [41.8781, -87.6298],
       "pbf": "illinois-latest.osm.pbf",
       "prototype": "skyline",

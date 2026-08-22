@@ -100,6 +100,29 @@ def test_showcase_api_omits_false_success_with_zero_features(
     assert server.api_showcase()["samples"] == []
 
 
+def test_showcase_static_asset_uses_declared_cache_version(
+        monkeypatch, tmp_path):
+    plan_path = tmp_path / "showcase.json"
+    plan_path.write_text(json.dumps({
+        "size_km": 15,
+        "cities": [{
+            "key": "sample", "title": "Sample", "featured": True,
+            "static_asset": "sample.jpg", "asset_version": "water-fix-v2",
+        }],
+    }), encoding="utf-8")
+    static_dir = tmp_path / "static"
+    assets_dir = static_dir / "assets"
+    assets_dir.mkdir(parents=True)
+    (assets_dir / "sample.jpg").write_bytes(b"image")
+    monkeypatch.setattr(server, "SHOWCASE_PLAN_PATH", plan_path)
+    monkeypatch.setattr(server, "STATIC_DIR", static_dir)
+
+    result = server.api_showcase()
+
+    assert result["samples"][0]["url"] == (
+        "/assets/sample.jpg?release=water-fix-v2")
+
+
 def test_batch_validator_rejects_zero_feature_false_success(
         monkeypatch, tmp_path):
     gallery_dir = tmp_path / "gallery"

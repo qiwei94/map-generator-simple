@@ -1184,6 +1184,13 @@ def api_showcase():
             path = STATIC_DIR / "assets" / Path(static_asset).name
             if path.is_file():
                 city_size = int(city.get("size_km") or size_km)
+                asset_version = "".join(
+                    char for char in str(city.get("asset_version", ""))
+                    if char.isalnum() or char in "-_"
+                )
+                asset_url = f"/assets/{path.name}"
+                if asset_version:
+                    asset_url = f"{asset_url}?release={asset_version}"
                 samples.append({
                     "title": city.get("caption") or city.get("title"),
                     "location": city.get("location", "HANGZHOU / WEST LAKE"),
@@ -1191,7 +1198,7 @@ def api_showcase():
                     "alt": (f"真实生成的{city.get('title', '')} "
                             f"{city_size} 公里乘 {city_size} 公里风格图"),
                     "size_km": city_size,
-                    "url": f"/assets/{path.name}",
+                    "url": asset_url,
                 })
             continue
         slug = city.get("slug", "")

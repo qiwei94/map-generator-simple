@@ -376,7 +376,7 @@ const FALLBACK_HERO_SAMPLES = [
     alt: "真实生成的巴黎 15 公里乘 15 公里精细风格图",
   },
   {
-    url: "assets/chicago-15km-dense.jpg?release=chicago-west-v49",
+    url: "assets/chicago-15km-dense.jpg?release=chicago-water-gap-v52",
     kind: "真实 15 × 15 KM 输出",
     location: "CHICAGO / DENSE DETAIL",
     title: "湖岸天际线与棋盘街区",
