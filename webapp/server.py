@@ -46,7 +46,15 @@ SHOWCASE_PLAN_PATH = ROOT / "data" / "showcase_cities.json"
 SHOWCASE_STATUS_PATH = ROOT / "tmp" / "showcase_batch_status.json"
 JOB_LOG_DIR = Path(os.environ.get(
     "STUDIO_JOB_LOG_DIR", ROOT / "tmp" / "webapp_jobs"))
-JOB_LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _ensure_runtime_dirs() -> None:
+    """Create ignored runtime directories before FastAPI mounts them."""
+    for path in (OUTPUT_DIR, GALLERY_DIR, JOB_LOG_DIR):
+        path.mkdir(parents=True, exist_ok=True)
+
+
+_ensure_runtime_dirs()
 
 AUTH_REQUIRED = os.environ.get("AUTH_REQUIRED", "").lower() in (
     "1", "true", "yes", "on",

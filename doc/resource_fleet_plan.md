@@ -2,6 +2,10 @@
 
 Updated: 2026-08-20
 
+Implementation status was re-verified on 2026-08-22.  The detailed commands,
+data inventory and acceptance evidence are in
+`doc/session_2026_08_22_cluster_bootstrap.md`.
+
 This document records the intended role of the available machines.  The goal
 is not to make every host interchangeable: map generation is limited by a
 mixture of memory, local-disk latency, single-core geometry work, data
@@ -107,3 +111,24 @@ and failure telemetry rather than CPU-count heuristics alone.
 7. Add a fleet page showing queue depth, assigned node, progress stage, peak
    memory, cache hits, artifacts, and retry reason.
 
+## Verified rollout status — 2026-08-22
+
+- Windows WSL2 was bootstrapped from the verified `30d6733` repository, with
+  the follow-up fixes recorded in the commit containing this document.  It has
+  a Python 3.12 virtual
+  environment, native osmium 1.16, a 24 GB memory / 8 GB swap allocation, and
+  access to the existing F-drive DEM archive.  Non-slow tests and both draft
+  and formal model generation pass.  It is ready for bounded manual compute,
+  but is not registered as a permanent queue worker.
+- The Intel Mac now has the same repository, a Python 3.9 virtual environment,
+  the portable pyosmium backend, Zhejiang PBF and the West Lake DEM tile.
+  Non-slow tests and a real portable road extraction pass.  Native osmium is
+  still absent, so it remains a secondary worker.
+- `cloud-api` remains the only active API/worker host.  No service restart or
+  deployment was performed during the bootstrap.  Its root filesystem has
+  only about 14 GiB free and must not become the global artifact archive.
+- `cloud-data` remains storage-only.  Its 1.8 GiB memory is below the geometry
+  pipeline requirement even though it holds the 80-PBF and DEM mirrors.
+- Permanent multi-worker polling remains blocked on capability/PBF matching
+  and transactional database leases.  Connectivity and a passing local render
+  are not sufficient reasons to enable an unconstrained worker.

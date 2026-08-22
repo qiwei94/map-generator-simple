@@ -12,6 +12,12 @@ pyproj>=3.6.0
 requests>=2.28.0
 scipy>=1.11.0
 rich>=13.0.0
+matplotlib>=3.8.0             # vegetation draping + PNG/review rendering
+
+# Apple's bundled Python 3.9 is linked against LibreSSL 2.8.3.  urllib3 2.x
+# warns and is not a supported HTTPS stack there; workers on newer Python are
+# unaffected by this conditional compatibility pin.
+urllib3<2; python_version < "3.10" and sys_platform == "darwin"
 
 # Optional (recommended for better performance)
 mapbox-earcut>=1.0.0
