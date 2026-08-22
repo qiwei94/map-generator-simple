@@ -49,6 +49,21 @@ def city_for_size(city: dict, size_km: float) -> dict:
     return runtime
 
 
+def input_problems(cities: list[dict], expected_sizes: dict[str, int]) -> list[str]:
+    """Describe missing or partial PBFs without accepting false-ready inputs."""
+    problems = []
+    for city in cities:
+        filename = city["pbf"]
+        path = PBF_DIR / filename
+        expected = expected_sizes.get(filename)
+        if not path.is_file():
+            problems.append(f"{filename}: missing")
+        elif expected is not None and path.stat().st_size != int(expected):
+            problems.append(
+                f"{filename}: {path.stat().st_size}/{int(expected)} bytes")
+    return problems
+
+
 def write_status(**payload) -> None:
     STATUS_PATH.parent.mkdir(parents=True, exist_ok=True)
     tmp = STATUS_PATH.with_suffix(".tmp")
@@ -134,6 +149,11 @@ def main() -> int:
     parser.add_argument("--fail-fast", action="store_true")
     parser.add_argument("--min-free-gb", type=float, default=8.0,
                         help="每个城市开始前要求的最小磁盘余量（默认 8GB）")
+    parser.add_argument("--pbf-size-manifest", default="",
+                        help="PBF 精确字节清单；用于拒绝未完成传输")
+    parser.add_argument("--wait-seconds", type=int, default=0,
+                        help="等待 PBF 就绪和前一批释放锁的最长秒数")
+    parser.add_argument("--poll-seconds", type=int, default=30)
     args = parser.parse_args()
 
     plan = json.loads(PLAN_PATH.read_text(encoding="utf-8"))
@@ -151,13 +171,40 @@ def main() -> int:
         if missing:
             parser.error(f"unknown city keys: {', '.join(sorted(missing))}")
 
+    expected_sizes: dict[str, int] = {}
+    if args.pbf_size_manifest:
+        manifest_path = Path(args.pbf_size_manifest)
+        if not manifest_path.is_absolute():
+            manifest_path = ROOT / manifest_path
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        expected_sizes = {str(key): int(value)
+                          for key, value in manifest.get("files", {}).items()}
+    deadline = time.time() + max(0, args.wait_seconds)
+    while True:
+        problems = input_problems(cities, expected_sizes)
+        if not problems:
+            break
+        if args.wait_seconds <= 0 or time.time() >= deadline:
+            print("PBF inputs are not ready: " + "; ".join(problems),
+                  file=sys.stderr, flush=True)
+            return 4
+        print("[showcase] waiting for PBF inputs: " + "; ".join(problems),
+              flush=True)
+        time.sleep(max(1, args.poll_seconds))
+
     LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
     lock_file = LOCK_PATH.open("w")
-    try:
-        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        print("another showcase batch is already running", file=sys.stderr)
-        return 2
+    while True:
+        try:
+            fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except BlockingIOError:
+            if args.wait_seconds <= 0 or time.time() >= deadline:
+                print("another showcase batch is already running",
+                      file=sys.stderr)
+                return 2
+            print("[showcase] waiting for the active batch lock", flush=True)
+            time.sleep(max(1, args.poll_seconds))
 
     done: list[str] = []
     skipped: list[str] = []

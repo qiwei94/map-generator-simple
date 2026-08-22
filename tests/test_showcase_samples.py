@@ -51,6 +51,17 @@ def test_suzhou_showcase_uses_jiangsu_extract():
     assert suzhou["pbf"] == "jiangsu-latest.osm.pbf"
 
 
+def test_input_gate_rejects_partial_pbf(monkeypatch, tmp_path):
+    monkeypatch.setattr(showcase, "PBF_DIR", tmp_path)
+    path = tmp_path / "city.osm.pbf"
+    path.write_bytes(b"partial")
+
+    problems = showcase.input_problems(
+        [{"pbf": "city.osm.pbf"}], {"city.osm.pbf": 100})
+
+    assert problems == ["city.osm.pbf: 7/100 bytes"]
+
+
 def test_showcase_api_omits_outputs_with_the_wrong_physical_area(
         monkeypatch, tmp_path):
     plan = {

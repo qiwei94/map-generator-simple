@@ -26,6 +26,11 @@ def build_command(args: argparse.Namespace) -> list[str]:
         command.append("--force")
     if args.fail_fast:
         command.append("--fail-fast")
+    if args.pbf_size_manifest:
+        command.extend(["--pbf-size-manifest", args.pbf_size_manifest])
+    if args.wait_seconds:
+        command.extend(["--wait-seconds", str(args.wait_seconds),
+                        "--poll-seconds", str(args.poll_seconds)])
     return command
 
 
@@ -41,6 +46,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-free-gb", type=float, default=8.0)
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--fail-fast", action="store_true")
+    parser.add_argument("--pbf-size-manifest", default="")
+    parser.add_argument("--wait-seconds", type=int, default=0)
+    parser.add_argument("--poll-seconds", type=int, default=30)
     return parser.parse_args()
 
 

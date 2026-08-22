@@ -15,7 +15,9 @@ from tools import launch_showcase_batch as launcher  # noqa: E402
 def test_build_command_preserves_partition_and_size():
     args = argparse.Namespace(
         only="chicago,new_york", size_km=25.0, min_free_gb=8.0,
-        force=False, fail_fast=True)
+        force=False, fail_fast=True,
+        pbf_size_manifest="data/pbf.json", wait_seconds=3600,
+        poll_seconds=15)
 
     command = launcher.build_command(args)
 
@@ -25,3 +27,5 @@ def test_build_command_preserves_partition_and_size():
     assert command[command.index("--only") + 1] == "chicago,new_york"
     assert "--force" not in command
     assert "--fail-fast" in command
+    assert command[command.index("--pbf-size-manifest") + 1] == "data/pbf.json"
+    assert command[command.index("--wait-seconds") + 1] == "3600"
