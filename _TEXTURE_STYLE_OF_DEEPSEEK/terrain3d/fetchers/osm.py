@@ -135,7 +135,7 @@ FEATURE_CONFIGS: Dict[str, dict] = {
     },
     "water": {
         "tag_filters": {
-            "natural": "water",
+            "natural": ["water", "coastline"],
             "waterway": True,
             "landuse": "reservoir",
             "water": True,
@@ -729,6 +729,37 @@ def fetch_water(
     config = FEATURE_CONFIGS["water"]
     pipeline = OSMPipeline(pbf_path, "water", (south, west, north, east), config)
     result = pipeline.run(export_gpkg=export_gpkg)
+
+    # City-sized extracts can break multipolygon relations whose outer rings
+    # extend far beyond the frame (Lake Michigan is the canonical example).
+    # Recover those polygons from a compact per-PBF relation cache built before
+    # bbox clipping, then add only water area missing from the normal result.
+    try:
+        from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.large_water_relations import (
+            fetch_large_water_relations,
+            merge_large_water_relations,
+        )
+        relation_water = fetch_large_water_relations(
+            pbf_path,
+            (south, west, north, east),
+            pipeline._cli_fetcher._get_osmium_command(),
+        )
+        result = merge_large_water_relations(result, relation_water)
+    except Exception as exc:
+        logger.warning("Large-water relation supplement failed: %s", exc)
+
+    # Oceans are usually directed natural=coastline ways in OSM, not water
+    # polygons.  Materialize a bbox-clipped sea polygon here so PNG, quick GLB
+    # and formal 3MF all consume the exact same water geometry.
+    if not result.empty:
+        from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.coastline import (
+            materialize_coastal_water,
+        )
+        result = materialize_coastal_water(
+            result, (south, west, north, east))
+        if export_gpkg:
+            export_step_to_gpkg(result, export_gpkg,
+                                "step5_coastal_water")
 
     # Apply WATER_MIN_AREA_M2 filter for polygons
     if not result.empty:

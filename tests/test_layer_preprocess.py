@@ -23,6 +23,7 @@ from _TEXTURE_STYLE_OF_DEEPSEEK._layer_preprocess import (
     _filter_by_area,
     _extract_roads,
     _effective_road_tier,
+    _close_unprintable_water_gaps,
     LayerPolygons,
 )
 from _TEXTURE_STYLE_OF_DEEPSEEK.buildings import _aggregate_in_blocks
@@ -185,6 +186,30 @@ def test_large_area_caps_unprintable_footway_block_detail():
     assert _effective_road_tier(5, area_km2=100) == 4
     assert _effective_road_tier(4, area_km2=100) == 4
     assert _effective_road_tier(5, area_km2=25) == 5
+
+
+def test_water_holes_require_a_full_nozzle_width_to_survive():
+    outer = box(0, 0, 1000, 1000)
+    narrow_breakwater = box(100, 100, 700, 120)
+    printable_island = box(800, 800, 900, 900)
+    water = Polygon(
+        outer.exterior.coords,
+        [narrow_breakwater.exterior.coords, printable_island.exterior.coords],
+    )
+
+    cleaned = _close_unprintable_water_gaps(water, nozzle_real_m=30.0)
+
+    assert len(cleaned.interiors) == 1
+    assert cleaned.contains(Point(200, 110))
+    assert not cleaned.contains(Point(850, 850))
+
+
+def test_edge_connected_water_slit_below_nozzle_width_is_closed():
+    water = box(0, 0, 1000, 1000).difference(box(490, 500, 510, 1001))
+
+    cleaned = _close_unprintable_water_gaps(water, nozzle_real_m=30.0)
+
+    assert cleaned.contains(Point(500, 900))
 
 
 # ---------------------------------------------------------------------------
