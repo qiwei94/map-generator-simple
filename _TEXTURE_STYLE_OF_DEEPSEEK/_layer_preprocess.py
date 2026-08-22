@@ -739,6 +739,49 @@ def _extract_VL_VO(
 # B.1.4.5: 提取水体 (WL / WO)
 # ---------------------------------------------------------------------------
 
+def _close_unprintable_water_gaps(
+    poly: Polygon,
+    nozzle_real_m: float,
+) -> Polygon:
+    """Close holes and edge-connected slits below one printed nozzle line.
+
+    Large OSM lake relations legitimately contain inner rings for piers and
+    breakwaters.  At city scale some are kilometres long but only a few metres
+    wide, so preserving them creates conspicuous hairline gaps in both the PNG
+    preview and the matching 3MF.  A hole is retained only when eroding it by
+    half a real-world nozzle width leaves a printable core.
+    """
+    if poly.is_empty or nozzle_real_m <= 0:
+        return poly
+
+    half_nozzle = nozzle_real_m * 0.5
+    printable_holes = []
+    for ring in poly.interiors:
+        try:
+            hole = Polygon(ring)
+            if not hole.is_empty and not hole.buffer(-half_nozzle).is_empty:
+                printable_holes.append(ring.coords)
+        except GEOSException:
+            printable_holes.append(ring.coords)
+
+    result = Polygon(poly.exterior.coords, printable_holes)
+    if result.is_empty or not result.is_valid:
+        return poly
+
+    # A clipped multipolygon hole can open onto the bbox edge and become a
+    # narrow notch rather than an interior ring.  Morphological closing fills
+    # those sub-nozzle slits while keeping straight shorelines and printable
+    # islands intact.
+    try:
+        closed = result.buffer(half_nozzle, join_style=2).buffer(
+            -half_nozzle, join_style=2)
+        if isinstance(closed, Polygon) and not closed.is_empty and closed.is_valid:
+            return closed
+    except GEOSException:
+        pass
+    return result
+
+
 def _extract_WL_WO(
     water_gdf: gpd.GeoDataFrame,
     nozzle_real_m: float,
@@ -758,6 +801,8 @@ def _extract_WL_WO(
     WL_polys: List[Polygon] = []
     WO_polys: List[Polygon] = []
     wl_lines_raw: List[Tuple[LineString, str]] = []
+    filled_hole_count = 0
+    repaired_water_count = 0
     # 可打印下限 = 1 喷嘴宽（0.5×nozzle_real 半宽）。历史 1.5× 把大框
     # （scale 小、nozzle_real 大）的城市河道全部撑到 ~200m 宽蓝带。
     min_buffer = nozzle_real_m * 0.5
@@ -773,6 +818,11 @@ def _extract_WL_WO(
             for poly in polys:
                 if poly.is_empty:
                     continue
+                cleaned = _close_unprintable_water_gaps(poly, nozzle_real_m)
+                filled_hole_count += len(poly.interiors) - len(cleaned.interiors)
+                if not cleaned.equals(poly):
+                    repaired_water_count += 1
+                poly = cleaned
                 area = poly.area
                 if is_water_landmark(row, area_m2=area):
                     WL_polys.append(poly)
@@ -821,7 +871,9 @@ def _extract_WL_WO(
                     WL_polys.append(buf)
 
     print(f"  _extract_WL_WO: {len(WL_polys)} WL, {len(WO_polys)} WO, "
-          f"{len(wl_lines_raw)} raw lines (min_buffer={min_buffer:.1f}m)")
+          f"{len(wl_lines_raw)} raw lines, {filled_hole_count} unprintable holes filled "
+          f"across {repaired_water_count} repaired polygons "
+          f"(min_buffer={min_buffer:.1f}m)")
     return WL_polys, WO_polys, wl_lines_raw
 
 

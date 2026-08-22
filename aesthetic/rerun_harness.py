@@ -278,4 +278,4 @@ class CityHarness:
             )
 
         return self.cache.get_or_compute(
-            "preprocess_v3", cache_key, _compute, label="preprocess")
+            "preprocess_v5", cache_key, _compute, label="preprocess")
