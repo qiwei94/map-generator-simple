@@ -386,51 +386,91 @@ const FALLBACK_HERO_SAMPLES = [
 
 let heroSamples = FALLBACK_HERO_SAMPLES;
 let heroSampleIndex = 0;
+let heroRequestedIndex = 0;
 let heroTouchStartX = null;
 let heroAutoplayTimer = null;
+let heroRenderRequestId = 0;
+const heroImageCache = new Map();
 const HERO_AUTOPLAY_MS = 5200;
+
+function preloadHeroImage(url) {
+  if (heroImageCache.has(url)) return heroImageCache.get(url);
+  const pending = new Promise((resolve, reject) => {
+    const candidate = new Image();
+    candidate.onload = async () => {
+      try {
+        if (candidate.decode) await candidate.decode();
+      } catch (_) {
+        // A completed image can still be committed if decode() is unsupported.
+      }
+      resolve();
+    };
+    candidate.onerror = () => {
+      heroImageCache.delete(url);
+      reject(new Error(`无法加载样品图：${url}`));
+    };
+    candidate.src = url;
+  });
+  heroImageCache.set(url, pending);
+  return pending;
+}
 
 function showHeroSample(index, immediate = false) {
   if (!heroSamples.length) return;
-  heroSampleIndex = (index + heroSamples.length) % heroSamples.length;
-  const sample = heroSamples[heroSampleIndex];
+  window.clearTimeout(heroAutoplayTimer);
+  heroAutoplayTimer = null;
+  const targetIndex = (index + heroSamples.length) % heroSamples.length;
+  const sample = heroSamples[targetIndex];
+  const requestId = ++heroRenderRequestId;
+  heroRequestedIndex = targetIndex;
   const image = $("heroShowcaseImage");
-  const apply = () => {
+  const frame = $("heroShowcase");
+  const commit = () => {
+    if (requestId !== heroRenderRequestId) return;
+    heroSampleIndex = targetIndex;
     image.src = sample.url;
+    image.dataset.sampleUrl = sample.url;
     image.alt = sample.alt || `${sample.title}，真实城市浮雕输出`;
     $("heroShowcaseKind").textContent = sample.kind || "真实 15 × 15 KM 输出";
     $("heroShowcaseLocation").textContent = sample.location || "15 KM × 15 KM";
     $("heroShowcaseTitle").textContent = sample.title;
     $("heroShowcaseCount").textContent =
-      `${String(heroSampleIndex + 1).padStart(2, "0")} / ${String(heroSamples.length).padStart(2, "0")}`;
+      `${String(targetIndex + 1).padStart(2, "0")} / ${String(heroSamples.length).padStart(2, "0")}`;
+    frame.setAttribute("aria-busy", "false");
     image.classList.remove("is-changing");
+    restartHeroAutoplay();
   };
   if (immediate || image.getAttribute("src") === sample.url) {
-    apply();
-  } else {
-    image.classList.add("is-changing");
-    window.setTimeout(apply, 130);
+    if (image.getAttribute("src") === sample.url) {
+      commit();
+      return;
+    }
   }
+  frame.setAttribute("aria-busy", "true");
+  image.classList.add("is-changing");
+  preloadHeroImage(sample.url).then(commit).catch(() => {
+    if (requestId !== heroRenderRequestId) return;
+    frame.setAttribute("aria-busy", "false");
+    image.classList.remove("is-changing");
+    restartHeroAutoplay();
+  });
 }
 
 function restartHeroAutoplay() {
-  window.clearInterval(heroAutoplayTimer);
+  window.clearTimeout(heroAutoplayTimer);
   heroAutoplayTimer = null;
   if (heroSamples.length < 2) return;
-  heroAutoplayTimer = window.setInterval(
-    () => showHeroSample(heroSampleIndex + 1), HERO_AUTOPLAY_MS);
+  heroAutoplayTimer = window.setTimeout(
+    () => showHeroSample(heroRequestedIndex + 1), HERO_AUTOPLAY_MS);
 }
 
 function initHeroShowcase() {
   showHeroSample(0, true);
-  restartHeroAutoplay();
   $("heroShowcasePrev").onclick = () => {
-    showHeroSample(heroSampleIndex - 1);
-    restartHeroAutoplay();
+    showHeroSample(heroRequestedIndex - 1);
   };
   $("heroShowcaseNext").onclick = () => {
-    showHeroSample(heroSampleIndex + 1);
-    restartHeroAutoplay();
+    showHeroSample(heroRequestedIndex + 1);
   };
   const frame = $("heroShowcase");
   frame.addEventListener("touchstart", (event) => {
@@ -441,13 +481,11 @@ function initHeroShowcase() {
     const delta = (event.changedTouches[0]?.clientX ?? heroTouchStartX) - heroTouchStartX;
     heroTouchStartX = null;
     if (Math.abs(delta) >= 45) {
-      showHeroSample(heroSampleIndex + (delta < 0 ? 1 : -1));
-      restartHeroAutoplay();
+      showHeroSample(heroRequestedIndex + (delta < 0 ? 1 : -1));
     }
   }, { passive: true });
   FALLBACK_HERO_SAMPLES.slice(1).forEach((sample) => {
-    const image = new Image();
-    image.src = sample.url;
+    preloadHeroImage(sample.url).catch(() => {});
   });
 }
 
@@ -459,10 +497,8 @@ async function loadShowcase() {
     if (!samples.length) return;
     heroSamples = samples;
     showHeroSample(0, true);
-    restartHeroAutoplay();
     heroSamples.slice(1, 4).forEach((sample) => {
-      const image = new Image();
-      image.src = sample.url;
+      preloadHeroImage(sample.url).catch(() => {});
     });
   } catch (_) {
     // file:// previews and an unavailable API keep the bundled verified samples.

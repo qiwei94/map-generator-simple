@@ -39,7 +39,7 @@ def test_app_script_cache_key_is_bumped_for_hero_sample_carousel():
     html = INDEX_HTML.read_text(encoding="utf-8")
     source = APP_JS.read_text(encoding="utf-8")
 
-    assert '<script src="app.js?v=53"></script>' in html
+    assert '<script src="app.js?v=54"></script>' in html
     assert '<link rel="stylesheet" href="style.css?v=53">' in html
     assert 'id="accountDialog"' in html
     assert 'id="myTasksCard"' in html
@@ -74,7 +74,19 @@ def test_hero_samples_autoplay_and_keep_manual_controls():
     source = APP_JS.read_text(encoding="utf-8")
 
     assert "const HERO_AUTOPLAY_MS = 5200" in source
-    assert "window.setInterval" in source
-    assert "showHeroSample(heroSampleIndex + 1)" in source
+    assert "window.setTimeout" in source
+    assert "showHeroSample(heroRequestedIndex + 1)" in source
     assert '$("heroShowcasePrev").onclick' in source
     assert '$("heroShowcaseNext").onclick' in source
+
+
+def test_hero_sample_image_and_caption_commit_as_one_versioned_state():
+    source = APP_JS.read_text(encoding="utf-8")
+
+    assert "const requestId = ++heroRenderRequestId" in source
+    assert "window.clearTimeout(heroAutoplayTimer)" in source
+    assert "preloadHeroImage(sample.url).then(commit)" in source
+    assert "if (requestId !== heroRenderRequestId) return" in source
+    assert "heroSampleIndex = targetIndex" in source
+    assert "image.dataset.sampleUrl = sample.url" in source
+    assert "window.setTimeout(apply, 130)" not in source
