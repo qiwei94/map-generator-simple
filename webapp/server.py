@@ -1168,6 +1168,19 @@ def api_cities():
     return {"cities": cities}
 
 
+def _showcase_display_title(city: dict, fallback: str = "") -> str:
+    """Prefix showcase captions with the concise city name."""
+    caption = str(city.get("caption") or "").strip()
+    title = str(city.get("title") or fallback).strip()
+    if not caption:
+        return title
+    city_name = title.split("·", 1)[0].strip()
+    compact_caption = caption.replace(" ", "")
+    if city_name and not compact_caption.startswith(f"{city_name}·"):
+        return f"{city_name}·{caption}"
+    return caption
+
+
 @app.get("/api/showcase")
 def api_showcase():
     """Return the current 25 km review batch plus curated legacy samples."""
@@ -1200,7 +1213,7 @@ def api_showcase():
                 if asset_version:
                     asset_url = f"{asset_url}?release={asset_version}"
                 samples.append({
-                    "title": city.get("caption") or city.get("title"),
+                    "title": _showcase_display_title(city),
                     "location": city.get("location", "HANGZHOU / WEST LAKE"),
                     "kind": f"真实 {city_size} × {city_size} KM 输出",
                     "alt": (f"真实生成的{city.get('title', '')} "
@@ -1224,9 +1237,9 @@ def api_showcase():
             if not filename or not path.is_file():
                 continue
             label = style_labels.get(style, style.upper())
-            title = city.get("caption") or city.get("title") or slug
+            title = _showcase_display_title(city, slug)
             if style != city.get("hero_style"):
-                title = f"{city.get('title', title)} · {label.title()}"
+                title = f"{title} · {label.title()}"
             samples.append({
                 "title": title,
                 "location": f"{city.get('key', slug).replace('_', ' ').upper()} / {label}",
@@ -1261,7 +1274,7 @@ def api_showcase():
             if not filename or not path.is_file():
                 continue
             label = style_labels.get(style, str(style).upper())
-            title = city.get("caption") or city.get("title") or slug
+            title = _showcase_display_title(city, slug)
             review_samples.append({
                 "title": title,
                 "location": f"{key.replace('_', ' ').upper()} / {label} / 25 KM",

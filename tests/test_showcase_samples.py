@@ -129,7 +129,8 @@ def test_showcase_api_omits_outputs_with_the_wrong_physical_area(
 
     result = server.api_showcase()
 
-    assert [sample["title"] for sample in result["samples"]] == ["Valid city"]
+    assert [sample["title"] for sample in result["samples"]] == [
+        "Valid·Valid city"]
     assert result["samples"][0]["size_km"] == 15
 
 
@@ -211,13 +212,30 @@ def test_showcase_api_prepends_complete_25km_review_batch(
     result = server.api_showcase()
 
     assert [sample["title"] for sample in result["samples"]] == [
-        "Rome review"]
+        "Rome·Rome review"]
     sample = result["samples"][0]
     assert sample["size_km"] == 25
     assert sample["review_batch"] is True
     assert sample["kind"] == "最新 25 × 25 KM 待审样品"
     assert sample["url"].endswith(
         "/showcase_rome_25km/dense_detail_topdown.png")
+
+
+def test_showcase_title_prefixes_the_concise_city_name():
+    assert server._showcase_display_title({
+        "title": "新加坡 · 滨海湾",
+        "caption": "滨海水岸与花园城市",
+    }) == "新加坡·滨海水岸与花园城市"
+
+
+def test_replaced_legacy_samples_are_not_featured():
+    plan = json.loads((ROOT / "data" / "showcase_cities.json").read_text(
+        encoding="utf-8"))
+    by_key = {city["key"]: city for city in plan["cities"]}
+
+    assert not by_key["paris"]["featured"]
+    assert not by_key["chicago"]["featured"]
+    assert not by_key["rome"]["featured"]
 
 
 def test_batch_validator_rejects_zero_feature_false_success(

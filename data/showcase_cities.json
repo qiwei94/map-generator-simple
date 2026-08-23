@@ -12,7 +12,7 @@
       "pbf": "ile-de-france-latest.osm.pbf",
       "prototype": "skyline",
       "hero_style": "dense_detail",
-      "featured": true
+      "featured": false
     },
     {
       "key": "hangzhou",
@@ -51,7 +51,7 @@
       "pbf": "illinois-latest.osm.pbf",
       "prototype": "skyline",
       "hero_style": "dense_detail",
-      "featured": true
+      "featured": false
     },
     {
       "key": "london",
@@ -73,7 +73,7 @@
       "pbf": "centro-latest.osm.pbf",
       "prototype": "skyline",
       "hero_style": "dense_detail",
-      "featured": true
+      "featured": false
     },
     {
       "key": "milan",
