@@ -39,7 +39,7 @@ def test_app_script_cache_key_is_bumped_for_hero_sample_carousel():
     html = INDEX_HTML.read_text(encoding="utf-8")
     source = APP_JS.read_text(encoding="utf-8")
 
-    assert '<script src="app.js?v=54"></script>' in html
+    assert '<script src="app.js?v=55"></script>' in html
     assert '<link rel="stylesheet" href="style.css?v=53">' in html
     assert 'id="accountDialog"' in html
     assert 'id="myTasksCard"' in html
