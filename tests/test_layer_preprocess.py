@@ -24,9 +24,11 @@ from _TEXTURE_STYLE_OF_DEEPSEEK._layer_preprocess import (
     _extract_roads,
     _effective_road_tier,
     _close_unprintable_water_gaps,
+    preprocess_layers,
     LayerPolygons,
 )
 from _TEXTURE_STYLE_OF_DEEPSEEK.buildings import _aggregate_in_blocks
+from _TEXTURE_STYLE_OF_DEEPSEEK.print_profile import PrinterProfile
 
 
 # ---------------------------------------------------------------------------
@@ -186,6 +188,30 @@ def test_large_area_caps_unprintable_footway_block_detail():
     assert _effective_road_tier(5, area_km2=100) == 4
     assert _effective_road_tier(4, area_km2=100) == 4
     assert _effective_road_tier(5, area_km2=25) == 5
+
+
+def test_preprocess_uses_declared_printer_nozzle_for_real_scale():
+    empty = gpd.GeoDataFrame(
+        {"geometry": []}, geometry="geometry", crs="EPSG:3857")
+    profile = PrinterProfile(
+        profile_id="test-0.6",
+        nozzle_diameter_mm=0.6,
+        extrusion_width_mm=0.65,
+        layer_height_mm=0.2,
+        min_colored_strip_mm=0.9,
+        min_gap_mm=0.75,
+        min_surface_layers=2,
+    )
+
+    layers = preprocess_layers(
+        empty, empty, empty, empty,
+        bbox_local=(0, 0, 1000, 1000),
+        scale=0.01,
+        area_km2=1,
+        printer_profile=profile,
+    )
+
+    assert layers.nozzle_real_m == pytest.approx(60.0)
 
 
 def test_water_holes_require_a_full_nozzle_width_to_survive():

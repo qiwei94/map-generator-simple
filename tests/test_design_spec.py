@@ -29,13 +29,31 @@ def test_full_design_spec_records_artifact_and_feature_evidence(tmp_path):
     path = write_design_spec(tmp_path, spec)
     saved = json.loads(open(path, encoding="utf-8").read())
 
-    assert saved["schema_version"] == "1.0"
+    assert saved["schema_version"] == "1.1"
     assert saved["artifact"]["filename"] == "model.3mf"
     assert saved["artifact"]["size_bytes"] == len(b"real-3mf-fixture")
     assert len(saved["artifact"]["sha256"]) == 64
     assert saved["evidence"]["source_features"]["roads"] == 253628
     assert saved["evidence"]["printable_features"]["roads"] == 5
     assert saved["evidence"]["printable_features"]["water_landmarks"] == 1
+
+
+def test_design_spec_serializes_printability_report(tmp_path):
+    artifact = tmp_path / "model.3mf"
+    artifact.write_bytes(b"print-aware")
+    spec = build_design_spec(
+        city="chicago",
+        bbox_wgs84=[41.8, -87.7, 41.9, -87.6],
+        artifact_path=artifact,
+        printability={
+            "printer_profile": {"nozzle_diameter_mm": 0.4},
+            "derived_xy_real_m": {"nozzle_diameter": 50.0},
+        },
+    )
+    saved = json.loads(open(write_design_spec(tmp_path, spec),
+                            encoding="utf-8").read())
+    assert saved["printability"]["printer_profile"]["nozzle_diameter_mm"] == 0.4
+    assert saved["printability"]["derived_xy_real_m"]["nozzle_diameter"] == 50.0
 
 
 @pytest.mark.parametrize("bbox", [

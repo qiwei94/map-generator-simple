@@ -150,6 +150,24 @@ python generate_city.py --block-base-mode flat --block-base-edge-retreat-mm 3
 python generate_city.py --block-base-mode flat --block-base-edge-retreat-mm 0
 ```
 
+### 6. 打印机物理约束（实验性 P0）
+
+通用正式入口现已把喷嘴、挤出线宽、层高、可靠彩色条带、可靠间隙和最小表面
+层数统一为 `PrinterProfile`。默认 profile 保持原有 0.4 mm 喷嘴输出不变；
+`design_spec.json` 会保存 XY 实地换算和当前 Z 厚度的层高审计。
+
+可用 JSON 显式校准其他喷嘴：
+
+```bash
+python generate_city_legacy.py \
+  --bbox S,W,N,E --pbf /path/to/region.osm.pbf --city demo \
+  --printer-profile-json /path/to/printer.json
+```
+
+P0 阶段只有喷嘴直径参与现有几何尺度计算；其余约束进入审计报告，待道路职责
+分离、水体分级和语义 Z 阶段逐项接管。完整迁移与验收边界见
+[`doc/print_aware_geometry_plan.md`](doc/print_aware_geometry_plan.md)。
+
 ---
 
 ## 计算与部署架构（实测结论）

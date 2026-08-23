@@ -82,6 +82,10 @@ from _TEXTURE_STYLE_OF_DEEPSEEK.buildings import (
     _compress_height,
     _narrow_building_penalty,
 )
+from _TEXTURE_STYLE_OF_DEEPSEEK.print_profile import (
+    DEFAULT_PRINTER_PROFILE,
+    PrinterProfile,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -1396,6 +1400,7 @@ def preprocess_layers(
     height_mode_override: Optional[str] = None,
     aggregate_simplify_m_override: Optional[float] = None,
     bo_mode_override: Optional[str] = None,
+    printer_profile: Optional[PrinterProfile] = None,
 ) -> LayerPolygons:
     """主入口。把 raw OSM gdf 转成 6 类 polygon + roads_lines。
 
@@ -1421,9 +1426,12 @@ def preprocess_layers(
     t0 = time.time()
 
     # ---- Step 1: precision params ----
-    nozzle_real_m = NOZZLE_DIAM_MM / scale if scale > 0 else 51.0
+    effective_printer = printer_profile or DEFAULT_PRINTER_PROFILE
+    nozzle_real_m = (effective_printer.nozzle_diameter_mm / scale
+                     if scale > 0 else 51.0)
     min_area_m2 = MIN_PRINTABLE_AREA_M2
-    print(f"\n[preprocess] nozzle_real={nozzle_real_m:.1f}m, min_area={min_area_m2:.0f}m²")
+    print(f"\n[preprocess] printer={effective_printer.profile_id}, "
+          f"nozzle_real={nozzle_real_m:.1f}m, min_area={min_area_m2:.0f}m²")
 
     # ---- Step 1b: height data quality assessment ----
     height_quality = assess_height_data_quality(buildings_gdf)

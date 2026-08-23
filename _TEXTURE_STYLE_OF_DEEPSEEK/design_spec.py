@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
 
 
-SCHEMA_VERSION = "1.0"
+SCHEMA_VERSION = "1.1"
 
 
 def _json_value(value: Any) -> Any:
@@ -74,6 +74,7 @@ def build_design_spec(
     source_features: Optional[Mapping[str, int]] = None,
     printable_features: Optional[Mapping[str, int]] = None,
     block_base: Optional[Mapping] = None,
+    printability: Optional[Mapping] = None,
     pipeline: str = "generate_city_legacy",
 ) -> dict:
     """Build a validated DesignSpec dictionary without mutating generation."""
@@ -102,6 +103,7 @@ def build_design_spec(
         "decisions": _json_value(decisions or {}),
         "profile": _json_value(profile or {}),
         "block_base": _json_value(block_base or {}),
+        "printability": _json_value(printability or {}),
         "evidence": {
             "source_features": source,
             "printable_features": printable,

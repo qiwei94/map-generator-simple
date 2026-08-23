@@ -14,6 +14,7 @@
 import os
 import sys
 import time
+from typing import Optional
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _PROJECT_ROOT not in sys.path:
@@ -34,12 +35,18 @@ from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.osm import (
 )
 from _TEXTURE_STYLE_OF_DEEPSEEK import config as _cfg
 from _TEXTURE_STYLE_OF_DEEPSEEK.config import (
-    TERRAIN_GRID, get_area_class, compute_scale,
+    TERRAIN_GRID, get_area_class,
 )
 from _TEXTURE_STYLE_OF_DEEPSEEK._layer_preprocess import preprocess_layers
 from _TEXTURE_STYLE_OF_DEEPSEEK._pipeline_cache import PipelineCache
 from _TEXTURE_STYLE_OF_DEEPSEEK.auto_params.city_profile import detect_city_profile
 from _TEXTURE_STYLE_OF_DEEPSEEK.auto_params.param_resolver import resolve_params
+from _TEXTURE_STYLE_OF_DEEPSEEK.print_profile import (
+    DEFAULT_PRINTER_PROFILE,
+    PrinterProfile,
+    PrintScale,
+    build_printability_report,
+)
 
 from .presets import CityPreset
 
@@ -47,8 +54,14 @@ from .presets import CityPreset
 class CityHarness:
     """单城市闭环底座：prepare 一次，run_round 多次。"""
 
-    def __init__(self, preset: CityPreset, use_cache: bool = True):
+    def __init__(
+        self,
+        preset: CityPreset,
+        use_cache: bool = True,
+        printer_profile: Optional[PrinterProfile] = None,
+    ):
         self.preset = preset
+        self.printer_profile = printer_profile or DEFAULT_PRINTER_PROFILE
         self.cache = PipelineCache(f"{preset.name}_aesthetic", enabled=use_cache)
         self.ctx: dict = {}
         self.profile = None
@@ -72,7 +85,8 @@ class CityHarness:
         area_km2 = bbox["area_km2"]
         area_class = get_area_class(area_km2)
         resolution = TERRAIN_GRID.get(area_class, 512)
-        scale = compute_scale(bbox["width_m"], bbox["height_m"])
+        print_scale = PrintScale(bbox["width_m"], bbox["height_m"])
+        scale = print_scale.scale_mm_per_m
         utm_crs, origin, utm_bbox = bbox["utm_crs"], bbox["origin"], bbox["utm_bbox"]
         bbox_local = (utm_bbox[0] - origin[0], utm_bbox[1] - origin[1],
                       utm_bbox[2] - origin[0], utm_bbox[3] - origin[1])
@@ -195,6 +209,18 @@ class CityHarness:
             "elevation_grid": elevation_grid,
             "bbox_wgs84": p.bbox,
             "amap_water_polys": amap_water_polys,
+            "printer_profile": self.printer_profile,
+            "printability": build_printability_report(
+                self.printer_profile,
+                print_scale,
+                current_thresholds={
+                    "min_printable_area_m2": _cfg.MIN_PRINTABLE_AREA_M2,
+                },
+                z_thicknesses_mm={
+                    "road_thickness_mm": _cfg.ROAD_THICKNESS_MM,
+                    "water_thickness_mm": _cfg.WATER_THICKNESS_MM,
+                },
+            ),
             **gdfs,
         }
         self._prepared = True
@@ -212,6 +238,7 @@ class CityHarness:
             "building_print_limit_m2": rp.building_print_limit_m2,
             "building_v2_road_tier": rp.building_v2_road_tier,
             "road_width_multiplier": rp.road_width_multiplier,
+            "building_height_mm_min": rp.building_height_mm_min,
             "building_height_mm_max": rp.building_height_mm_max,
             "building_simplify_tol_m": rp.building_simplify_tol_m,
             "aggregate_simplify_m": float(
@@ -229,6 +256,9 @@ class CityHarness:
         ctx = self.ctx
 
         # 高度杠杆：猴补丁（buildings._compress_height 已函数级 import）
+        _cfg.BUILDING_HEIGHT_MIN_MM = float(params.get(
+            "building_height_mm_min",
+            self.base_params.building_height_mm_min))
         _cfg.BUILDING_HEIGHT_MAX_MM = float(params["building_height_mm_max"])
         # GLB 预览与正式管线共用同一已解析地形起伏。
         _cfg.TERRAIN_THICKNESS_MM = float(params.get(
@@ -258,7 +288,9 @@ class CityHarness:
         # 缓存指纹：只含影响 preprocess 的参数（road_width_multiplier 仅影响渲染）
         cache_key = dict(overrides)
         cache_key["height_max_mm"] = float(params["building_height_mm_max"])
+        cache_key["height_min_mm"] = float(_cfg.BUILDING_HEIGHT_MIN_MM)
         cache_key["simplify_tol_m"] = float(_cfg.BUILDING_SIMPLIFY_TOL_M)
+        cache_key["printer_profile"] = self.printer_profile.to_dict()
 
         def _compute():
             return preprocess_layers(
@@ -274,6 +306,7 @@ class CityHarness:
                 bbox_wgs84=ctx["bbox_wgs84"],
                 utm_crs=ctx["utm_crs"],
                 origin=ctx["origin"],
+                printer_profile=self.printer_profile,
                 **overrides,
             )
 
