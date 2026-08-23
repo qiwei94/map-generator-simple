@@ -336,6 +336,11 @@ def cmd_export(args):
     print(f'  [pyosmium export] input={args.input}', file=sys.stderr)
     factory = osmium.geom.GeoJSONFactory()
     features = []
+    geometry_types = {
+        item.strip().casefold()
+        for item in args.geometry_types.split(',')
+        if item.strip()
+    }
 
     # Try to find area PBF for node location resolution
     area_pbf = _find_area_pbf(args.input)
@@ -364,6 +369,8 @@ def cmd_export(args):
 
     class NodeExport(osmium.SimpleHandler):
         def node(self, n):
+            if 'point' not in geometry_types:
+                return
             tags = {t.k: t.v for t in n.tags}
             if not tags:
                 return
@@ -384,8 +391,12 @@ def cmd_export(args):
                 return
             is_area = any(k in AREA_KEYS for k in tags) or tags.get('area') == 'yes'
             if is_area and len(coords) >= 4 and coords[0] == coords[-1]:
+                if 'polygon' not in geometry_types:
+                    return
                 geom = {'type': 'Polygon', 'coordinates': [coords]}
             elif len(coords) >= 2:
+                if 'linestring' not in geometry_types:
+                    return
                 geom = {'type': 'LineString', 'coordinates': coords}
             else:
                 return
@@ -394,6 +405,8 @@ def cmd_export(args):
 
     class RelExport(osmium.SimpleHandler):
         def relation(self, r):
+            if 'polygon' not in geometry_types:
+                return
             tags = {t.k: t.v for t in r.tags}
             if not tags:
                 return
@@ -457,6 +470,9 @@ def main():
     p_exp.add_argument('input')
     p_exp.add_argument('-o', '--output', required=True)
     p_exp.add_argument('-f', '--format', default='geojson')
+    p_exp.add_argument(
+        '--geometry-types', default='point,linestring,polygon',
+        help='comma-separated point,linestring,polygon families')
     p_exp.add_argument('--overwrite', action='store_true')
 
     args = parser.parse_args()

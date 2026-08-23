@@ -76,6 +76,31 @@ def _export_timeout_seconds(filtered_size_kib: float,
     return max(120, min(600, int(filtered_size_kib / 64) + 60))
 
 
+_EXPORT_GEOMETRY_TYPES = {
+    # Downstream building/land-cover preprocessing ignores points and lines.
+    "building": "polygon",
+    "building_landmarks": "polygon",
+    "vegetation": "polygon",
+    "park": "polygon",
+    "wetland": "polygon",
+    "protected_area": "polygon",
+    "stadium": "polygon",
+    "landuse": "polygon",
+    # Road and rail mesh builders consume linework only.
+    "road": "linestring",
+    "railway": "linestring",
+    # Coastlines, river centerlines, piers and mapped water areas are all used.
+    "water": "linestring,polygon",
+    "pier": "linestring,polygon",
+}
+
+
+def _export_geometry_types(tag_type: str) -> str:
+    """Return only geometry families consumed by a downstream feature layer."""
+    return _EXPORT_GEOMETRY_TYPES.get(
+        tag_type, "point,linestring,polygon")
+
+
 class OsmiumCLIFetcher:
     """使用 osmium CLI 获取 OSM 数据"""
 
@@ -99,7 +124,17 @@ class OsmiumCLIFetcher:
 
     # Water v2 adds coastline ways.  Keep it in a separate namespace so old
     # GeoJSON/tile caches (which cannot contain coastlines) are never reused.
-    _CACHE_NAMESPACES = {'water': 'water_coastline_v2'}
+    # Geometry-filtered exports need new cache identities; old full-frame and
+    # tile caches include hundreds of thousands of geometries that downstream
+    # code immediately discards, but GeoPandas must still allocate them first.
+    _CACHE_NAMESPACES = {
+        'building': 'building_geometry_v1',
+        'building_landmarks': 'building_landmarks_geometry_v1',
+        'road': 'road_geometry_v1',
+        'vegetation': 'vegetation_geometry_v1',
+        'landuse': 'landuse_geometry_v1',
+        'water': 'water_coastline_geometry_v3',
+    }
 
     @staticmethod
     def _pbf_cache_namespace(pbf_file: str) -> str:
@@ -1069,9 +1104,11 @@ class OsmiumCLIFetcher:
         else:
             raw_geojson = output_path
 
+        geometry_types = _export_geometry_types(tag_type)
         cmd3 = [
             *osmium_command, 'export',
             filtered_pbf,
+            '--geometry-types', geometry_types,
             '-o', raw_geojson,
             '-f', 'geojson',
             '--overwrite'
@@ -1079,7 +1116,9 @@ class OsmiumCLIFetcher:
 
         logger.info(f"Step 3: {osmium_label} export -f geojson")
         print(f"  [Step 3/{n_steps}] osmium export (converting to GeoJSON)...")
-        print(f"           Command: {osmium_label} export {filtered_pbf} -o {raw_geojson} -f geojson --overwrite")
+        print(f"           Command: {osmium_label} export {filtered_pbf} "
+              f"--geometry-types {geometry_types} -o {raw_geojson} "
+              "-f geojson --overwrite")
         t3 = time.time()
         # The portable Python-backed osmium fallback is much slower than the
         # native C++ tool on dense extracts. Scale the export budget with the
@@ -1255,9 +1294,11 @@ class OsmiumCLIFetcher:
         # Step 2: 导出为 GeoJSON（保持完整 relation 结构）
         full_geojson = os.path.join(temp_dir, f"{base_name}_{tag_type}_full.geojson")
 
+        geometry_types = _export_geometry_types(tag_type)
         cmd2 = [
             *osmium_command, 'export',
             filtered_pbf,
+            '--geometry-types', geometry_types,
             '-o', full_geojson,
             '-f', 'geojson',
             '--overwrite'
@@ -1265,7 +1306,9 @@ class OsmiumCLIFetcher:
 
         logger.info(f"Step 2: {osmium_label} export -f geojson")
         print(f"  [Step 2/3] osmium export (converting to GeoJSON)...")
-        print(f"           Command: {osmium_label} export {filtered_pbf} -o {full_geojson} -f geojson --overwrite")
+        print(f"           Command: {osmium_label} export {filtered_pbf} "
+              f"--geometry-types {geometry_types} -o {full_geojson} "
+              "-f geojson --overwrite")
         t2 = time.time()
         result2 = subprocess.run(cmd2, capture_output=True, timeout=120, creationflags=flags)
         elapsed2 = time.time() - t2

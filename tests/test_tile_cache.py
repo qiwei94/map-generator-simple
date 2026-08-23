@@ -13,6 +13,7 @@ from shapely.geometry import LineString, Point
 from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.osmium_cli_fetcher import (
     OsmiumCLIFetcher,
     _bbox_option,
+    _export_geometry_types,
     _export_timeout_seconds,
 )
 from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers import osmium_cli_fetcher
@@ -229,6 +230,14 @@ class TestOsmiumBinaryOverride:
 
         assert _export_timeout_seconds(4_886.5, portable) >= 720
         assert _export_timeout_seconds(4_886.5, ["/usr/bin/osmium"]) < 300
+
+    def test_export_geometry_types_match_downstream_consumers(self):
+        assert _export_geometry_types("building") == "polygon"
+        assert _export_geometry_types("vegetation") == "polygon"
+        assert _export_geometry_types("landuse") == "polygon"
+        assert _export_geometry_types("road") == "linestring"
+        assert _export_geometry_types("water") == "linestring,polygon"
+        assert _export_geometry_types("unknown") == "point,linestring,polygon"
 
     @pytest.mark.skipif(os.name == "nt", reason="POSIX executable bit")
     def test_portable_osmium_entry_is_executable(self):

@@ -91,7 +91,8 @@ def test_materialization_preserves_inland_water_and_removes_raw_coastline():
 
 def test_water_filter_and_cache_namespace_include_coastline():
     assert "natural=water,coastline" in OsmiumCLIFetcher.TAG_FILTERS["water"]
-    assert OsmiumCLIFetcher._CACHE_NAMESPACES["water"] == "water_coastline_v2"
+    assert (OsmiumCLIFetcher._CACHE_NAMESPACES["water"]
+            == "water_coastline_geometry_v3")
 
 
 def test_gallery_combined_cache_is_invalidated_for_coastline_data():
