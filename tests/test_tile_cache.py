@@ -8,13 +8,14 @@ import pytest
 import shutil
 import os
 import sys
-from shapely.geometry import Point
+from shapely.geometry import LineString, Point
 
 from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.osmium_cli_fetcher import (
     OsmiumCLIFetcher,
     _bbox_option,
     _export_timeout_seconds,
 )
+from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.osm import OSMPipeline
 from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.elevation import (
     _stitch_tile_grids,
 )
@@ -61,6 +62,30 @@ class TestDedupeFeatures:
         merged = pd.concat([g1, g2], ignore_index=True)
         out = OsmiumCLIFetcher._dedupe_features(merged)
         assert len(out) == 3
+
+
+class TestPipelineCleanup:
+    def test_null_osm_ids_do_not_collapse_anonymous_road_network(self):
+        gdf = gpd.GeoDataFrame({
+            "osm_type": [None, None, "way", "way"],
+            "osm_id": [None, None, 7, 7],
+            "highway": ["primary", "secondary", "residential", "residential"],
+            "geometry": [
+                LineString([(-0.20, 51.50), (-0.10, 51.51)]),
+                LineString([(-0.15, 51.52), (-0.05, 51.53)]),
+                LineString([(-0.12, 51.54), (-0.02, 51.55)]),
+                LineString([(-0.12, 51.54), (-0.02, 51.55)]),
+            ],
+        }, crs="EPSG:4326")
+        pipeline = OSMPipeline.__new__(OSMPipeline)
+        pipeline.feature_type = "road"
+        pipeline.bbox = (51.49, -0.21, 51.56, 0.01)
+
+        out = pipeline.step4_cleanup(gdf)
+
+        assert len(out) == 3
+        assert out["osm_id"].isna().sum() == 2
+        assert (out["osm_id"] == 7).sum() == 1
 
 
 class TestFullFrameRefreshDecision:

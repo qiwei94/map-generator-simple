@@ -427,10 +427,23 @@ class OSMPipeline:
         # Remove empty geometries
         gdf = gdf[~gdf.geometry.is_empty & gdf.geometry.notna()].copy()
 
-        # Deduplicate by osm_id
+        # Deduplicate identified OSM features.  Some osmium/OGR exports keep
+        # the osm_id column but populate it with NULL for every feature.  A
+        # plain drop_duplicates(subset="osm_id") would then collapse an
+        # entire road network to a single row.  Anonymous features are not
+        # safe to deduplicate by ID, so preserve them here; the tiled fetcher
+        # already performs geometry-fingerprint deduplication when needed.
         if "osm_id" in gdf.columns:
             before = len(gdf)
-            gdf = gdf.drop_duplicates(subset="osm_id", keep="first")
+            has_osm_id = gdf["osm_id"].notna()
+            dedupe_columns = ["osm_id"]
+            if "osm_type" in gdf.columns:
+                dedupe_columns.insert(0, "osm_type")
+            duplicate_ids = pd.Series(False, index=gdf.index)
+            duplicate_ids.loc[has_osm_id] = gdf.loc[has_osm_id].duplicated(
+                subset=dedupe_columns, keep="first"
+            )
+            gdf = gdf.loc[~duplicate_ids].copy()
             if len(gdf) < before:
                 logger.info("Step 4 [%s]: Removed %d duplicates",
                              self.feature_type, before - len(gdf))

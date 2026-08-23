@@ -1025,6 +1025,12 @@ def _showcase_output_verified(slug: str, meta: dict,
         "building_density", "road_density_km_per_km2", "water_ratio"))
     if feature_total <= 0:
         return False
+    scene_type = str(meta.get("scene_type") or "").strip().lower()
+    if scene_type == "urban":
+        if float(profile.get("building_density") or 0) <= 0:
+            return False
+        if float(profile.get("road_density_km_per_km2") or 0) <= 0:
+            return False
 
     gallery = GALLERY_DIR / slug
     meta_path = gallery / "gallery_metadata.json"

@@ -238,6 +238,16 @@ def test_replaced_legacy_samples_are_not_featured():
     assert not by_key["rome"]["featured"]
 
 
+def test_repaired_london_and_tokyo_use_dense_25km_reviews():
+    plan = json.loads((ROOT / "data" / "showcase_cities.json").read_text(
+        encoding="utf-8"))
+    by_key = {city["key"]: city for city in plan["cities"]}
+
+    assert by_key["london"]["review_style_25km"] == "dense_detail"
+    assert by_key["tokyo"]["review_style_25km"] == "dense_detail"
+    assert by_key["tokyo"]["center"] == [35.625, 139.785]
+
+
 def test_batch_validator_rejects_zero_feature_false_success(
         monkeypatch, tmp_path):
     gallery_dir = tmp_path / "gallery"
@@ -290,6 +300,37 @@ def test_batch_validator_rejects_urban_gallery_without_roads(
 
     assert not valid
     assert "urban road extraction" in detail
+
+
+def test_showcase_api_rejects_urban_gallery_without_roads(
+        monkeypatch, tmp_path):
+    plan_path = tmp_path / "showcase.json"
+    plan_path.write_text(json.dumps({
+        "size_km": 25,
+        "cities": [{
+            "key": "london", "title": "London", "caption": "Thames",
+            "hero_style": "baseline", "featured": True,
+        }],
+    }), encoding="utf-8")
+    gallery_dir = tmp_path / "gallery"
+    target = gallery_dir / "london"
+    target.mkdir(parents=True)
+    styles = _write_valid_style_images(target)
+    (target / "gallery_metadata.json").write_text(json.dumps({
+        "scene_type": "urban",
+        "profile": {
+            "area_km2": 625,
+            "building_density": 1035,
+            "road_density_km_per_km2": 0,
+            "water_ratio": 0.028,
+        },
+        "styles": styles,
+    }), encoding="utf-8")
+    monkeypatch.setattr(server, "SHOWCASE_PLAN_PATH", plan_path)
+    monkeypatch.setattr(server, "GALLERY_DIR", gallery_dir)
+    server._SHOWCASE_VERIFY_CACHE.clear()
+
+    assert server.api_showcase()["samples"] == []
 
 
 def test_batch_validator_rejects_implausible_full_frame_water(

@@ -62,6 +62,7 @@
       "pbf": "great-britain-latest.osm.pbf",
       "prototype": "skyline",
       "hero_style": "baseline",
+      "review_style_25km": "dense_detail",
       "featured": true
     },
     {
@@ -100,12 +101,13 @@
     {
       "key": "tokyo",
       "slug": "showcase_tokyo_15km",
-      "title": "东京 · 都心",
-      "caption": "东京水系与高密街区",
-      "center": [35.6762, 139.6503],
+      "title": "东京 · 东京湾",
+      "caption": "东京湾与高密街区",
+      "center": [35.6250, 139.7850],
       "pbf": "kanto-latest.osm.pbf",
       "prototype": "skyline",
       "hero_style": "baseline",
+      "review_style_25km": "dense_detail",
       "featured": true
     },
     {

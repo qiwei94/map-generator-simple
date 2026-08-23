@@ -40,7 +40,7 @@ Formal non-slow command:
 Result after the final scoring change:
 
 ```text
-363 passed, 2 skipped, 11 deselected, 22 warnings in 4.56s
+370 passed, 2 skipped, 11 deselected, 22 warnings in 4.92s
 ```
 
 The warnings are the existing LibreSSL, matplotlib/pyparsing and Pillow mode
@@ -129,6 +129,60 @@ gallery task was running.
   because first-use preparation and the unsuccessful optional large-water
   relation lookup consumed most of the run.  This is evidence for cache and
   preview-path work, not a general Windows-versus-Mac performance conclusion.
+
+### London road recovery and Tokyo Bay reframing
+
+The first London 25 km gallery was a false visual success: the Great Britain
+PBF and native osmium extraction were healthy, but the rendered profile had
+zero road density.  The cached London road export contained 732,160 features
+whose `osm_id` column existed but was entirely NULL.  `OSMPipeline.step4_cleanup`
+used `drop_duplicates(subset="osm_id")`, collapsing that complete anonymous
+road network to one row; the later minimum-length filter removed the survivor.
+
+The cleanup now deduplicates only rows with a real OSM ID, using
+`osm_type + osm_id` where available, and preserves anonymous rows.  A regression
+test covers two anonymous roads plus a duplicate identified way.  The public
+showcase gate now also rejects an urban sample whose building or road density
+is zero, so the same failure cannot be promoted merely because PNG files exist.
+
+The corrected London rerun used the original 25 km frame and produced:
+
+- measured area `628.12 km2`, 1,035.37 buildings/km2, 30.74 road-km/km2 and
+  2.76% water;
+- dense-detail printable review layers: BL 4,022, BO 13,965, WL 584, WO 237,
+  block base 22,223 and 22,154 road lines;
+- scores baseline `4.59`, block fill `4.76`, dense detail `5.835`, minimal
+  `4.63`; visual review selected dense detail because it restores continuous
+  London street texture without making roads dominate the Thames.
+
+Tokyo's source data was complete; its old center `[35.6762, 139.6503]` was a
+framing failure that left Tokyo Bay as a small edge fragment.  The selected
+center is now `[35.6250, 139.7850]`, keeping roughly a 60:40 city-to-bay visual
+balance and exposing the Sumida River, port basins and artificial islands.
+
+- measured area `627.38 km2`, 1,386.61 buildings/km2, 28.89 road-km/km2 and
+  30.00% water, versus about 4.17% water in the old frame;
+- dense-detail printable review layers: BL 2,388, BO 26,146, WL 423, WO 199,
+  block base 16,455 and 9,721 road lines;
+- scores baseline `5.18`, block fill `5.32`, dense detail `6.586`, minimal
+  `5.02`; visual review selected dense detail, while minimal was rejected for
+  overly dominant roads.
+
+Both fixed gallery directories passed the strict project validator as
+`verified`.  Before production deployment, the durable queue reported zero
+starting, pending or running jobs.  The previous cloud files were backed up to
+`tmp/deploy_backups/london_tokyo_before_20260823.tar.gz`; the deployed source,
+configuration and two dense-detail PNG hashes matched the controller byte for
+byte.  `studio.service` was restarted after that empty-queue check, while
+`worker.service` was left running.  Both services read back active and the
+showcase API returned the new 25 km dense-detail URLs.
+
+Known evidence gaps remain explicit: the controller had no usable London DEM
+tiles during this gallery run, so its review terrain elevation was flat; and
+Tokyo's profile still reports `is_coastal=false` despite 30% measured water.
+Neither affects these top-down source-data/composition repairs, but both should
+be addressed before treating the metadata as authoritative for 3D terrain or
+automatic coastal classification.
 
 ## Performance finding
 
