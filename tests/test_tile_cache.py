@@ -15,6 +15,7 @@ from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.osmium_cli_fetcher import (
     _bbox_option,
     _export_timeout_seconds,
 )
+from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers import osmium_cli_fetcher
 from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.osm import OSMPipeline
 from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.elevation import (
     _stitch_tile_grids,
@@ -192,6 +193,11 @@ class TestOsmiumBinaryOverride:
     def test_portable_backend_uses_active_python(self, monkeypatch):
         monkeypatch.delenv("OSMIUM_BIN", raising=False)
         monkeypatch.setenv("PATH", "")
+        monkeypatch.setattr(
+            osmium_cli_fetcher,
+            "_STANDARD_EXECUTABLE_DIRS",
+            (),
+        )
 
         fetcher = OsmiumCLIFetcher()
         command = fetcher._get_osmium_command()
@@ -199,6 +205,24 @@ class TestOsmiumBinaryOverride:
         assert fetcher.osmium_available
         assert command[0] == sys.executable
         assert command[1].endswith("tools/osmium_pyosmium.py")
+
+    def test_homebrew_standard_path_wins_when_worker_path_is_minimal(
+            self, monkeypatch, tmp_path):
+        executable = tmp_path / "osmium"
+        executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        executable.chmod(0o755)
+        monkeypatch.delenv("OSMIUM_BIN", raising=False)
+        monkeypatch.setenv("PATH", "")
+        monkeypatch.setattr(
+            osmium_cli_fetcher,
+            "_STANDARD_EXECUTABLE_DIRS",
+            (str(tmp_path),),
+        )
+
+        fetcher = OsmiumCLIFetcher()
+
+        assert fetcher.osmium_available
+        assert fetcher._get_osmium_command() == [str(executable)]
 
     def test_portable_export_budget_handles_dense_road_extract(self):
         portable = [sys.executable, "/repo/tools/osmium_pyosmium.py"]

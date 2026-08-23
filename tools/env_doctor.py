@@ -31,6 +31,12 @@ CORE_MODULES = {
     "PIL": "Pillow",
 }
 
+_STANDARD_EXECUTABLE_DIRS = (
+    Path("/usr/local/bin"),
+    Path("/opt/homebrew/bin"),
+    Path("/usr/bin"),
+)
+
 
 def _version(distribution: str) -> str:
     try:
@@ -54,6 +60,20 @@ def _executable_version(command: List[str]) -> Optional[str]:
         return None
     lines = (result.stdout or result.stderr).strip().splitlines()
     return lines[0] if lines else "available"
+
+
+def _find_executable(name: str) -> Optional[str]:
+    """Resolve tools installed outside a non-interactive worker's PATH."""
+
+    sibling = Path(sys.executable).with_name(
+        f"{name}.exe" if os.name == "nt" else name)
+    candidates = [shutil.which(name), str(sibling)]
+    candidates.extend(str(directory / name)
+                      for directory in _STANDARD_EXECUTABLE_DIRS)
+    for candidate in candidates:
+        if candidate and Path(candidate).is_file() and os.access(candidate, os.X_OK):
+            return str(Path(candidate).resolve())
+    return None
 
 
 def _overture_cli() -> Optional[str]:
@@ -131,7 +151,7 @@ def inspect_environment(project_root: Path) -> Dict[str, object]:
          else "missing native extension; large terrain remains full-resolution"),
     )
 
-    native_osmium = shutil.which("osmium")
+    native_osmium = _find_executable("osmium")
     native_version = (
         _executable_version([native_osmium, "--version"])
         if native_osmium else None
@@ -155,14 +175,14 @@ def inspect_environment(project_root: Path) -> Dict[str, object]:
         overture_version or "missing; optional building-height enrichment disabled",
     )
 
-    aria = shutil.which("aria2c")
+    aria = _find_executable("aria2c")
     add(
         "aria2c",
         "ok" if aria else "warn",
         _executable_version([aria, "--version"]) if aria else "missing; downloads use slower fallback",
     )
 
-    ogr = shutil.which("ogr2ogr")
+    ogr = _find_executable("ogr2ogr")
     add(
         "ogr2ogr",
         "ok" if ogr else "info",

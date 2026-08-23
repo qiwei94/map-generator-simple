@@ -13,6 +13,7 @@ import logging
 import hashlib
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -25,6 +26,31 @@ logger = logging.getLogger(__name__)
 
 # 默认 PBF 文件目录
 DEFAULT_PBF_DIR = os.path.join(os.path.dirname(__file__), '..', '..', '..', 'pbf_cache')
+
+# Non-interactive SSH and service managers often omit Homebrew directories
+# from PATH.  Probe the conventional locations before falling back to the
+# bundled pyosmium compatibility backend.
+_STANDARD_EXECUTABLE_DIRS = (
+    "/usr/local/bin",
+    "/opt/homebrew/bin",
+    "/usr/bin",
+)
+
+
+def _find_standard_executable(name: str, exclude=()) -> Optional[str]:
+    excluded = {os.path.realpath(path) for path in exclude if path}
+    candidates = [shutil.which(name)]
+    candidates.extend(os.path.join(directory, name)
+                      for directory in _STANDARD_EXECUTABLE_DIRS)
+    for candidate in candidates:
+        if not candidate:
+            continue
+        resolved = os.path.realpath(candidate)
+        if resolved in excluded:
+            continue
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
 
 
 def _bbox_option(west, south, east, north) -> str:
@@ -301,12 +327,11 @@ class OsmiumCLIFetcher:
         if candidate != 'osmium':
             return [candidate]
 
-        import shutil
-        native = shutil.which('osmium')
         bundled_entry = os.path.abspath(os.path.join(
             os.path.dirname(__file__), '..', '..', '..', 'tools', 'osmium'))
         bundled_backend = os.path.join(os.path.dirname(bundled_entry),
                                        'osmium_pyosmium.py')
+        native = _find_standard_executable('osmium', exclude=(bundled_entry,))
         if native and os.path.realpath(native) != os.path.realpath(bundled_entry):
             return [native]
 
