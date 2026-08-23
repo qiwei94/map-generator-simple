@@ -32,6 +32,7 @@ from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.elevation import (
 )
 from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.osm import (
     fetch_buildings, fetch_roads, fetch_water, fetch_vegetation,
+    set_pbf_file_path,
 )
 from _TEXTURE_STYLE_OF_DEEPSEEK import config as _cfg
 from _TEXTURE_STYLE_OF_DEEPSEEK.config import (
@@ -77,7 +78,12 @@ class CityHarness:
         p = self.preset
         print(f"\n[harness] prepare: {p.name} ({p.prototype}) bbox={p.bbox}")
 
-        # 指定 PBF（terrain3d fetchers 读 OSM_PBF_FILE）
+        # Bind the requested PBF explicitly.  Merely setting the environment
+        # variable is insufficient if this process previously selected a
+        # different file through the module-level resolver.  A missing city
+        # PBF must fail here instead of silently scanning pbf_cache and using
+        # the first unrelated region.
+        set_pbf_file_path(p.pbf_abs)
         os.environ["OSM_PBF_FILE"] = p.pbf_abs
 
         south, west, north, east = p.bbox

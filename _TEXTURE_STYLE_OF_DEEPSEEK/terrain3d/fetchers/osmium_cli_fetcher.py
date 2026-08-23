@@ -10,7 +10,9 @@
 """
 
 import logging
+import hashlib
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -72,6 +74,28 @@ class OsmiumCLIFetcher:
     # Water v2 adds coastline ways.  Keep it in a separate namespace so old
     # GeoJSON/tile caches (which cannot contain coastlines) are never reused.
     _CACHE_NAMESPACES = {'water': 'water_coastline_v2'}
+
+    @staticmethod
+    def _pbf_cache_namespace(pbf_file: str) -> str:
+        """Return a stable, filesystem-safe source identity for caches.
+
+        Geographic coordinates alone are not sufficient: asking a Zhejiang
+        extract for Beijing creates a valid empty GeoJSON at the same bbox as
+        the later correct Beijing request.  Bind every full-frame and tile
+        cache to the concrete PBF name, size, and modification timestamp so a
+        wrong or updated regional source can never poison another request.
+        """
+
+        absolute = os.path.abspath(pbf_file)
+        basename = os.path.basename(absolute)
+        stem = re.sub(r"[^A-Za-z0-9._-]+", "-", basename).strip("-._")
+        try:
+            stat = os.stat(absolute)
+            identity = f"{basename}:{stat.st_size}:{stat.st_mtime_ns}"
+        except OSError:
+            identity = f"{basename}:missing"
+        digest = hashlib.sha1(identity.encode("utf-8")).hexdigest()[:10]
+        return f"{stem or 'pbf'}-{digest}"
 
     # 标准标签过滤表达式（使用 nwr = node/way/relation）
     # 适用于建筑、道路、植被等普通要素
@@ -387,7 +411,12 @@ class OsmiumCLIFetcher:
         project_tmp = os.path.join(os.path.dirname(__file__), '..', '..', '..', 'tmp')
         os.makedirs(project_tmp, exist_ok=True)
         cache_tag = self._CACHE_NAMESPACES.get(tag_type, tag_type)
-        output_path = os.path.join(project_tmp, f"osmium_{cache_tag}_{south:.4f}_{west:.4f}_{north:.4f}_{east:.4f}.geojson")
+        pbf_namespace = self._pbf_cache_namespace(pbf_file)
+        output_path = os.path.join(
+            project_tmp,
+            f"osmium_{cache_tag}_{pbf_namespace}_"
+            f"{south:.4f}_{west:.4f}_{north:.4f}_{east:.4f}.geojson",
+        )
 
         logger.info(f"使用 CLI 方式获取 {tag_type} 数据...")
         logger.info(f"边界框: ({south:.4f}, {west:.4f}, {north:.4f}, {east:.4f})")
@@ -534,11 +563,13 @@ class OsmiumCLIFetcher:
         except Exception:
             return gdf
 
-    def _tile_cache_path(self, tag_type, ix, iy):
+    def _tile_cache_path(self, tag_type, ix, iy, pbf_file):
         project_root = os.path.dirname(os.path.dirname(os.path.dirname(
             os.path.dirname(os.path.abspath(__file__)))))
         cache_tag = self._CACHE_NAMESPACES.get(tag_type, tag_type)
-        d = os.path.join(project_root, 'cache', 'tiles', cache_tag)
+        pbf_namespace = self._pbf_cache_namespace(pbf_file)
+        d = os.path.join(
+            project_root, 'cache', 'tiles', pbf_namespace, cache_tag)
         os.makedirs(d, exist_ok=True)
         return os.path.join(d, f"{ix}_{iy}.geojson")
 
@@ -572,7 +603,9 @@ class OsmiumCLIFetcher:
         gdf.to_file(tmp_path, driver='GeoJSON')
         os.replace(tmp_path, path)
 
-    def _split_to_tiles(self, gdf, tag_type, ix0, iy0, ix1, iy1, step):
+    def _split_to_tiles(
+        self, gdf, tag_type, ix0, iy0, ix1, iy1, step, pbf_file,
+    ):
         """全框取数结果拆入瓦片缓存（含空瓦片），供跨网格线请求复用。"""
         from shapely.geometry import box
         from _TEXTURE_STYLE_OF_DEEPSEEK._tile_grid import tile_bbox
@@ -587,7 +620,8 @@ class OsmiumCLIFetcher:
                 else:
                     part = gdf
                 self._atomic_write_gdf(
-                    part, self._tile_cache_path(tag_type, ix, iy))
+                    part, self._tile_cache_path(
+                        tag_type, ix, iy, pbf_file))
 
     def fetch_tiled_features(self, tag_type, south, west, north, east,
                              pbf_file=None, region=None, step=None):
@@ -621,9 +655,11 @@ class OsmiumCLIFetcher:
         project_tmp = os.path.join(os.path.dirname(__file__), '..', '..', '..', 'tmp')
         os.makedirs(project_tmp, exist_ok=True)
         cache_tag = self._CACHE_NAMESPACES.get(tag_type, tag_type)
+        pbf_namespace = self._pbf_cache_namespace(pbf_file)
         full_path = os.path.join(
             project_tmp,
-            f"osmium_{cache_tag}_{fs:.4f}_{fw:.4f}_{fn:.4f}_{fe:.4f}.geojson")
+            f"osmium_{cache_tag}_{pbf_namespace}_"
+            f"{fs:.4f}_{fw:.4f}_{fn:.4f}_{fe:.4f}.geojson")
         gdf = self._try_read_geojson_cache(full_path, tag_type)
         if gdf is not None:
             print(f"  [CLI Pipeline] Using cached GeoJSON (full-frame): {full_path}")
@@ -640,7 +676,7 @@ class OsmiumCLIFetcher:
         cached_paths, missing = [], []
         for iy in range(iy0, iy1 + 1):
             for ix in range(ix0, ix1 + 1):
-                tp = self._tile_cache_path(tag_type, ix, iy)
+                tp = self._tile_cache_path(tag_type, ix, iy, pbf_file)
                 if os.path.exists(tp) and os.path.getsize(tp) > 0:
                     cached_paths.append((ix, iy, tp))
                 else:
@@ -678,8 +714,8 @@ class OsmiumCLIFetcher:
                     gpd.read_file(full_path,
                                   columns=list(self._CACHE_COLUMNS)),
                     tag_type)
-                self._split_to_tiles(gdf, tag_type,
-                                     ix0, iy0, ix1, iy1, step)
+                self._split_to_tiles(
+                    gdf, tag_type, ix0, iy0, ix1, iy1, step, pbf_file)
                 print(f"  [Tile Cache] {tag_type}: {len(gdf)} features, "
                       "full-frame refresh split done\n")
                 return self._enrich_building_heights(
@@ -728,7 +764,8 @@ class OsmiumCLIFetcher:
             gdf = self._prune_cache_columns(
                 gpd.read_file(full_path, columns=list(self._CACHE_COLUMNS)),
                 tag_type)
-            self._split_to_tiles(gdf, tag_type, ix0, iy0, ix1, iy1, step)
+            self._split_to_tiles(
+                gdf, tag_type, ix0, iy0, ix1, iy1, step, pbf_file)
             print(f"  [Tile Cache] {tag_type}: {len(gdf)} features, "
                   f"split into tiles done\n")
             return self._enrich_building_heights(gdf, tag_type, fs, fw, fn, fe)

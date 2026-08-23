@@ -64,6 +64,23 @@ class TestDedupeFeatures:
         assert len(out) == 3
 
 
+class TestPbfCacheIdentity:
+    def test_same_bbox_from_different_regions_has_different_namespace(
+            self, tmp_path):
+        beijing = tmp_path / "beijing-latest.osm.pbf"
+        zhejiang = tmp_path / "zhejiang-latest.osm.pbf"
+        beijing.write_bytes(b"beijing")
+        zhejiang.write_bytes(b"zhejiang")
+        fetcher = OsmiumCLIFetcher()
+
+        beijing_key = fetcher._pbf_cache_namespace(str(beijing))
+        zhejiang_key = fetcher._pbf_cache_namespace(str(zhejiang))
+
+        assert beijing_key != zhejiang_key
+        assert "beijing-latest.osm.pbf" in beijing_key
+        assert "zhejiang-latest.osm.pbf" in zhejiang_key
+
+
 class TestPipelineCleanup:
     def test_null_osm_ids_do_not_collapse_anonymous_road_network(self):
         gdf = gpd.GeoDataFrame({
@@ -209,7 +226,8 @@ class TestExtractionFailureSafety:
         monkeypatch.setattr(fetcher, "osmium_available", True)
         monkeypatch.setattr(
             fetcher, "_tile_cache_path",
-            lambda tag, ix, iy: str(tile_dir / f"{tag}_{ix}_{iy}.geojson"),
+            lambda tag, ix, iy, pbf_file: str(
+                tile_dir / f"{tag}_{ix}_{iy}.geojson"),
         )
         monkeypatch.setattr(fetcher, "_run_osmium_pipeline", lambda *a: False)
 
