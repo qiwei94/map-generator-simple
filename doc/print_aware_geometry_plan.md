@@ -133,6 +133,26 @@ P0 实测命令：
 # 390 passed, 2 skipped, 11 deselected
 ```
 
+真实地图烟雾验收（纽约港 5 km）：
+
+```bash
+.venv/bin/python generate_city_legacy.py \
+  --bbox 40.6903,-74.0357,40.7353,-73.9763 \
+  --pbf pbf_cache/new-york-latest.osm.pbf \
+  --city print_profile_nyc_5km --auto-params \
+  --no-vegetation --no-block-base
+```
+
+- 产物：`output/print_profile_nyc_5km/full_print_profile_nyc_5km_0823_1707.3mf`
+  （3,967,716 bytes）；
+- SHA-256：`0dbd16c295c99776ac10e47d5c1d13c762cf0deae7977281a0217af197705718`；
+- 非零证据：道路 1,621；水体 5 WL + 4 WO；建筑 694 BL + 498 BO；
+- 项目验证器：`passed=true`，0 errors，0 warnings；
+- 同目录 `design_spec.json` 为 schema 1.1，包含完整 printability 报告。
+
+这次烟雾验收刻意关闭植被和 block base，只验证 P0 的真实数据提取、几何接入、
+3MF 导出、非零要素证据和审计链路；它不是 P1 道路职责分离的视觉验收样品。
+
 ### P1：道路职责分离
 
 - 拓扑路网继续切 block；
