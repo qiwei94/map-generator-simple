@@ -99,3 +99,4 @@ def test_gallery_combined_cache_is_invalidated_for_coastline_data():
               "rerun_harness.py").read_text(encoding="utf-8")
 
     assert '"water_schema": "coastline_guard_v4"' in source
+    assert '"preprocess_v6"' in source

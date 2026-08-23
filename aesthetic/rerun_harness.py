@@ -277,5 +277,8 @@ class CityHarness:
                 **overrides,
             )
 
+        # The layer cache contains materialized water geometry.  Keep its
+        # schema coupled to the coastline input revision; otherwise a corrected
+        # 0.9% inland-water frame can reuse the old false 99.9% sea layers.
         return self.cache.get_or_compute(
-            "preprocess_v5", cache_key, _compute, label="preprocess")
+            "preprocess_v6", cache_key, _compute, label="preprocess")
