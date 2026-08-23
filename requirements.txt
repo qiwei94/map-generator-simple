@@ -21,6 +21,7 @@ urllib3<2; python_version < "3.10" and sys_platform == "darwin"
 
 # Optional (recommended for better performance)
 mapbox-earcut>=1.0.0
+fast-simplification>=0.2.0   # terrain decimation for 15/25 km formal models
 
 # Local DEM/GeoTIFF reader — used by elevation.py for the Copernicus DEM path.
 # Optional: if not installed, elevation.py silently falls back to SRTM HGT.

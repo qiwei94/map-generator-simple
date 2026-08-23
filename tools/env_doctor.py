@@ -67,6 +67,30 @@ def _overture_cli() -> Optional[str]:
     return None
 
 
+def _fast_simplification_extension() -> Optional[str]:
+    """Return the installed native extension without importing its wrapper.
+
+    The project's Python 3.9 floor cannot import releases whose convenience
+    wrapper uses ``X | None`` annotations, while the compiled ``_simplify``
+    extension is still usable through the runtime's direct loader.  Checking
+    only ``import fast_simplification`` would therefore report a false failure
+    on the controller Mac.
+    """
+
+    try:
+        distribution = importlib.metadata.distribution("fast-simplification")
+    except importlib.metadata.PackageNotFoundError:
+        return None
+    for entry in distribution.files or ():
+        name = str(entry).replace("\\", "/")
+        if (name.startswith("fast_simplification/_simplify")
+                and name.lower().endswith((".so", ".pyd", ".dylib"))):
+            path = Path(distribution.locate_file(entry))
+            if path.is_file():
+                return str(path)
+    return None
+
+
 def _count_files(roots: List[Path], suffixes: tuple[str, ...]) -> int:
     seen = set()
     count = 0
@@ -98,6 +122,14 @@ def inspect_environment(project_root: Path) -> Dict[str, object]:
             add(f"python:{distribution}", "ok", _version(distribution))
         except Exception as exc:  # report binary loader failures as well as imports
             add(f"python:{distribution}", "fail", f"{type(exc).__name__}: {exc}")
+
+    fast_simplification = _fast_simplification_extension()
+    add(
+        "python:fast-simplification",
+        "ok" if fast_simplification else "fail",
+        (_version("fast-simplification") if fast_simplification
+         else "missing native extension; large terrain remains full-resolution"),
+    )
 
     native_osmium = shutil.which("osmium")
     native_version = (
