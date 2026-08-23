@@ -13,6 +13,7 @@ from shapely.geometry import Point
 from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.osmium_cli_fetcher import (
     OsmiumCLIFetcher,
     _bbox_option,
+    _export_timeout_seconds,
 )
 from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.elevation import (
     _stitch_tile_grids,
@@ -156,6 +157,12 @@ class TestOsmiumBinaryOverride:
         assert fetcher.osmium_available
         assert command[0] == sys.executable
         assert command[1].endswith("tools/osmium_pyosmium.py")
+
+    def test_portable_export_budget_handles_dense_road_extract(self):
+        portable = [sys.executable, "/repo/tools/osmium_pyosmium.py"]
+
+        assert _export_timeout_seconds(4_886.5, portable) >= 720
+        assert _export_timeout_seconds(4_886.5, ["/usr/bin/osmium"]) < 300
 
     @pytest.mark.skipif(os.name == "nt", reason="POSIX executable bit")
     def test_portable_osmium_entry_is_executable(self):

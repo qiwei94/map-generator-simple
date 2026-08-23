@@ -77,7 +77,16 @@ def coastline_to_sea_polygon(
     directed_lines = []
     for line in _iter_lines(coastlines):
         clipped = line.intersection(frame)
-        directed_lines.extend(_iter_lines([clipped]))
+        for candidate in _iter_lines([clipped]):
+            # A tiny closed feature tagged ``natural=coastline`` can be an
+            # inland beach or bad OSM tag.  Treating it as an island makes the
+            # whole surrounding frame "sea" (Mexico City regression).  A
+            # closed ring must occupy a meaningful fraction of the frame to
+            # provide enough evidence for ocean materialization.
+            if (candidate.is_ring
+                    and candidate.envelope.area < frame.area * 0.001):
+                continue
+            directed_lines.append(candidate)
     if not directed_lines:
         return None
 

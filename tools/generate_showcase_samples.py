@@ -97,6 +97,24 @@ def validate_gallery(city: dict, size_km: float) -> tuple[bool, str]:
         "building_density", "road_density_km_per_km2", "water_ratio"))
     if feature_total <= 0:
         return False, "OSM extraction returned zero buildings, roads, and water"
+    scene_type = str(meta.get("scene_type") or "")
+    building_density = float(profile.get("building_density") or 0)
+    road_density = float(profile.get("road_density_km_per_km2") or 0)
+    water_ratio = float(profile.get("water_ratio") or 0)
+    if scene_type == "urban" and road_density <= 0:
+        return False, "urban road extraction returned zero density"
+    if scene_type == "urban" and building_density <= 0:
+        return False, "urban building extraction returned zero density"
+    if water_ratio >= 0.92 and building_density >= 20:
+        return False, "implausible water coverage for populated frame"
+    signature = meta.get("city_signature") or {}
+    hard_failures = signature.get("hard_failures") or []
+    if hard_failures:
+        return False, str(hard_failures[0])
+    if signature and not signature.get("showcase_candidate", False):
+        return False, (
+            "city signature score is too weak "
+            f"({float(signature.get('overall') or 0):.3f})")
     render_hashes: set[str] = set()
     for style in REQUIRED_STYLES:
         filename = (meta.get("styles", {}).get(style, {})
@@ -125,7 +143,9 @@ def generate(city: dict, size_km: float) -> int:
     cmd = [
         sys.executable,
         str(ROOT / "tools" / "gen_area_gallery.py"),
-        "--bbox", bbox_arg,
+        # A southern/western bbox starts with '-'.  Keep option and value in
+        # one token so argparse never mistakes the coordinates for an option.
+        f"--bbox={bbox_arg}",
         "--pbf", str(Path("pbf_cache") / city["pbf"]),
         "--slug", city["slug"],
         "--title", city["title"],

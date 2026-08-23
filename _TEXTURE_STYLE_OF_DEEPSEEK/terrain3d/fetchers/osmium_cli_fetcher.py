@@ -35,6 +35,19 @@ def _bbox_option(west, south, east, north) -> str:
     return f'--bbox={west},{south},{east},{north}'
 
 
+def _export_timeout_seconds(filtered_size_kib: float,
+                            osmium_command) -> int:
+    """Scale export time without killing the portable backend mid-feature."""
+    portable = (len(osmium_command) != 1
+                or os.path.basename(str(osmium_command[0])) != "osmium")
+    if portable:
+        # Cairo roads: a 4.8 MiB filtered PBF legitimately takes roughly
+        # 8 minutes in pyosmium on the Intel Mac.  The old 136 second budget
+        # cached an empty road layer as a false success.
+        return max(300, min(1800, int(filtered_size_kib / 8) + 120))
+    return max(120, min(600, int(filtered_size_kib / 64) + 60))
+
+
 class OsmiumCLIFetcher:
     """使用 osmium CLI 获取 OSM 数据"""
 
@@ -1009,7 +1022,8 @@ class OsmiumCLIFetcher:
         # The portable Python-backed osmium fallback is much slower than the
         # native C++ tool on dense extracts. Scale the export budget with the
         # filtered PBF size instead of killing a healthy export at 120 seconds.
-        export_timeout = max(120, min(600, int(filtered_size / 64) + 60))
+        export_timeout = _export_timeout_seconds(
+            filtered_size, osmium_command)
         result3 = subprocess.run(
             cmd3, capture_output=True, timeout=export_timeout,
             creationflags=flags)

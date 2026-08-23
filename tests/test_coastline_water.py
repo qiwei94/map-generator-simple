@@ -51,6 +51,17 @@ def test_closed_island_keeps_land_hole():
     assert not sea.contains(Polygon([(4, 4), (6, 4), (6, 6), (4, 6)]).centroid)
 
 
+def test_tiny_closed_inland_coastline_does_not_flood_frame():
+    # A mis-tagged beach/pond loop far from a real coast must not turn the
+    # entire frame into sea (the Mexico City regression).
+    tiny = LineString([
+        (4.99, 4.99), (5.01, 4.99), (5.01, 5.01),
+        (4.99, 5.01), (4.99, 4.99),
+    ])
+
+    assert coastline_to_sea_polygon([tiny], BBOX) is None
+
+
 def test_incomplete_inland_coastline_does_not_flood_frame():
     sea = coastline_to_sea_polygon(
         [LineString([(3, 3), (7, 7)])], BBOX)
@@ -87,4 +98,4 @@ def test_gallery_combined_cache_is_invalidated_for_coastline_data():
     source = (Path(__file__).resolve().parents[1] / "aesthetic" /
               "rerun_harness.py").read_text(encoding="utf-8")
 
-    assert '"water_schema": "large_relations_v3"' in source
+    assert '"water_schema": "coastline_guard_v4"' in source

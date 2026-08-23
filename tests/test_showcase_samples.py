@@ -42,6 +42,33 @@ def test_size_override_uses_an_isolated_output_slug():
     assert city["slug"] == "custom_327de4"
 
 
+def test_southern_hemisphere_bbox_is_passed_as_one_option(monkeypatch):
+    captured = {}
+
+    class Result:
+        returncode = 0
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        return Result()
+
+    monkeypatch.setattr(showcase.subprocess, "run", fake_run)
+    city = {
+        "key": "sydney",
+        "slug": "showcase_sydney_25km",
+        "title": "Sydney",
+        "center": [-33.8688, 151.2093],
+        "pbf": "new-south-wales-latest.osm.pbf",
+        "prototype": "landscape",
+    }
+
+    assert showcase.generate(city, 25) == 0
+    bbox_token = next(token for token in captured["command"]
+                      if token.startswith("--bbox="))
+    assert bbox_token.startswith("--bbox=-")
+    assert "--bbox" not in captured["command"]
+
+
 def test_suzhou_showcase_uses_jiangsu_extract():
     plan = json.loads((ROOT / "data" / "showcase_cities.json").read_text(
         encoding="utf-8"))
@@ -168,3 +195,66 @@ def test_batch_validator_rejects_zero_feature_false_success(
 
     assert not valid
     assert "zero buildings, roads, and water" in detail
+
+
+def _write_valid_style_images(target: Path) -> dict:
+    styles = {}
+    for index, style in enumerate(showcase.REQUIRED_STYLES):
+        filename = f"{style}_topdown.png"
+        image = Image.new("L", (1600, 1600), 235)
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((10, 10, 500 + index * 30, 1500), fill=30 + index)
+        image.save(target / filename)
+        styles[style] = {"renders": {"topdown": filename}}
+    return styles
+
+
+def test_batch_validator_rejects_urban_gallery_without_roads(
+        monkeypatch, tmp_path):
+    gallery_dir = tmp_path / "gallery"
+    target = gallery_dir / "cairo"
+    target.mkdir(parents=True)
+    styles = _write_valid_style_images(target)
+    (target / "gallery_metadata.json").write_text(json.dumps({
+        "scene_type": "urban",
+        "profile": {
+            "area_km2": 625,
+            "building_density": 83,
+            "road_density_km_per_km2": 0,
+            "water_ratio": 0.002,
+            "osm_quality": "poor",
+        },
+        "styles": styles,
+    }), encoding="utf-8")
+    monkeypatch.setattr(showcase, "GALLERY_DIR", gallery_dir)
+
+    valid, detail = showcase.validate_gallery({"slug": "cairo"}, 25)
+
+    assert not valid
+    assert "urban road extraction" in detail
+
+
+def test_batch_validator_rejects_implausible_full_frame_water(
+        monkeypatch, tmp_path):
+    gallery_dir = tmp_path / "gallery"
+    target = gallery_dir / "mexico_city"
+    target.mkdir(parents=True)
+    styles = _write_valid_style_images(target)
+    (target / "gallery_metadata.json").write_text(json.dumps({
+        "scene_type": "water_landscape",
+        "profile": {
+            "area_km2": 625,
+            "building_density": 198,
+            "road_density_km_per_km2": 8,
+            "water_ratio": 0.999,
+            "osm_quality": "fair",
+        },
+        "styles": styles,
+    }), encoding="utf-8")
+    monkeypatch.setattr(showcase, "GALLERY_DIR", gallery_dir)
+
+    valid, detail = showcase.validate_gallery(
+        {"slug": "mexico_city"}, 25)
+
+    assert not valid
+    assert "implausible water coverage" in detail
