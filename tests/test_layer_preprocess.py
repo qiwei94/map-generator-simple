@@ -501,3 +501,16 @@ class TestBlockBase:
             [block], min_area_m2=1000.0,
             veg_landmark_polys=veg)
         assert result == []
+
+    def test_grid_exclusion_union_is_prepared_without_geometry_change(self):
+        """网格 exclusion 只增加空间索引，不改变 union 几何。"""
+        import shapely
+        from shapely.geometry import box
+        from _TEXTURE_STYLE_OF_DEEPSEEK._block_filter import _union_and_prepare
+
+        parts = [box(0, 0, 10, 10), box(5, 0, 15, 10)]
+        expected = shapely.union_all(parts)
+        merged = _union_and_prepare(parts)
+
+        assert shapely.is_prepared(merged)
+        assert shapely.equals(merged, expected)
