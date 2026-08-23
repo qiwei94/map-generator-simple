@@ -1,6 +1,7 @@
 {
   "version": 1,
   "size_km": 15,
+  "publish_25km_review": true,
   "cities": [
     {
       "key": "paris",
@@ -168,6 +169,7 @@
       "pbf": "berlin-latest.osm.pbf",
       "prototype": "skyline",
       "hero_style": "baseline",
+      "review_style_25km": "dense_detail",
       "featured": true
     },
     {
@@ -178,7 +180,8 @@
       "center": [40.4168, -3.7038],
       "pbf": "madrid-latest.osm.pbf",
       "prototype": "skyline",
-      "hero_style": "baseline"
+      "hero_style": "baseline",
+      "review_style_25km": "dense_detail"
     },
     {
       "key": "barcelona",
@@ -219,6 +222,7 @@
       "pbf": "victoria-latest.osm.pbf",
       "prototype": "skyline",
       "hero_style": "baseline",
+      "review_style_25km": "dense_detail",
       "featured": true
     },
     {
@@ -239,7 +243,8 @@
       "center": [-34.6037, -58.3816],
       "pbf": "argentina-latest.osm.pbf",
       "prototype": "skyline",
-      "hero_style": "block_fill"
+      "hero_style": "block_fill",
+      "review_style_25km": "dense_detail"
     },
     {
       "key": "cairo",
@@ -249,7 +254,8 @@
       "center": [30.0444, 31.2357],
       "pbf": "egypt-latest.osm.pbf",
       "prototype": "skyline",
-      "hero_style": "baseline"
+      "hero_style": "baseline",
+      "review_style_25km": "dense_detail"
     },
     {
       "key": "cape_town",

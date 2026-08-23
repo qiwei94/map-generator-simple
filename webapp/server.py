@@ -1170,7 +1170,7 @@ def api_cities():
 
 @app.get("/api/showcase")
 def api_showcase():
-    """Return curated 25 km work and completed, verified 15 km samples."""
+    """Return the current 25 km review batch plus curated legacy samples."""
     style_labels = {
         "baseline": "STANDARD",
         "block_fill": "BLOCK FILL",
@@ -1235,7 +1235,44 @@ def api_showcase():
                 "size_km": size_km,
                 "url": f"/files/style_gallery/{slug}/{filename}",
             })
-    return {"samples": samples}
+
+    # Operators can temporarily expose the complete isolated 25 km batch for
+    # human review without rewriting the canonical 15 km generation slugs or
+    # hiding the existing curated samples.  Every review entry still passes
+    # the same four-style, physical-area and non-blank file gate.
+    review_samples = []
+    if plan.get("publish_25km_review", False):
+        review_size_km = 25
+        review_area = review_size_km * review_size_km
+        for city in plan.get("cities", []):
+            key = str(city.get("key") or "").strip()
+            if not key:
+                continue
+            slug = f"showcase_{key}_25km"
+            meta = _load_gallery(slug)
+            if not meta or not _showcase_output_verified(
+                    slug, meta, review_area):
+                continue
+            style = city.get(
+                "review_style_25km", city.get("hero_style", "baseline"))
+            filename = (meta.get("styles", {}).get(style, {})
+                        .get("renders", {}).get("topdown"))
+            path = GALLERY_DIR / slug / str(filename or "")
+            if not filename or not path.is_file():
+                continue
+            label = style_labels.get(style, str(style).upper())
+            title = city.get("caption") or city.get("title") or slug
+            review_samples.append({
+                "title": title,
+                "location": f"{key.replace('_', ' ').upper()} / {label} / 25 KM",
+                "kind": "最新 25 × 25 KM 待审样品",
+                "alt": (f"最新生成的{city.get('title', title)} "
+                        f"25 公里乘 25 公里{label}风格待审图"),
+                "size_km": review_size_km,
+                "url": f"/files/style_gallery/{slug}/{filename}",
+                "review_batch": True,
+            })
+    return {"samples": review_samples + samples}
 
 
 @app.get("/api/showcase/status")

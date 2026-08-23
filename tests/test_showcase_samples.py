@@ -1,4 +1,4 @@
-"""Landing-page samples must be real, consistent 15×15 km outputs."""
+"""Landing-page samples must be real, consistent 15×15 or 25×25 km outputs."""
 from __future__ import annotations
 
 import json
@@ -178,6 +178,46 @@ def test_showcase_static_asset_uses_declared_cache_version(
 
     assert result["samples"][0]["url"] == (
         "/assets/sample.jpg?release=water-fix-v2")
+
+
+def test_showcase_api_prepends_complete_25km_review_batch(
+        monkeypatch, tmp_path):
+    plan_path = tmp_path / "showcase.json"
+    plan_path.write_text(json.dumps({
+        "size_km": 15,
+        "publish_25km_review": True,
+        "cities": [{
+            "key": "rome", "title": "Rome", "caption": "Rome review",
+            "hero_style": "baseline", "review_style_25km": "dense_detail",
+        }],
+    }), encoding="utf-8")
+    gallery_dir = tmp_path / "gallery"
+    target = gallery_dir / "showcase_rome_25km"
+    target.mkdir(parents=True)
+    styles = _write_valid_style_images(target)
+    (target / "gallery_metadata.json").write_text(json.dumps({
+        "profile": {
+            "area_km2": 625,
+            "building_density": 300,
+            "road_density_km_per_km2": 20,
+            "water_ratio": 0.01,
+        },
+        "styles": styles,
+    }), encoding="utf-8")
+    monkeypatch.setattr(server, "SHOWCASE_PLAN_PATH", plan_path)
+    monkeypatch.setattr(server, "GALLERY_DIR", gallery_dir)
+    server._SHOWCASE_VERIFY_CACHE.clear()
+
+    result = server.api_showcase()
+
+    assert [sample["title"] for sample in result["samples"]] == [
+        "Rome review"]
+    sample = result["samples"][0]
+    assert sample["size_km"] == 25
+    assert sample["review_batch"] is True
+    assert sample["kind"] == "最新 25 × 25 KM 待审样品"
+    assert sample["url"].endswith(
+        "/showcase_rome_25km/dense_detail_topdown.png")
 
 
 def test_batch_validator_rejects_zero_feature_false_success(
