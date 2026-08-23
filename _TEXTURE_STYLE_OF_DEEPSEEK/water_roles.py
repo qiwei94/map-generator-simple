@@ -23,7 +23,7 @@ from shapely.errors import GEOSException
 from shapely.ops import linemerge, unary_union
 
 
-POLICY_VERSION = "print-water-roles-v2"
+POLICY_VERSION = "print-water-roles-v3"
 
 _LINE_INK_QUOTAS = {
     "river": 0.0060,
@@ -406,7 +406,7 @@ def select_visible_water_lines(
 
     return VisibleWaterSelection(output, {
         "policy_version": POLICY_VERSION,
-        "method": "city_identity_global_water_budget_v2",
+        "method": "surface_evidence_global_water_budget_v3",
         "source_line_segments": len(candidates),
         "candidate_groups": len(groups),
         "selected_groups": len(selected_keys),

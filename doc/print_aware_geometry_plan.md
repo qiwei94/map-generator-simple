@@ -311,6 +311,31 @@ P2 水体构图第二、三轮实测（同一北京 25 km bbox）进一步确认
 `458 passed, 2 skipped, 11 deselected`。这仍是构图候选，不自动覆盖网站或生产默认值；
 上海与芝加哥必须分别验证宽江和海岸没有被误删。
 
+北京 25 km 正式 3MF 验收使用同一 bbox、同一参数覆盖，并移除 `--draft`：
+
+```bash
+.venv/bin/python generate_city_legacy.py \
+  --bbox 39.7911535,116.2610224,40.0172465,116.5537776 \
+  --pbf pbf_cache/beijing-latest.osm.pbf \
+  --city identity_beijing_25km_formal_v4 --review-png --auto-params \
+  --params-json data/print_profiles/city_identity_25km_classic.json \
+  --no-cache --no-snap
+
+.venv/bin/python tools/validate_3mf.py \
+  output/identity_beijing_25km_formal_v4/\
+full_identity_beijing_25km_formal_v4_0823_2341.3mf --json
+```
+
+- 正式文件 70,320,284 bytes（67.06 MiB），SHA-256
+  `ccb3c523508e866b061e7fd9b4ec9d036586e0fdcbc1cc7512e817e89e353ed8`；
+- `design_spec.json` 与 3MF 同目录，记录 53,715 → 34,572 → 25,135 → 671
+  的道路 source / topology / structural / visible 证据和完整 water roles；
+- terrain 100,000 faces、buildings 1,590,720、roads 14,688、water 12、
+  vegetation 182,280，所有必需图层非零；
+- 项目验证器 V1–V13 全部通过，`passed=true`、`strict_passed=true`、
+  0 errors、0 warnings；总生成耗时 171.4 秒。该耗时仅代表当前 M1 Mac 的这次
+  实测，不外推到 Linux 云机或其他 Mac。
+
 ### P3：视觉中心与语义 Z
 
 - 实现 `FocusSpec` 候选与确定性打分；

@@ -822,7 +822,7 @@ def _extract_WL_WO(
     """
     if water_gdf is None or len(water_gdf) == 0:
         return [], [], [], {
-            "policy_version": "print-water-roles-v2",
+            "policy_version": "print-water-roles-v3",
             "source_features": 0,
             "visible_line_segments": 0,
         }
