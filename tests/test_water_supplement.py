@@ -6,15 +6,17 @@
 预览图出现几百米宽蓝带。
 """
 import sys
+import json
 from pathlib import Path
 
-from shapely.geometry import LineString, Point
+from shapely.geometry import LineString, Point, Polygon, mapping
 
 _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT))
 
 from _TEXTURE_STYLE_OF_DEEPSEEK._water_supplement import (  # noqa: E402
-    _adaptive_buffer_segments)
+    _adaptive_buffer_segments, _fetch_amap_water)
+from _TEXTURE_STYLE_OF_DEEPSEEK import _water_supplement  # noqa: E402
 
 
 def _mean_width(p):
@@ -51,3 +53,45 @@ class TestAdaptiveBuffer:
         assert polys
         w = max(_mean_width(p) for p in polys)
         assert 100 < w < 300, f"延伸段应继承 ~200m 河宽，实际 {w:.0f}m"
+
+
+class TestAmapOfflineMode:
+    BBOX = (30.13, 120.01, 30.36, 120.29)
+
+    def test_cache_miss_does_not_touch_network_when_disabled(
+            self, monkeypatch, tmp_path):
+        monkeypatch.setenv("AMAP_WATER_AUTO_FETCH", "0")
+        monkeypatch.setattr(
+            _water_supplement, "_cache_path",
+            lambda _bbox, _zoom: tmp_path / "missing.geojson")
+
+        def fail_if_called(*_args, **_kwargs):
+            raise AssertionError("offline mode attempted a live tile request")
+
+        monkeypatch.setattr(
+            _water_supplement, "_fetch_nolabel_tiles", fail_if_called)
+
+        assert _fetch_amap_water(self.BBOX) == []
+
+    def test_existing_cache_is_used_before_offline_gate(
+            self, monkeypatch, tmp_path):
+        cache = tmp_path / "cached.geojson"
+        polygon = Polygon([(120.1, 30.2), (120.2, 30.2),
+                           (120.2, 30.3), (120.1, 30.3)])
+        cache.write_text(json.dumps({
+            "type": "FeatureCollection",
+            "features": [{
+                "type": "Feature",
+                "geometry": mapping(polygon),
+                "properties": {},
+            }],
+        }), encoding="utf-8")
+        monkeypatch.setenv("AMAP_WATER_AUTO_FETCH", "0")
+        monkeypatch.setattr(
+            _water_supplement, "_cache_path",
+            lambda _bbox, _zoom: cache)
+
+        result = _fetch_amap_water(self.BBOX)
+
+        assert len(result) == 1
+        assert result[0].equals(polygon)
