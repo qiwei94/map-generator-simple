@@ -158,3 +158,37 @@ class TestValidate3mf:
         assert not bool(v12["passed"])
         assert "boundary_edges=3" in v12["detail"]
         assert any(warning.startswith("V12:") for warning in result["warnings"])
+
+    def test_closed_block_base_passes_printability_rule(self, tmp_path):
+        from _TEXTURE_STYLE_OF_DEEPSEEK.exporter import export_deepseek_3mf
+
+        terrain = trimesh.creation.box(extents=[196, 176, 4])
+        block_base = trimesh.creation.box(extents=[20, 20, 0.5])
+        out = str(tmp_path / "closed-block-base.3mf")
+        export_deepseek_3mf(
+            {"terrain": terrain, "block_base": block_base}, out)
+
+        result = validate_3mf(out)
+        v13 = next(rule for rule in result["rules"] if rule["id"] == "V13")
+        assert bool(v13["passed"])
+        assert "boundary_edges=0" in v13["detail"]
+        assert "nonmanifold_edges=0" in v13["detail"]
+
+    def test_open_block_base_is_a_critical_error(self, tmp_path):
+        from _TEXTURE_STYLE_OF_DEEPSEEK.exporter import export_deepseek_3mf
+
+        terrain = trimesh.creation.box(extents=[196, 176, 4])
+        block_base = trimesh.Trimesh(
+            vertices=[[0, 0, 2.1], [10, 0, 2.2], [0, 10, 2.3]],
+            faces=[[0, 1, 2]], process=False,
+        )
+        out = str(tmp_path / "open-block-base.3mf")
+        export_deepseek_3mf(
+            {"terrain": terrain, "block_base": block_base}, out)
+
+        result = validate_3mf(out)
+        v13 = next(rule for rule in result["rules"] if rule["id"] == "V13")
+        assert not bool(v13["passed"])
+        assert "boundary_edges=3" in v13["detail"]
+        assert any(error.startswith("V13:") for error in result["errors"])
+        assert result["passed"] is False

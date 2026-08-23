@@ -24,9 +24,11 @@ from _TEXTURE_STYLE_OF_DEEPSEEK._layer_preprocess import (
     _extract_roads,
     _effective_road_tier,
     _close_unprintable_water_gaps,
+    preprocess_layers,
     LayerPolygons,
 )
 from _TEXTURE_STYLE_OF_DEEPSEEK.buildings import _aggregate_in_blocks
+from _TEXTURE_STYLE_OF_DEEPSEEK.print_profile import PrinterProfile
 
 
 # ---------------------------------------------------------------------------
@@ -186,6 +188,61 @@ def test_large_area_caps_unprintable_footway_block_detail():
     assert _effective_road_tier(5, area_km2=100) == 4
     assert _effective_road_tier(4, area_km2=100) == 4
     assert _effective_road_tier(5, area_km2=25) == 5
+
+
+def test_preprocess_uses_declared_printer_nozzle_for_real_scale():
+    empty = gpd.GeoDataFrame(
+        {"geometry": []}, geometry="geometry", crs="EPSG:3857")
+    profile = PrinterProfile(
+        profile_id="test-0.6",
+        nozzle_diameter_mm=0.6,
+        extrusion_width_mm=0.65,
+        layer_height_mm=0.2,
+        min_colored_strip_mm=0.9,
+        min_gap_mm=0.75,
+        min_surface_layers=2,
+    )
+
+    layers = preprocess_layers(
+        empty, empty, empty, empty,
+        bbox_local=(0, 0, 1000, 1000),
+        scale=0.01,
+        area_km2=1,
+        printer_profile=profile,
+    )
+
+    assert layers.nozzle_real_m == pytest.approx(60.0)
+
+
+def test_preprocess_records_separate_road_roles_and_printable_seam_width():
+    roads = gpd.GeoDataFrame({
+        "highway": ["primary", "service", "footway"],
+        "geometry": [
+            LineString([(0, 250), (1000, 250)]),
+            LineString([(0, 500), (1000, 500)]),
+            LineString([(0, 750), (1000, 750)]),
+        ],
+    }, geometry="geometry", crs="EPSG:3857")
+    empty = gpd.GeoDataFrame(
+        {"geometry": []}, geometry="geometry", crs="EPSG:3857")
+    scale = 196.0 / 15000.0
+
+    layers = preprocess_layers(
+        empty, roads, empty, empty,
+        bbox_local=(0, 0, 1000, 1000),
+        scale=scale,
+        area_km2=225,
+    )
+
+    assert layers.road_roles["source_line_features"] == 3
+    assert layers.road_roles["topology_candidates"] == 2
+    assert layers.road_roles["structural_candidates"] == 1
+    assert layers.road_roles["visible_candidates"] == 1
+    assert layers.road_roles["visible_selected"] == 1
+    assert layers.road_roles["visible_segments"] == 1
+    assert layers.road_roles["structural_gap_model_mm"] == pytest.approx(0.55)
+    assert layers.road_roles["structural_gap_real_m"] == pytest.approx(
+        0.55 / scale)
 
 
 def test_water_holes_require_a_full_nozzle_width_to_survive():
@@ -444,3 +501,16 @@ class TestBlockBase:
             [block], min_area_m2=1000.0,
             veg_landmark_polys=veg)
         assert result == []
+
+    def test_grid_exclusion_union_is_prepared_without_geometry_change(self):
+        """网格 exclusion 只增加空间索引，不改变 union 几何。"""
+        import shapely
+        from shapely.geometry import box
+        from _TEXTURE_STYLE_OF_DEEPSEEK._block_filter import _union_and_prepare
+
+        parts = [box(0, 0, 10, 10), box(5, 0, 15, 10)]
+        expected = shapely.union_all(parts)
+        merged = _union_and_prepare(parts)
+
+        assert shapely.is_prepared(merged)
+        assert shapely.equals(merged, expected)

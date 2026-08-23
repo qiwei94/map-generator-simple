@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
+import sys
 from typing import Dict, Optional, Tuple
 
 import numpy as np
@@ -33,6 +35,43 @@ _DEFAULT_CACHE_DIR = os.path.join(
 )
 
 
+def _is_valid_parquet_file(path: str) -> bool:
+    """Cheaply reject truncated downloads without loading PyArrow."""
+
+    try:
+        if os.path.getsize(path) < 12:
+            return False
+        with open(path, "rb") as stream:
+            header = stream.read(4)
+            stream.seek(-4, os.SEEK_END)
+            footer = stream.read(4)
+        return header == b"PAR1" and footer == b"PAR1"
+    except OSError:
+        return False
+
+
+def _resolve_overture_cli() -> Optional[str]:
+    """Return an executable Overture CLI without assuming an activated venv."""
+    override = os.environ.get("OVERTUREMAPS_BIN", "").strip()
+    candidates = []
+    if override:
+        candidates.append(override)
+
+    python_dir = os.path.dirname(sys.executable)
+    candidates.extend([
+        os.path.join(python_dir, "overturemaps"),
+        os.path.join(python_dir, "overturemaps.exe"),
+        shutil.which("overturemaps"),
+        os.path.expanduser("~/Library/Python/3.9/bin/overturemaps"),
+        "/opt/homebrew/bin/overturemaps",
+        "/usr/local/bin/overturemaps",
+    ])
+    for candidate in candidates:
+        if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return os.path.realpath(candidate)
+    return None
+
+
 def _find_overture_cache(
     bbox_wgs84: Tuple[float, float, float, float],
     cache_dir: str = _DEFAULT_CACHE_DIR,
@@ -41,7 +80,8 @@ def _find_overture_cache(
 
     Matches by parsing overture_{lat:.2f}_{lon:.2f}.parquet filenames
     and checking if the center coordinates fall within the query bbox.
-    Falls back to any .parquet file if no named match found.
+    Unidentified legacy files are never reused across regions: doing so can
+    suppress the correct download and silently attach the wrong city dataset.
 
     Returns path to parquet file, or None if no cache found.
     """
@@ -61,17 +101,14 @@ def _find_overture_cache(
                     lon = float(parts[1])
                     if south <= lat <= north and west <= lon <= east:
                         path = os.path.join(cache_dir, fname)
-                        logger.info(f"Overture cache hit (bbox match): {fname}")
-                        return path
+                        if _is_valid_parquet_file(path):
+                            logger.info(
+                                f"Overture cache hit (bbox match): {fname}")
+                            return path
+                        logger.warning(
+                            "Ignoring truncated Overture cache: %s", path)
                 except ValueError:
                     continue
-
-    # Fallback: pick first parquet (legacy naming like hangzhou_buildings.parquet)
-    for fname in all_parquets:
-        if fname.endswith(".parquet"):
-            path = os.path.join(cache_dir, fname)
-            logger.info(f"Overture cache fallback: {fname}")
-            return path
 
     return None
 
@@ -101,31 +138,31 @@ def _download_overture(
     fname = f"overture_{center_lat:.2f}_{center_lon:.2f}.parquet"
     output_path = os.path.join(cache_dir, fname)
 
-    if os.path.exists(output_path):
+    if _is_valid_parquet_file(output_path):
         logger.info(f"Overture file already exists: {output_path}")
         return output_path
 
-    # Find overturemaps CLI
-    cli_path = "overturemaps"
-    for p in [
-        os.path.expanduser("~/Library/Python/3.9/bin/overturemaps"),
-        "/usr/local/bin/overturemaps",
-    ]:
-        if os.path.exists(p):
-            cli_path = p
-            break
+    cli_path = _resolve_overture_cli()
+    if cli_path is None:
+        logger.warning(
+            "Overture height enrichment unavailable: install the overturemaps "
+            "CLI or set OVERTUREMAPS_BIN"
+        )
+        return None
 
     logger.info(f"Downloading Overture buildings: bbox={bbox_str} → {output_path}")
+    tmp_path = output_path + f".tmp{os.getpid()}"
     try:
         result = subprocess.run(
             [cli_path, "download",
              f"--bbox={bbox_str}",
              "--type=building",
              "-f", "geoparquet",
-             "-o", output_path],
+             "-o", tmp_path],
             capture_output=True, text=True, timeout=600,
         )
-        if result.returncode == 0 and os.path.exists(output_path):
+        if result.returncode == 0 and _is_valid_parquet_file(tmp_path):
+            os.replace(tmp_path, output_path)
             size_mb = os.path.getsize(output_path) / (1024 * 1024)
             logger.info(f"Overture download OK: {size_mb:.1f} MB")
             return output_path
@@ -135,6 +172,12 @@ def _download_overture(
     except (subprocess.TimeoutExpired, FileNotFoundError) as e:
         logger.warning(f"Overture download error: {e}")
         return None
+    finally:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
 
 
 def load_overture_heights(
@@ -159,6 +202,10 @@ def load_overture_heights(
     """
     if osm_gdf is None or len(osm_gdf) == 0:
         return None, None
+
+    env_auto_download = os.environ.get("OVERTURE_AUTO_DOWNLOAD", "").strip()
+    if env_auto_download.lower() in {"0", "false", "no", "off"}:
+        auto_download = False
 
     # Step 1: Find or download cache
     parquet_path = _find_overture_cache(bbox_wgs84, cache_dir)

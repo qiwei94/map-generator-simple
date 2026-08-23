@@ -32,6 +32,11 @@ import geopandas as gpd
 from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.processors.terrain import sample_terrain_z
 from _TEXTURE_STYLE_OF_DEEPSEEK._geom_utils import shapely_poly_to_crosssection
 from _TEXTURE_STYLE_OF_DEEPSEEK.bridge_filter import filter_bridges_only as filter_bridge_roads
+from _TEXTURE_STYLE_OF_DEEPSEEK.print_profile import (
+    DEFAULT_PRINTER_PROFILE,
+    PrinterProfile,
+)
+from _TEXTURE_STYLE_OF_DEEPSEEK.road_roles import resolve_printable_road_width_m
 
 from _TEXTURE_STYLE_OF_DEEPSEEK.config import (
     ROAD_THICKNESS_MM,
@@ -213,6 +218,9 @@ def build_deepseek_roads_v3(
     roads_lines: List[Tuple[LineString, str, bool]],
     terrain_mesh: trimesh.Trimesh,
     scale: float,
+    *,
+    printer_profile: PrinterProfile = DEFAULT_PRINTER_PROFILE,
+    road_width_multiplier: float | None = None,
 ) -> trimesh.Trimesh:
     """V3 roads builder — 接收 preprocess 已过滤/分类的 road lines。
 
@@ -238,6 +246,9 @@ def build_deepseek_roads_v3(
     # Step 1: Buffer all lines
     # Function-level import: allows runtime monkey-patch from auto-params
     from _TEXTURE_STYLE_OF_DEEPSEEK.config import ROAD_WIDTH_MULTIPLIER
+    effective_multiplier = (float(ROAD_WIDTH_MULTIPLIER)
+                            if road_width_multiplier is None
+                            else float(road_width_multiplier))
     t1 = time.time()
     all_polys: List[Tuple[Polygon, str, bool]] = []  # (poly, highway, is_bridge)
     n_skip_short = 0
@@ -247,7 +258,12 @@ def build_deepseek_roads_v3(
         if line.length < ROAD_MIN_LINE_LENGTH_M:
             n_skip_short += 1
             continue
-        width = ROAD_WIDTHS.get(highway, ROAD_DEFAULT_WIDTH_M) * ROAD_WIDTH_MULTIPLIER
+        width = resolve_printable_road_width_m(
+            highway,
+            scale_mm_per_m=scale,
+            road_width_multiplier=effective_multiplier,
+            min_colored_strip_mm=printer_profile.min_colored_strip_mm,
+        )
         half_w = width / 2.0
         try:
             buf = line.buffer(half_w, cap_style=2, join_style=2)

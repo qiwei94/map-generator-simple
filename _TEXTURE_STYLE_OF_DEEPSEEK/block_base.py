@@ -167,8 +167,6 @@ def _polygon_to_textured_mesh(
     to guarantee watertight manifold output.
     """
     import shapely
-    from shapely.geometry import Point as ShapelyPoint
-
     h = thickness_mm if thickness_mm is not None else BLOCK_BASE_THICKNESS_MM
 
     # Scale polygon to mm
@@ -225,10 +223,23 @@ def _polygon_to_textured_mesh(
     # Vectorized centroid-in-polygon filter via shapely
     centroid_pts = shapely.points(centroids[:, 0], centroids[:, 1])
     centroid_mask = shapely.contains(poly_mm, centroid_pts)
-    faces_top = simplices[centroid_mask]
+    faces_top = simplices[centroid_mask].copy()
 
     if len(faces_top) == 0:
         return None
+
+    # scipy does not make the winding contract explicit.  Normalize every
+    # retained triangle to counter-clockwise in XY so the top points +Z and
+    # the side-wall winding derived below is deterministic.
+    tri_xy = all_pts[faces_top]
+    signed_area_2x = (
+        (tri_xy[:, 1, 0] - tri_xy[:, 0, 0])
+        * (tri_xy[:, 2, 1] - tri_xy[:, 0, 1])
+        - (tri_xy[:, 1, 1] - tri_xy[:, 0, 1])
+        * (tri_xy[:, 2, 0] - tri_xy[:, 0, 0])
+    )
+    clockwise = signed_area_2x < 0
+    faces_top[clockwise] = faces_top[clockwise][:, [0, 2, 1]]
 
     # Compute displacement
     dz = get_displacement(region, all_pts[:, 0], all_pts[:, 1], amp_scale=amp_scale)
@@ -284,6 +295,7 @@ def _polygon_to_textured_mesh(
         np.array(side_faces, dtype=np.int32),
     ])
     mesh = trimesh.Trimesh(vertices=vertices, faces=faces_arr, process=False)
+    mesh.fix_normals(multibody=True)
     return mesh
 
 
@@ -362,6 +374,7 @@ def _build_textured(
     h = thickness_mm if thickness_mm is not None else BLOCK_BASE_THICKNESS_MM
     meshes: list[trimesh.Trimesh] = []
     n_skipped = 0
+    n_flat_fallback = 0
 
     # Per-polygon random height jitter (seeded by index for reproducibility)
     rng = np.random.default_rng(2026)
@@ -393,20 +406,30 @@ def _build_textured(
         mesh = _polygon_to_textured_mesh(
             poly, scale, z_base, region, h,
             grid_step_mm=grid_step_mm, amp_scale=amp_scale)
-        if mesh is not None:
+        if (mesh is not None and mesh.is_watertight
+                and mesh.is_winding_consistent):
             meshes.append(mesh)
-        else:
-            man = _polygon_to_manifold(poly, scale, z_base, h)
-            if not man.is_empty():
-                md = man.to_mesh()
-                verts = np.array(md.vert_properties, dtype=np.float64)
-                faces = np.array(md.tri_verts, dtype=np.int64)
-                meshes.append(trimesh.Trimesh(vertices=verts, faces=faces, process=False))
-            else:
-                n_skipped += 1
+            continue
+
+        # Never allow a broken textured body to poison a city-scale concat.
+        # A flat Manifold extrusion loses only this block's micro texture and
+        # retains the printable mass and block outline.
+        man = _polygon_to_manifold(poly, scale, z_base, h)
+        if not man.is_empty():
+            md = man.to_mesh()
+            verts = np.array(md.vert_properties, dtype=np.float64)
+            faces = np.array(md.tri_verts, dtype=np.int64)
+            fallback = trimesh.Trimesh(
+                vertices=verts, faces=faces, process=False)
+            if fallback.is_watertight and fallback.is_winding_consistent:
+                meshes.append(fallback)
+                n_flat_fallback += 1
+                continue
+        n_skipped += 1
 
     n_skipped += int((~valid_mask).sum())
-    print(f"  BlockBase(textured): {len(meshes)} built, {n_skipped} skipped, "
+    print(f"  BlockBase(textured): {len(meshes)} built, "
+          f"{n_flat_fallback} flat fallback, {n_skipped} skipped, "
           f"{_time.time()-t0:.1f}s")
 
     if not meshes:
@@ -417,17 +440,21 @@ def _build_textured(
     print(f"  BlockBase concat: {_time.time()-t_merge:.1f}s, "
           f"faces={len(combined.faces)}, bodies={len(meshes)}")
 
-    # Manifold repair: merge duplicate vertices at shared block boundaries
-    # (adjacent blocks share edges which become non-manifold after concat)
-    t_repair = _time.time()
-    from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.processors.mesh_repair import (
-        validate_and_repair_mesh_manifold,
-    )
-    combined = validate_and_repair_mesh_manifold(combined, name="block_base")
-    print(f"  BlockBase Manifold repair: {_time.time()-t_repair:.1f}s, "
-          f"watertight={combined.is_watertight}")
+    # Concatenation preserves the independent vertex indices of each closed
+    # body.  Do not send this multi-body mesh through the generic Manifold
+    # bridge: its merge_vertices() step can weld merely touching blocks and
+    # create non-manifold edges at city scale.
+    if combined.is_watertight and combined.is_winding_consistent:
+        print("  BlockBase shell validation: watertight=True, winding=True")
+        return combined
 
-    return combined
+    # Defensive whole-layer fallback.  Generating a simpler printable layer
+    # is preferable to exporting a visually plausible but open 3MF object.
+    print("  BlockBase shell validation failed; rebuilding layer as flat solids")
+    fallback = _build_flat(polys, terrain_mesh, scale, thickness_mm)
+    if fallback is None or not fallback.is_watertight:
+        raise RuntimeError("block_base could not be built as a closed mesh")
+    return fallback
 
 
 def _build_flat(

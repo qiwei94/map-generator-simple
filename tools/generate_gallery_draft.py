@@ -24,7 +24,7 @@ if str(ROOT) not in sys.path:
 from aesthetic.presets import CityPreset, register_preset
 from aesthetic.rerun_harness import CityHarness
 from _TEXTURE_STYLE_OF_DEEPSEEK.render_glb import render_glb_preview
-from _TEXTURE_STYLE_OF_DEEPSEEK.design_spec import write_design_spec
+from _TEXTURE_STYLE_OF_DEEPSEEK.design_spec import SCHEMA_VERSION, write_design_spec
 
 
 def _args():
@@ -106,7 +106,7 @@ def main() -> int:
     )
 
     design_spec = {
-        "schema_version": "1.0",
+        "schema_version": SCHEMA_VERSION,
         "city": args.city,
         "bbox_wgs84": list(bbox),
         "framing": {
@@ -120,6 +120,8 @@ def main() -> int:
         "prototype": args.prototype,
         "scene_type": args.scene_type,
         "params": params,
+        "printability": harness.ctx["printability"],
+        "road_roles": getattr(layers, "road_roles", {}),
         "evidence": {
             "building_density_per_km2": harness.profile.building_density,
             "water_ratio": harness.profile.water_ratio,

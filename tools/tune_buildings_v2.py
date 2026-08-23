@@ -610,24 +610,19 @@ def _compactness(poly: Polygon) -> float:
 
 
 def _subtract(polys: List[Polygon], minus_geom) -> List[Polygon]:
-    """从 polys 中扣掉 minus_geom，返回（可能多个）剩余 polygon。
-    支持 minus_geom = None / empty / Polygon / MultiPolygon / GeometryCollection。
+    """Use the pipeline's repaired, prepared subtraction implementation.
+
+    The PNG renderer used to keep a second sequential copy here.  Dense city
+    renders then rebuilt the same GEOS predicate topology for tens of thousands
+    of blocks even though preprocessing had already fixed that exact pattern.
+    Keeping one implementation also guarantees PNG and 3MF subtraction handle
+    invalid OSM polygons identically.
     """
-    if minus_geom is None or minus_geom.is_empty: return list(polys)
-    out: list = []
-    for p in polys:
-        if not isinstance(p, Polygon) or p.is_empty: continue
-        if not p.intersects(minus_geom):
-            out.append(p); continue
-        diff = p.difference(minus_geom)
-        if diff.is_empty: continue
-        if isinstance(diff, Polygon):
-            out.append(diff)
-        elif hasattr(diff, "geoms"):
-            for g in diff.geoms:
-                if isinstance(g, Polygon) and not g.is_empty:
-                    out.append(g)
-    return out
+    from _TEXTURE_STYLE_OF_DEEPSEEK._layer_preprocess import (
+        _subtract as subtract_layer_polygons,
+    )
+
+    return subtract_layer_polygons(polys, minus_geom)
 
 
 def _extract_landmarks_from_gdf(gdf: gpd.GeoDataFrame, predicate) -> list:

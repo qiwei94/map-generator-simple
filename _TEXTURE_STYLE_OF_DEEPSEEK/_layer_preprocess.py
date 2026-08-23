@@ -82,6 +82,11 @@ from _TEXTURE_STYLE_OF_DEEPSEEK.buildings import (
     _compress_height,
     _narrow_building_penalty,
 )
+from _TEXTURE_STYLE_OF_DEEPSEEK.print_profile import (
+    DEFAULT_PRINTER_PROFILE,
+    PrinterProfile,
+)
+from _TEXTURE_STYLE_OF_DEEPSEEK.road_roles import select_road_roles
 
 
 # ---------------------------------------------------------------------------
@@ -101,6 +106,7 @@ class LayerPolygons:
     block_base: List[Polygon] = field(default_factory=list)  # PNG layer 1.5 暖米色城市底
     block_base_classes: List[str] = field(default_factory=list)  # semantic class per block_base polygon
     roads_lines: List[Tuple[LineString, str, bool]] = field(default_factory=list)
+    road_roles: Dict = field(default_factory=dict)
     nozzle_real_m: float = 0.0
     min_area_m2: float = 0.0
 
@@ -116,6 +122,11 @@ class LayerPolygons:
             f"WL={len(self.WL)} WO={len(self.WO)} "
             f"block_base={len(self.block_base)} "
             f"roads={len(self.roads_lines)}"
+            + (f" road_roles={self.road_roles.get('source_line_features', 0)}/"
+               f"{self.road_roles.get('topology_candidates', 0)}/"
+               f"{self.road_roles.get('structural_candidates', 0)}/"
+               f"{self.road_roles.get('visible_segments', len(self.roads_lines))}"
+               if self.road_roles else "")
         )
 
 
@@ -885,6 +896,8 @@ def _extract_roads(
     roads_gdf: gpd.GeoDataFrame,
     BL_polys: List[Polygon],
     area_km2: float = 0,
+    *,
+    apply_area_filter: bool = True,
 ) -> List[Tuple[LineString, str, bool]]:
     """返回 [(line, highway_type, is_bridge)]。
 
@@ -896,7 +909,8 @@ def _extract_roads(
         return []
 
     area_class = get_area_class(area_km2)
-    highway_filter = ROAD_FILTER.get(area_class, None)
+    highway_filter = (ROAD_FILTER.get(area_class, None)
+                      if apply_area_filter else None)
 
     # Filter before Python iteration.  Dense cities can contain hundreds of
     # thousands of road features; GeoDataFrame.iterrows() materializes one
@@ -1396,6 +1410,8 @@ def preprocess_layers(
     height_mode_override: Optional[str] = None,
     aggregate_simplify_m_override: Optional[float] = None,
     bo_mode_override: Optional[str] = None,
+    road_width_multiplier_override: Optional[float] = None,
+    printer_profile: Optional[PrinterProfile] = None,
 ) -> LayerPolygons:
     """主入口。把 raw OSM gdf 转成 6 类 polygon + roads_lines。
 
@@ -1421,9 +1437,12 @@ def preprocess_layers(
     t0 = time.time()
 
     # ---- Step 1: precision params ----
-    nozzle_real_m = NOZZLE_DIAM_MM / scale if scale > 0 else 51.0
+    effective_printer = printer_profile or DEFAULT_PRINTER_PROFILE
+    nozzle_real_m = (effective_printer.nozzle_diameter_mm / scale
+                     if scale > 0 else 51.0)
     min_area_m2 = MIN_PRINTABLE_AREA_M2
-    print(f"\n[preprocess] nozzle_real={nozzle_real_m:.1f}m, min_area={min_area_m2:.0f}m²")
+    print(f"\n[preprocess] printer={effective_printer.profile_id}, "
+          f"nozzle_real={nozzle_real_m:.1f}m, min_area={min_area_m2:.0f}m²")
 
     # ---- Step 1b: height data quality assessment ----
     height_quality = assess_height_data_quality(buildings_gdf)
@@ -1440,9 +1459,31 @@ def preprocess_layers(
     if effective_road_tier != requested_road_tier:
         print(f"[preprocess] road_tier capped {requested_road_tier} → "
               f"{effective_road_tier} for printable large-area detail")
+    if road_width_multiplier_override is None:
+        from _TEXTURE_STYLE_OF_DEEPSEEK.config import ROAD_WIDTH_MULTIPLIER
+        effective_road_width_multiplier = float(ROAD_WIDTH_MULTIPLIER)
+    else:
+        effective_road_width_multiplier = float(road_width_multiplier_override)
+    road_roles = select_road_roles(
+        roads_gdf,
+        topology_tier=effective_road_tier,
+        nozzle_real_m=nozzle_real_m,
+        bbox_local=bbox_local,
+        scale_mm_per_m=scale,
+        road_width_multiplier=effective_road_width_multiplier,
+        min_colored_strip_mm=effective_printer.min_colored_strip_mm,
+    )
+    print("[preprocess] road_roles: "
+          f"source_lines={road_roles.evidence['source_line_features']}, "
+          f"topology={road_roles.evidence['topology_candidates']}, "
+          f"structural={road_roles.evidence['structural_candidates']}, "
+          f"visible={road_roles.evidence['visible_selected']}/"
+          f"{road_roles.evidence['visible_candidates']}")
     wgdf = water_gdf if water_gdf is not None and len(water_gdf) > 0 else None
-    if roads_gdf is not None and len(roads_gdf) > 0:
-        city_blocks = _build_city_blocks(roads_gdf, wgdf, road_tier=effective_road_tier, bbox_local=bbox_local)
+    if len(road_roles.topology) > 0:
+        city_blocks = _build_city_blocks(
+            road_roles.topology, wgdf, road_tier=effective_road_tier,
+            bbox_local=bbox_local)
     else:
         city_blocks = []
     print(f"[preprocess] city_blocks: {len(city_blocks)} (road_tier={effective_road_tier}) "
@@ -1507,16 +1548,15 @@ def preprocess_layers(
     # ---- Step 8.5: block_base (与 PNG brick_render 对齐) ----
     t85 = time.time()
     # 对齐 PNG load_data：roads 只取 LineString/MultiLineString（排除 Point/Polygon）
-    roads_lines_only = None
-    if roads_gdf is not None and len(roads_gdf) > 0:
-        mask = roads_gdf.geometry.type.isin(["LineString", "MultiLineString"])
-        roads_lines_only = roads_gdf[mask] if mask.any() else None
+    roads_lines_only = (road_roles.structural
+                        if len(road_roles.structural) > 0 else None)
     block_base_polys = _compute_block_base(
         city_blocks, BLOCK_BASE_MIN_AREA_M2,
         water_gdf=water_gdf,
         roads_gdf=roads_lines_only,
         buildings_gdf=buildings_gdf,
         veg_landmark_polys=VL_polys,
+        road_inset=effective_printer.min_gap_mm / scale / 2.0,
     )
     print(f"[preprocess] _compute_block_base: {len(block_base_polys)} "
           f"polys after {time.time() - t85:.1f}s")
@@ -1529,7 +1569,20 @@ def preprocess_layers(
 
     # ---- Step 9: roads ----
     t9 = time.time()
-    roads_lines = _extract_roads(roads_gdf, [p for p, _ in filtered["BL"]], area_km2)
+    roads_lines = _extract_roads(
+        road_roles.visible,
+        [p for p, _ in filtered["BL"]],
+        area_km2,
+        apply_area_filter=False,
+    )
+    road_role_evidence = dict(road_roles.evidence)
+    road_role_evidence.update({
+        "city_blocks": len(city_blocks),
+        "block_base_polygons": len(block_base_polys),
+        "visible_segments": len(roads_lines),
+        "structural_gap_model_mm": effective_printer.min_gap_mm,
+        "structural_gap_real_m": effective_printer.min_gap_mm / scale,
+    })
     print(f"[preprocess] _extract_roads: {time.time() - t9:.1f}s")
 
     # ---- Step 10: assemble ----
@@ -1544,6 +1597,7 @@ def preprocess_layers(
         block_base=block_base_polys,
         block_base_classes=block_base_classes,
         roads_lines=roads_lines,
+        road_roles=road_role_evidence,
         nozzle_real_m=nozzle_real_m,
         min_area_m2=min_area_m2,
     )

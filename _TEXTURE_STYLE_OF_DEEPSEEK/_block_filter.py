@@ -23,6 +23,21 @@ from shapely.ops import unary_union
 from shapely.strtree import STRtree
 
 
+def _union_and_prepare(geometries):
+    """Merge a cell's exclusions and prepare it for repeated predicates.
+
+    ``shapely.prepare`` builds an in-place segment index.  The grid path tests
+    every block in a cell against the same exclusion, so preparing once avoids
+    rebuilding topology for each vectorized ``intersects`` call.  Preparation
+    does not change coordinates or the subsequent difference result.
+    """
+    import shapely
+
+    merged = shapely.union_all(geometries)
+    shapely.prepare(merged)
+    return merged
+
+
 def _build_exclusion_mask(water_gdf, veg_landmarks,
                           roads_gdf=None, road_inset: float = 0.0,
                           water_inset: float = 0.0):
@@ -177,7 +192,7 @@ def _subtract_exclusions_grid(blocks, excl_parts, min_area: float = 100.0,
             hits = tree.query(cell)
             if len(hits) > 0:
                 hit_geoms = excl_arr[hits]
-                grid_excl[(ix, iy)] = shapely.union_all(hit_geoms)
+                grid_excl[(ix, iy)] = _union_and_prepare(hit_geoms)
 
     # Vectorized centroid + grid cell assignment
     centroids = shapely.centroid(blocks_arr)
@@ -200,7 +215,9 @@ def _subtract_exclusions_grid(blocks, excl_parts, min_area: float = 100.0,
         cell_blocks = blocks_arr[cell_indices]
 
         # Vectorized intersects check — skip blocks that don't touch exclusion
-        hits_mask = shapely.intersects(cell_blocks, excl)
+        # Prepared geometries are accelerated as the first predicate operand.
+        # ``intersects`` is symmetric, so keep the cached exclusion first.
+        hits_mask = shapely.intersects(excl, cell_blocks)
         out.extend(cell_blocks[~hits_mask].tolist())
 
         hit_blocks = cell_blocks[hits_mask]

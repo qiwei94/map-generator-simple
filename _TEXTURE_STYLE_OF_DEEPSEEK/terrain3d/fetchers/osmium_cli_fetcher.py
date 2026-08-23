@@ -10,7 +10,10 @@
 """
 
 import logging
+import hashlib
 import os
+import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -23,6 +26,31 @@ logger = logging.getLogger(__name__)
 
 # 默认 PBF 文件目录
 DEFAULT_PBF_DIR = os.path.join(os.path.dirname(__file__), '..', '..', '..', 'pbf_cache')
+
+# Non-interactive SSH and service managers often omit Homebrew directories
+# from PATH.  Probe the conventional locations before falling back to the
+# bundled pyosmium compatibility backend.
+_STANDARD_EXECUTABLE_DIRS = (
+    "/usr/local/bin",
+    "/opt/homebrew/bin",
+    "/usr/bin",
+)
+
+
+def _find_standard_executable(name: str, exclude=()) -> Optional[str]:
+    excluded = {os.path.realpath(path) for path in exclude if path}
+    candidates = [shutil.which(name)]
+    candidates.extend(os.path.join(directory, name)
+                      for directory in _STANDARD_EXECUTABLE_DIRS)
+    for candidate in candidates:
+        if not candidate:
+            continue
+        resolved = os.path.realpath(candidate)
+        if resolved in excluded:
+            continue
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
 
 
 def _bbox_option(west, south, east, north) -> str:
@@ -48,6 +76,31 @@ def _export_timeout_seconds(filtered_size_kib: float,
     return max(120, min(600, int(filtered_size_kib / 64) + 60))
 
 
+_EXPORT_GEOMETRY_TYPES = {
+    # Downstream building/land-cover preprocessing ignores points and lines.
+    "building": "polygon",
+    "building_landmarks": "polygon",
+    "vegetation": "polygon",
+    "park": "polygon",
+    "wetland": "polygon",
+    "protected_area": "polygon",
+    "stadium": "polygon",
+    "landuse": "polygon",
+    # Road and rail mesh builders consume linework only.
+    "road": "linestring",
+    "railway": "linestring",
+    # Coastlines, river centerlines, piers and mapped water areas are all used.
+    "water": "linestring,polygon",
+    "pier": "linestring,polygon",
+}
+
+
+def _export_geometry_types(tag_type: str) -> str:
+    """Return only geometry families consumed by a downstream feature layer."""
+    return _EXPORT_GEOMETRY_TYPES.get(
+        tag_type, "point,linestring,polygon")
+
+
 class OsmiumCLIFetcher:
     """使用 osmium CLI 获取 OSM 数据"""
 
@@ -71,7 +124,39 @@ class OsmiumCLIFetcher:
 
     # Water v2 adds coastline ways.  Keep it in a separate namespace so old
     # GeoJSON/tile caches (which cannot contain coastlines) are never reused.
-    _CACHE_NAMESPACES = {'water': 'water_coastline_v2'}
+    # Geometry-filtered exports need new cache identities; old full-frame and
+    # tile caches include hundreds of thousands of geometries that downstream
+    # code immediately discards, but GeoPandas must still allocate them first.
+    _CACHE_NAMESPACES = {
+        'building': 'building_geometry_v1',
+        'building_landmarks': 'building_landmarks_geometry_v1',
+        'road': 'road_geometry_v1',
+        'vegetation': 'vegetation_geometry_v1',
+        'landuse': 'landuse_geometry_v1',
+        'water': 'water_coastline_geometry_v3',
+    }
+
+    @staticmethod
+    def _pbf_cache_namespace(pbf_file: str) -> str:
+        """Return a stable, filesystem-safe source identity for caches.
+
+        Geographic coordinates alone are not sufficient: asking a Zhejiang
+        extract for Beijing creates a valid empty GeoJSON at the same bbox as
+        the later correct Beijing request.  Bind every full-frame and tile
+        cache to the concrete PBF name, size, and modification timestamp so a
+        wrong or updated regional source can never poison another request.
+        """
+
+        absolute = os.path.abspath(pbf_file)
+        basename = os.path.basename(absolute)
+        stem = re.sub(r"[^A-Za-z0-9._-]+", "-", basename).strip("-._")
+        try:
+            stat = os.stat(absolute)
+            identity = f"{basename}:{stat.st_size}:{stat.st_mtime_ns}"
+        except OSError:
+            identity = f"{basename}:missing"
+        digest = hashlib.sha1(identity.encode("utf-8")).hexdigest()[:10]
+        return f"{stem or 'pbf'}-{digest}"
 
     # 标准标签过滤表达式（使用 nwr = node/way/relation）
     # 适用于建筑、道路、植被等普通要素
@@ -277,12 +362,11 @@ class OsmiumCLIFetcher:
         if candidate != 'osmium':
             return [candidate]
 
-        import shutil
-        native = shutil.which('osmium')
         bundled_entry = os.path.abspath(os.path.join(
             os.path.dirname(__file__), '..', '..', '..', 'tools', 'osmium'))
         bundled_backend = os.path.join(os.path.dirname(bundled_entry),
                                        'osmium_pyosmium.py')
+        native = _find_standard_executable('osmium', exclude=(bundled_entry,))
         if native and os.path.realpath(native) != os.path.realpath(bundled_entry):
             return [native]
 
@@ -387,7 +471,12 @@ class OsmiumCLIFetcher:
         project_tmp = os.path.join(os.path.dirname(__file__), '..', '..', '..', 'tmp')
         os.makedirs(project_tmp, exist_ok=True)
         cache_tag = self._CACHE_NAMESPACES.get(tag_type, tag_type)
-        output_path = os.path.join(project_tmp, f"osmium_{cache_tag}_{south:.4f}_{west:.4f}_{north:.4f}_{east:.4f}.geojson")
+        pbf_namespace = self._pbf_cache_namespace(pbf_file)
+        output_path = os.path.join(
+            project_tmp,
+            f"osmium_{cache_tag}_{pbf_namespace}_"
+            f"{south:.4f}_{west:.4f}_{north:.4f}_{east:.4f}.geojson",
+        )
 
         logger.info(f"使用 CLI 方式获取 {tag_type} 数据...")
         logger.info(f"边界框: ({south:.4f}, {west:.4f}, {north:.4f}, {east:.4f})")
@@ -534,11 +623,13 @@ class OsmiumCLIFetcher:
         except Exception:
             return gdf
 
-    def _tile_cache_path(self, tag_type, ix, iy):
+    def _tile_cache_path(self, tag_type, ix, iy, pbf_file):
         project_root = os.path.dirname(os.path.dirname(os.path.dirname(
             os.path.dirname(os.path.abspath(__file__)))))
         cache_tag = self._CACHE_NAMESPACES.get(tag_type, tag_type)
-        d = os.path.join(project_root, 'cache', 'tiles', cache_tag)
+        pbf_namespace = self._pbf_cache_namespace(pbf_file)
+        d = os.path.join(
+            project_root, 'cache', 'tiles', pbf_namespace, cache_tag)
         os.makedirs(d, exist_ok=True)
         return os.path.join(d, f"{ix}_{iy}.geojson")
 
@@ -572,7 +663,9 @@ class OsmiumCLIFetcher:
         gdf.to_file(tmp_path, driver='GeoJSON')
         os.replace(tmp_path, path)
 
-    def _split_to_tiles(self, gdf, tag_type, ix0, iy0, ix1, iy1, step):
+    def _split_to_tiles(
+        self, gdf, tag_type, ix0, iy0, ix1, iy1, step, pbf_file,
+    ):
         """全框取数结果拆入瓦片缓存（含空瓦片），供跨网格线请求复用。"""
         from shapely.geometry import box
         from _TEXTURE_STYLE_OF_DEEPSEEK._tile_grid import tile_bbox
@@ -587,7 +680,8 @@ class OsmiumCLIFetcher:
                 else:
                     part = gdf
                 self._atomic_write_gdf(
-                    part, self._tile_cache_path(tag_type, ix, iy))
+                    part, self._tile_cache_path(
+                        tag_type, ix, iy, pbf_file))
 
     def fetch_tiled_features(self, tag_type, south, west, north, east,
                              pbf_file=None, region=None, step=None):
@@ -621,9 +715,11 @@ class OsmiumCLIFetcher:
         project_tmp = os.path.join(os.path.dirname(__file__), '..', '..', '..', 'tmp')
         os.makedirs(project_tmp, exist_ok=True)
         cache_tag = self._CACHE_NAMESPACES.get(tag_type, tag_type)
+        pbf_namespace = self._pbf_cache_namespace(pbf_file)
         full_path = os.path.join(
             project_tmp,
-            f"osmium_{cache_tag}_{fs:.4f}_{fw:.4f}_{fn:.4f}_{fe:.4f}.geojson")
+            f"osmium_{cache_tag}_{pbf_namespace}_"
+            f"{fs:.4f}_{fw:.4f}_{fn:.4f}_{fe:.4f}.geojson")
         gdf = self._try_read_geojson_cache(full_path, tag_type)
         if gdf is not None:
             print(f"  [CLI Pipeline] Using cached GeoJSON (full-frame): {full_path}")
@@ -640,7 +736,7 @@ class OsmiumCLIFetcher:
         cached_paths, missing = [], []
         for iy in range(iy0, iy1 + 1):
             for ix in range(ix0, ix1 + 1):
-                tp = self._tile_cache_path(tag_type, ix, iy)
+                tp = self._tile_cache_path(tag_type, ix, iy, pbf_file)
                 if os.path.exists(tp) and os.path.getsize(tp) > 0:
                     cached_paths.append((ix, iy, tp))
                 else:
@@ -678,8 +774,8 @@ class OsmiumCLIFetcher:
                     gpd.read_file(full_path,
                                   columns=list(self._CACHE_COLUMNS)),
                     tag_type)
-                self._split_to_tiles(gdf, tag_type,
-                                     ix0, iy0, ix1, iy1, step)
+                self._split_to_tiles(
+                    gdf, tag_type, ix0, iy0, ix1, iy1, step, pbf_file)
                 print(f"  [Tile Cache] {tag_type}: {len(gdf)} features, "
                       "full-frame refresh split done\n")
                 return self._enrich_building_heights(
@@ -728,7 +824,8 @@ class OsmiumCLIFetcher:
             gdf = self._prune_cache_columns(
                 gpd.read_file(full_path, columns=list(self._CACHE_COLUMNS)),
                 tag_type)
-            self._split_to_tiles(gdf, tag_type, ix0, iy0, ix1, iy1, step)
+            self._split_to_tiles(
+                gdf, tag_type, ix0, iy0, ix1, iy1, step, pbf_file)
             print(f"  [Tile Cache] {tag_type}: {len(gdf)} features, "
                   f"split into tiles done\n")
             return self._enrich_building_heights(gdf, tag_type, fs, fw, fn, fe)
@@ -1007,9 +1104,11 @@ class OsmiumCLIFetcher:
         else:
             raw_geojson = output_path
 
+        geometry_types = _export_geometry_types(tag_type)
         cmd3 = [
             *osmium_command, 'export',
             filtered_pbf,
+            '--geometry-types', geometry_types,
             '-o', raw_geojson,
             '-f', 'geojson',
             '--overwrite'
@@ -1017,7 +1116,9 @@ class OsmiumCLIFetcher:
 
         logger.info(f"Step 3: {osmium_label} export -f geojson")
         print(f"  [Step 3/{n_steps}] osmium export (converting to GeoJSON)...")
-        print(f"           Command: {osmium_label} export {filtered_pbf} -o {raw_geojson} -f geojson --overwrite")
+        print(f"           Command: {osmium_label} export {filtered_pbf} "
+              f"--geometry-types {geometry_types} -o {raw_geojson} "
+              "-f geojson --overwrite")
         t3 = time.time()
         # The portable Python-backed osmium fallback is much slower than the
         # native C++ tool on dense extracts. Scale the export budget with the
@@ -1193,9 +1294,11 @@ class OsmiumCLIFetcher:
         # Step 2: 导出为 GeoJSON（保持完整 relation 结构）
         full_geojson = os.path.join(temp_dir, f"{base_name}_{tag_type}_full.geojson")
 
+        geometry_types = _export_geometry_types(tag_type)
         cmd2 = [
             *osmium_command, 'export',
             filtered_pbf,
+            '--geometry-types', geometry_types,
             '-o', full_geojson,
             '-f', 'geojson',
             '--overwrite'
@@ -1203,7 +1306,9 @@ class OsmiumCLIFetcher:
 
         logger.info(f"Step 2: {osmium_label} export -f geojson")
         print(f"  [Step 2/3] osmium export (converting to GeoJSON)...")
-        print(f"           Command: {osmium_label} export {filtered_pbf} -o {full_geojson} -f geojson --overwrite")
+        print(f"           Command: {osmium_label} export {filtered_pbf} "
+              f"--geometry-types {geometry_types} -o {full_geojson} "
+              "-f geojson --overwrite")
         t2 = time.time()
         result2 = subprocess.run(cmd2, capture_output=True, timeout=120, creationflags=flags)
         elapsed2 = time.time() - t2

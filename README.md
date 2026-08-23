@@ -88,9 +88,24 @@ pip install -r requirements.txt
 ```
 Python ≥ 3.9。`manifold3d` 保证 watertight 输出；`Pillow` 读 EXIF；`fastapi/uvicorn` 跑 Web 服务。
 
+正式生成建议额外安装原生 `osmium-tool`；未安装时会自动使用项目内的
+pyosmium 回退。建筑高度补强还可安装 Overture 官方 CLI（macOS：
+`brew install overturemaps`）。CLI 与 `requirements.txt` 中的 `pyarrow`
+必须同时可用，否则管线会明确跳过 Overture，而不是把空补强当成成功。
+
 ### 2. 数据准备
 管线需要 OSM 的 `.osm.pbf` 与高程 DEM。本地 `pbf_cache/` 放对应区域 PBF 即可生成。
 项目支持**三态数据可用性**：本地就绪 / 远端可拉取 / 无数据。配置一台数据源服务器后，缺失区域可在页面一键 `scp` 拉取（拉一次永久复用）。
+
+中国区域的高德无标注瓦片只作为可选水面补强。离线 worker 或正式回归应关闭
+实时抓取，避免缓存未命中时把数百个串行 HTTP 请求塞进生成关键路径：
+
+```bash
+AMAP_WATER_AUTO_FETCH=0 python generate_city_legacy.py ...
+```
+
+该开关仍会使用已有 `cache/amap_water/` 结果，只禁止实时下载；需要补强的区域应
+单独预热缓存后再生成。OSM 水体和自适应河宽回退始终保留。
 
 ### 3. 启动 Studio
 ```bash
@@ -114,7 +129,8 @@ Studio 的“生成方式”保持相互隔离：
 
 ### 4. 测试
 ```bash
-pytest tests/ -m "not slow"        # 离线套件（网络用例标 slow 默认跳过）
+python tools/env_doctor.py            # 只读检查运行时、CLI、数据与磁盘
+pytest -m "not slow"                 # 离线套件（pytest.ini 固定发现 tests/）
 ```
 
 ### 5. 西湖 25KM CLI 与 PNG 预览
@@ -149,6 +165,24 @@ python generate_city.py --block-base-mode textured
 python generate_city.py --block-base-mode flat --block-base-edge-retreat-mm 3
 python generate_city.py --block-base-mode flat --block-base-edge-retreat-mm 0
 ```
+
+### 6. 打印机物理约束（实验性 P0）
+
+通用正式入口现已把喷嘴、挤出线宽、层高、可靠彩色条带、可靠间隙和最小表面
+层数统一为 `PrinterProfile`。默认 profile 保持原有 0.4 mm 喷嘴输出不变；
+`design_spec.json` 会保存 XY 实地换算和当前 Z 厚度的层高审计。
+
+可用 JSON 显式校准其他喷嘴：
+
+```bash
+python generate_city_legacy.py \
+  --bbox S,W,N,E --pbf /path/to/region.osm.pbf --city demo \
+  --printer-profile-json /path/to/printer.json
+```
+
+P0 阶段只有喷嘴直径参与现有几何尺度计算；其余约束进入审计报告，待道路职责
+分离、水体分级和语义 Z 阶段逐项接管。完整迁移与验收边界见
+[`doc/print_aware_geometry_plan.md`](doc/print_aware_geometry_plan.md)。
 
 ---
 

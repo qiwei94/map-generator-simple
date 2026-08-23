@@ -21,11 +21,18 @@ urllib3<2; python_version < "3.10" and sys_platform == "darwin"
 
 # Optional (recommended for better performance)
 mapbox-earcut>=1.0.0
+fast-simplification>=0.1.12  # terrain decimation for 15/25 km formal models
 
 # Local DEM/GeoTIFF reader — used by elevation.py for the Copernicus DEM path.
 # Optional: if not installed, elevation.py silently falls back to SRTM HGT.
 # >=1.4 bundles GDAL in the wheel (no `apt install gdal-bin` needed).
 rasterio>=1.4.0
+
+# GeoParquet reader for optional Overture building-height enrichment.
+# Arrow 20 is the last release line that supports the project's Python 3.9
+# floor; newer Python runtimes can use the current Arrow release.
+pyarrow>=15,<21; python_version < "3.10"
+pyarrow>=15; python_version >= "3.10"
 
 # OSM 提取（tools/osmium_pyosmium.py shim 的运行时依赖）。
 # 注意：`pyosmium` 已从 PyPI 下架（404），继任包名就是 `osmium`（同一库，

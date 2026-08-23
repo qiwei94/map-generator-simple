@@ -199,7 +199,8 @@ def load_aesthetic_config(cli_args, city_name):
     if "building_simplify_tol_m" in aes:
         _cfg.BUILDING_SIMPLIFY_TOL_M = float(aes["building_simplify_tol_m"])
 
-    # preprocess_layers 显式 override（road_width_multiplier 仅影响 2D 渲染，不注入 3D）
+    # preprocess_layers 显式 override；道路倍率会固化进 layer evidence，
+    # 供 PNG/GLB/3MF 共用，避免“预览一套、正式一套”。
     overrides = {}
     if "building_v2_road_tier" in aes:
         overrides["road_tier_override"] = int(aes["building_v2_road_tier"])
@@ -213,6 +214,9 @@ def load_aesthetic_config(cli_args, city_name):
         overrides["aggregate_simplify_m_override"] = float(aes["aggregate_simplify_m"])
     if "bo_mode" in aes:
         overrides["bo_mode_override"] = str(aes["bo_mode"])
+    if "road_width_multiplier" in aes:
+        overrides["road_width_multiplier_override"] = float(
+            aes["road_width_multiplier"])
     return aes, overrides
 
 
@@ -667,7 +671,7 @@ def main():
         )
 
     layers = _pipeline_cache.get_or_compute(
-        'preprocess_v1', _preprocess_cache_key, _compute_preprocess,
+        'preprocess_v2', _preprocess_cache_key, _compute_preprocess,
         label='preprocess layers')
 
     print(f"  {layers.summary()}")
@@ -748,7 +752,14 @@ def main():
     roads_mesh = None
     if layers.roads_lines:
         try:
-            roads_mesh = build_deepseek_roads_v3(layers.roads_lines, terrain_solid, scale)
+            roads_mesh = build_deepseek_roads_v3(
+                layers.roads_lines,
+                terrain_solid,
+                scale,
+                road_width_multiplier=(getattr(layers, "road_roles", {})
+                                       .get("width_policy", {})
+                                       .get("road_width_multiplier")),
+            )
             if roads_mesh is not None:
                 print(f"  Road faces: {len(roads_mesh.faces):,}")
             else:

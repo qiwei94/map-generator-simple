@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import time
 from io import BytesIO
 from pathlib import Path
@@ -161,6 +162,11 @@ def _cache_path(bbox_wgs84: Tuple[float, float, float, float], zoom: int) -> Pat
     cache_dir = Path(__file__).resolve().parent.parent / "cache" / "amap_water"
     cache_dir.mkdir(parents=True, exist_ok=True)
     return cache_dir / name
+
+
+def _auto_fetch_enabled() -> bool:
+    value = os.environ.get("AMAP_WATER_AUTO_FETCH", "1").strip().lower()
+    return value not in {"0", "false", "no", "off"}
 
 
 def _fetch_nolabel_tiles(bbox_wgs84: Tuple[float, float, float, float], zoom: int):
@@ -353,6 +359,14 @@ def _fetch_amap_water(
             return polys
         except Exception:
             pass
+
+    # Cluster regression and offline workers must not turn a cache miss into
+    # hundreds of sequential 10-second HTTP waits.  Cached Gaode evidence is
+    # still consumed when this switch is off; only live tile acquisition is
+    # skipped.  Tile prewarming remains a separate, observable operation.
+    if not _auto_fetch_enabled():
+        print("  [amap] live tile fetch disabled; cache miss uses OSM fallback")
+        return []
 
     # Fetch tile grid
     print(f"  [amap] fetching no-label tiles at zoom {zoom}...")

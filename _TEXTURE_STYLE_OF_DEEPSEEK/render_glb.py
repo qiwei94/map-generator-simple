@@ -17,6 +17,11 @@ import time
 import numpy as np
 import trimesh
 
+from _TEXTURE_STYLE_OF_DEEPSEEK.road_roles import (
+    resolve_printable_road_width_m,
+    road_width_multiplier_from_layers,
+)
+
 # ─── 图层配色（GLB 顶点色，对标 render_png 纸面风格）────────────────
 _COLORS = {
     "terrain": (232, 226, 214, 255),
@@ -767,12 +772,20 @@ def render_glb_preview(layers, ctx: dict, output_path: str,
     # ── 道路（贴地形 drape：随浮雕起伏，不悬浮）──
     if layers.roads_lines:
         road_specs = []
+        width_policy = getattr(layers, "road_roles", {}).get("width_policy", {})
+        min_strip_mm = float(width_policy.get("min_colored_strip_mm", 0.63))
+        effective_multiplier = road_width_multiplier_from_layers(
+            layers, ROAD_WIDTH_MULTIPLIER)
         for item in layers.roads_lines:
             line, highway = item[0], item[1]
             if line is None or line.is_empty:
                 continue
-            w_m = ROAD_WIDTHS.get(highway,
-                                  ROAD_DEFAULT_WIDTH_M) * ROAD_WIDTH_MULTIPLIER
+            w_m = resolve_printable_road_width_m(
+                highway,
+                scale_mm_per_m=scale,
+                road_width_multiplier=effective_multiplier,
+                min_colored_strip_mm=min_strip_mm,
+            )
             road_specs.append((line, w_m))
         if fast:
             mesh = _drape_lines(

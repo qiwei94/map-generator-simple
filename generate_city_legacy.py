@@ -42,6 +42,12 @@ from _TEXTURE_STYLE_OF_DEEPSEEK.exporter import export_deepseek_3mf, split_terra
 from _TEXTURE_STYLE_OF_DEEPSEEK.design_spec import (
     build_design_spec, layer_evidence, write_design_spec,
 )
+from _TEXTURE_STYLE_OF_DEEPSEEK.print_profile import (
+    DEFAULT_PRINTER_PROFILE,
+    PrinterProfile,
+    PrintScale,
+    build_printability_report,
+)
 from _TEXTURE_STYLE_OF_DEEPSEEK.config import compute_scale, WATERWAY_WIDTHS, TERRAIN_GRID, get_area_class, BUILDING_V2_HOTSPOT_RELAX
 
 # ---------------------------------------------------------------------------
@@ -151,6 +157,11 @@ def parse_args():
         help='公共打印底层厚度；GLB 预览与正式 3MF 共用（默认 0.4mm）'
     )
     parser.add_argument(
+        '--printer-profile-json', type=str, default=None, metavar='PATH',
+        help=('打印机物理约束 JSON；P0 阶段喷嘴参与几何尺度，线宽/层高/'
+              '间隙进入 design_spec 审计')
+    )
+    parser.add_argument(
         '--marker', action='append', default=None, metavar='LAT,LON',
         help='在 draft GLB 中插红色大头针标注（可重复，如照片 GPS 点）'
     )
@@ -203,6 +214,20 @@ def parse_args():
             parser.error(f"--marker 格式: lat,lon（收到: {m}）")
 
     return args
+
+
+def _load_printer_profile(path):
+    """Load an explicit physical profile, or return the immutable default."""
+    if not path:
+        return DEFAULT_PRINTER_PROFILE
+    try:
+        with open(path, encoding="utf-8") as stream:
+            payload = json.load(stream)
+        if not isinstance(payload, dict):
+            raise ValueError("root must be a JSON object")
+        return PrinterProfile(**payload)
+    except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+        raise SystemExit(f"invalid --printer-profile-json: {exc}")
 
 
 # =====================================================================
@@ -328,6 +353,8 @@ def _transform_layers_to_exact(layers, dx, dy, clip_box):
     layers.block_base = bb
     layers.block_base_classes = bb_cls
     layers.roads_lines = roads
+    if getattr(layers, "road_roles", None):
+        layers.road_roles["visible_segments"] = len(roads)
     return layers
 
 
@@ -394,7 +421,9 @@ def main():
     resolution = TERRAIN_GRID.get(area_class, 512)
     if cli_args.preview_fast:
         resolution = min(resolution, 256)
-    scale = compute_scale(width_m, height_m)
+    printer_profile = _load_printer_profile(cli_args.printer_profile_json)
+    print_scale = PrintScale(width_m, height_m)
+    scale = print_scale.scale_mm_per_m
     south, west, north, east = bbox["wgs84_bbox"]
     utm_crs = bbox["utm_crs"]
     origin = bbox["origin"]
@@ -799,6 +828,8 @@ def main():
         _preprocess_overrides["density_threshold_override"] = auto_resolved.building_density_threshold
         _preprocess_overrides["count_threshold_override"] = auto_resolved.building_count_threshold
         _preprocess_overrides["print_limit_m2_override"] = auto_resolved.building_print_limit_m2
+        _preprocess_overrides["road_width_multiplier_override"] = (
+            auto_resolved.road_width_multiplier)
         if auto_resolved.flat_mode:
             _preprocess_overrides["height_mode_override"] = "flat"
     # 风格参数中的 config 级参数（模块顶层 import 吃不到补丁，必须显式传参）
@@ -842,6 +873,7 @@ def main():
             "print_limit": auto_resolved.building_print_limit_m2,
             "flat": auto_resolved.flat_mode,
             "hotspot_relax": auto_resolved.building_v2_hotspot_relax,
+            "road_width_multiplier": auto_resolved.road_width_multiplier,
         }, sort_keys=True)
         _style_fp = json.dumps({
             "bo_mode": style_overrides.get("bo_mode"),
@@ -869,11 +901,12 @@ def main():
                 bbox_wgs84=(fs, fw, fn, fe),
                 utm_crs=utm_crs,
                 origin=_snap_origin,
+                printer_profile=printer_profile,
                 **_preprocess_overrides,
             )
 
         layers = _snap_cache.get_or_compute(
-            "preprocess_v1",
+            "preprocess_v2",
             input_keys={
                 "snap_bbox": f"{fs:.4f},{fw:.4f},{fn:.4f},{fe:.4f}",
                 "auto": _auto_fp,
@@ -882,6 +915,7 @@ def main():
                 "veg": ENABLE_VEGETATION,
                 "block_base": ENABLE_BLOCK_BASE,
                 "merge": MERGE_BLOCK_LAYERS,
+                "printer_profile": printer_profile.to_dict(),
             },
             compute_fn=_compute_layers_snap,
             label="preprocess(snap)",
@@ -910,6 +944,7 @@ def main():
             bbox_wgs84=(south, west, north, east),
             utm_crs=utm_crs,
             origin=origin,
+            printer_profile=printer_profile,
             **_preprocess_overrides,
         )
     print(f"  {layers.summary()}")
@@ -952,7 +987,7 @@ def main():
             _rw = (auto_resolved.road_width_multiplier
                    if auto_resolved is not None else 1.0)
             bundle = render_review_bundle(
-                layers, {"bbox_local": bbox_local}, _rw,
+                layers, {"bbox_local": bbox_local, "scale": scale}, _rw,
                 OUTPUT_DIR, CITY_NAME)
             print(f"  topdown: {bundle.get('topdown')}")
             print(f"  Time: {time.time() - t465:.1f}s")
@@ -1103,7 +1138,15 @@ def main():
     roads_mesh = None
     if layers.roads_lines:
         try:
-            roads_mesh = build_deepseek_roads_v3(layers.roads_lines, terrain_solid, scale)
+            roads_mesh = build_deepseek_roads_v3(
+                layers.roads_lines,
+                terrain_solid,
+                scale,
+                printer_profile=printer_profile,
+                road_width_multiplier=(getattr(layers, "road_roles", {})
+                                       .get("width_policy", {})
+                                       .get("road_width_multiplier")),
+            )
             if roads_mesh is not None:
                 print(f"  Road faces: {len(roads_mesh.faces):,}")
             else:
@@ -1289,6 +1332,22 @@ def main():
             },
             "thresholds": {},
         },
+        printability=build_printability_report(
+            printer_profile,
+            print_scale,
+            current_thresholds={
+                "preprocess_nozzle_real_m": layers.nozzle_real_m,
+                "min_printable_area_m2": layers.min_area_m2,
+                "building_height_mm_min": _cfg.BUILDING_HEIGHT_MIN_MM,
+                "building_height_mm_max": _cfg.BUILDING_HEIGHT_MAX_MM,
+            },
+            z_thicknesses_mm={
+                "road_thickness_mm": _cfg.ROAD_THICKNESS_MM,
+                "water_thickness_mm": _cfg.WATER_THICKNESS_MM,
+                "base_thickness_mm": cli_args.base_thickness_mm,
+            },
+        ),
+        road_roles=getattr(layers, "road_roles", {}),
     )
     _design_spec_path = write_design_spec(OUTPUT_DIR, _design_spec)
     print(f"  DesignSpec: {_design_spec_path}")

@@ -14,6 +14,7 @@
 import os
 import sys
 import time
+from typing import Optional
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _PROJECT_ROOT not in sys.path:
@@ -31,15 +32,22 @@ from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.elevation import (
 )
 from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.osm import (
     fetch_buildings, fetch_roads, fetch_water, fetch_vegetation,
+    set_pbf_file_path,
 )
 from _TEXTURE_STYLE_OF_DEEPSEEK import config as _cfg
 from _TEXTURE_STYLE_OF_DEEPSEEK.config import (
-    TERRAIN_GRID, get_area_class, compute_scale,
+    TERRAIN_GRID, get_area_class,
 )
 from _TEXTURE_STYLE_OF_DEEPSEEK._layer_preprocess import preprocess_layers
 from _TEXTURE_STYLE_OF_DEEPSEEK._pipeline_cache import PipelineCache
 from _TEXTURE_STYLE_OF_DEEPSEEK.auto_params.city_profile import detect_city_profile
 from _TEXTURE_STYLE_OF_DEEPSEEK.auto_params.param_resolver import resolve_params
+from _TEXTURE_STYLE_OF_DEEPSEEK.print_profile import (
+    DEFAULT_PRINTER_PROFILE,
+    PrinterProfile,
+    PrintScale,
+    build_printability_report,
+)
 
 from .presets import CityPreset
 
@@ -47,8 +55,14 @@ from .presets import CityPreset
 class CityHarness:
     """单城市闭环底座：prepare 一次，run_round 多次。"""
 
-    def __init__(self, preset: CityPreset, use_cache: bool = True):
+    def __init__(
+        self,
+        preset: CityPreset,
+        use_cache: bool = True,
+        printer_profile: Optional[PrinterProfile] = None,
+    ):
         self.preset = preset
+        self.printer_profile = printer_profile or DEFAULT_PRINTER_PROFILE
         self.cache = PipelineCache(f"{preset.name}_aesthetic", enabled=use_cache)
         self.ctx: dict = {}
         self.profile = None
@@ -64,15 +78,32 @@ class CityHarness:
         p = self.preset
         print(f"\n[harness] prepare: {p.name} ({p.prototype}) bbox={p.bbox}")
 
-        # 指定 PBF（terrain3d fetchers 读 OSM_PBF_FILE）
+        # Bind the requested PBF explicitly.  Merely setting the environment
+        # variable is insufficient if this process previously selected a
+        # different file through the module-level resolver.  A missing city
+        # PBF must fail here instead of silently scanning pbf_cache and using
+        # the first unrelated region.
+        set_pbf_file_path(p.pbf_abs)
         os.environ["OSM_PBF_FILE"] = p.pbf_abs
+        # Gallery previews prioritize feedback latency.  Cached Overture
+        # heights are still consumed, but a cache miss must not block this
+        # quick path for up to ten minutes.  Callers may explicitly set 1 to
+        # opt back in; formal generation keeps its existing download policy.
+        os.environ.setdefault("OVERTURE_AUTO_DOWNLOAD", "0")
+        pbf_stat = os.stat(p.pbf_abs)
+        pbf_source = {
+            "basename": os.path.basename(p.pbf_abs),
+            "size_bytes": int(pbf_stat.st_size),
+            "mtime_ns": int(pbf_stat.st_mtime_ns),
+        }
 
         south, west, north, east = p.bbox
         bbox = bbox_to_utm(south, west, north, east)
         area_km2 = bbox["area_km2"]
         area_class = get_area_class(area_km2)
         resolution = TERRAIN_GRID.get(area_class, 512)
-        scale = compute_scale(bbox["width_m"], bbox["height_m"])
+        print_scale = PrintScale(bbox["width_m"], bbox["height_m"])
+        scale = print_scale.scale_mm_per_m
         utm_crs, origin, utm_bbox = bbox["utm_crs"], bbox["origin"], bbox["utm_bbox"]
         bbox_local = (utm_bbox[0] - origin[0], utm_bbox[1] - origin[1],
                       utm_bbox[2] - origin[0], utm_bbox[3] - origin[1])
@@ -194,7 +225,24 @@ class CityHarness:
             "width_m": bbox["width_m"], "height_m": bbox["height_m"],
             "elevation_grid": elevation_grid,
             "bbox_wgs84": p.bbox,
+            "pbf_source": pbf_source,
+            "source_feature_counts": {
+                key: 0 if gdfs.get(key) is None else len(gdfs[key])
+                for key in ("buildings", "roads", "water", "vegetation")
+            },
             "amap_water_polys": amap_water_polys,
+            "printer_profile": self.printer_profile,
+            "printability": build_printability_report(
+                self.printer_profile,
+                print_scale,
+                current_thresholds={
+                    "min_printable_area_m2": _cfg.MIN_PRINTABLE_AREA_M2,
+                },
+                z_thicknesses_mm={
+                    "road_thickness_mm": _cfg.ROAD_THICKNESS_MM,
+                    "water_thickness_mm": _cfg.WATER_THICKNESS_MM,
+                },
+            ),
             **gdfs,
         }
         self._prepared = True
@@ -212,6 +260,7 @@ class CityHarness:
             "building_print_limit_m2": rp.building_print_limit_m2,
             "building_v2_road_tier": rp.building_v2_road_tier,
             "road_width_multiplier": rp.road_width_multiplier,
+            "building_height_mm_min": rp.building_height_mm_min,
             "building_height_mm_max": rp.building_height_mm_max,
             "building_simplify_tol_m": rp.building_simplify_tol_m,
             "aggregate_simplify_m": float(
@@ -229,6 +278,9 @@ class CityHarness:
         ctx = self.ctx
 
         # 高度杠杆：猴补丁（buildings._compress_height 已函数级 import）
+        _cfg.BUILDING_HEIGHT_MIN_MM = float(params.get(
+            "building_height_mm_min",
+            self.base_params.building_height_mm_min))
         _cfg.BUILDING_HEIGHT_MAX_MM = float(params["building_height_mm_max"])
         # GLB 预览与正式管线共用同一已解析地形起伏。
         _cfg.TERRAIN_THICKNESS_MM = float(params.get(
@@ -251,14 +303,19 @@ class CityHarness:
                 getattr(_cfg, "BUILDING_V2_AGGREGATE_SIMPLIFY_M", 60.0))),
             "bo_mode_override": str(params.get(
                 "bo_mode", getattr(_cfg, "BUILDING_V2_MODE", "oriented_bbox"))),
+            "road_width_multiplier_override": float(
+                params["road_width_multiplier"]),
         }
         if self.base_params.flat_mode:
             overrides["height_mode_override"] = "flat"
 
-        # 缓存指纹：只含影响 preprocess 的参数（road_width_multiplier 仅影响渲染）
+        # Visible road selection is print-width/ink-budget aware, so road width
+        # is intentionally part of the preprocess cache fingerprint.
         cache_key = dict(overrides)
         cache_key["height_max_mm"] = float(params["building_height_mm_max"])
+        cache_key["height_min_mm"] = float(_cfg.BUILDING_HEIGHT_MIN_MM)
         cache_key["simplify_tol_m"] = float(_cfg.BUILDING_SIMPLIFY_TOL_M)
+        cache_key["printer_profile"] = self.printer_profile.to_dict()
 
         def _compute():
             return preprocess_layers(
@@ -274,6 +331,7 @@ class CityHarness:
                 bbox_wgs84=ctx["bbox_wgs84"],
                 utm_crs=ctx["utm_crs"],
                 origin=ctx["origin"],
+                printer_profile=self.printer_profile,
                 **overrides,
             )
 
@@ -281,4 +339,4 @@ class CityHarness:
         # schema coupled to the coastline input revision; otherwise a corrected
         # 0.9% inland-water frame can reuse the old false 99.9% sea layers.
         return self.cache.get_or_compute(
-            "preprocess_v6", cache_key, _compute, label="preprocess")
+            "preprocess_v8", cache_key, _compute, label="preprocess")

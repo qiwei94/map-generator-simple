@@ -4,7 +4,11 @@ import geopandas as gpd
 from types import SimpleNamespace
 from shapely.geometry import LineString
 
-from aesthetic.city_signature import analyze_city_signature, analyze_road_topology
+from aesthetic.city_signature import (
+    analyze_city_signature,
+    analyze_road_topology,
+    compare_visible_road_signature,
+)
 
 
 FRAME = (0.0, 0.0, 25_000.0, 25_000.0)
@@ -58,6 +62,41 @@ def test_empty_roads_have_no_topology_signature():
 
     assert result["road_signature_score"] == 0
     assert result["traits"] == []
+
+
+def test_visible_network_must_preserve_dominant_source_trait():
+    center = 12_500.0
+    ring = LineString([
+        (center + 6000, center),
+        (center + 4243, center + 4243),
+        (center, center + 6000),
+        (center - 4243, center + 4243),
+        (center - 6000, center),
+        (center - 4243, center - 4243),
+        (center, center - 6000),
+        (center + 4243, center - 4243),
+        (center + 6000, center),
+    ])
+    unrelated = LineString([(1000, 1000), (24_000, 1000)])
+
+    preserved = compare_visible_road_signature(
+        _roads([ring, unrelated]), _roads([ring]), FRAME)
+    lost = compare_visible_road_signature(
+        _roads([ring, unrelated]), _roads([unrelated]), FRAME)
+
+    assert preserved["dominant_trait"] == "ring"
+    assert preserved["passed"] is True
+    assert lost["passed"] is False
+    assert "lost" in lost["reason"]
+
+
+def test_ambiguous_source_signature_is_non_blocking():
+    road = LineString([(1000, 1000), (24_000, 1000)])
+
+    result = compare_visible_road_signature(_roads([road]), None, FRAME)
+
+    assert result["source_is_distinctive"] is False
+    assert result["passed"] is True
 
 
 def _profile(water_ratio):

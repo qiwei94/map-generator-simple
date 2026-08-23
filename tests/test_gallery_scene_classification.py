@@ -1,9 +1,12 @@
 from types import SimpleNamespace
 
+import pytest
+
 from tools.batch_generate_gallery import (
     LANDSCAPE_STYLE_VARIANTS,
     STYLE_VARIANTS,
     classify_scene_type,
+    validate_gallery_feature_evidence,
     variants_for_scene,
 )
 
@@ -66,3 +69,53 @@ def test_sparse_mountain_without_city_roads_remains_landscape():
     ), "terrain")
 
     assert scene == "landscape"
+
+
+def _layers(**role_overrides):
+    road_roles = {
+        "source_line_features": 100,
+        "topology_candidates": 80,
+        "visible_candidates": 20,
+        "visible_segments": 18,
+    }
+    road_roles.update(role_overrides)
+    return SimpleNamespace(
+        road_roles=road_roles,
+        BL=[("landmark", 5.0)],
+        BO=[],
+        block_base=[],
+    )
+
+
+def test_urban_gallery_requires_nonzero_roads_and_geometry():
+    evidence = validate_gallery_feature_evidence(_layers(), "urban")
+
+    assert evidence["road_source_lines"] == 100
+    assert evidence["road_visible_segments"] == 18
+    assert evidence["building_landmarks"] == 1
+
+
+def test_urban_gallery_rejects_silent_zero_road_result():
+    with pytest.raises(RuntimeError, match="road_source_lines"):
+        validate_gallery_feature_evidence(
+            _layers(
+                source_line_features=0,
+                topology_candidates=0,
+                visible_candidates=0,
+                visible_segments=0,
+            ),
+            "urban",
+        )
+
+
+def test_landscape_gallery_records_but_allows_zero_roads():
+    layers = _layers(
+        source_line_features=0,
+        topology_candidates=0,
+        visible_candidates=0,
+        visible_segments=0,
+    )
+
+    evidence = validate_gallery_feature_evidence(layers, "landscape")
+
+    assert evidence["road_source_lines"] == 0

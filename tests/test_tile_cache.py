@@ -13,8 +13,10 @@ from shapely.geometry import LineString, Point
 from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.osmium_cli_fetcher import (
     OsmiumCLIFetcher,
     _bbox_option,
+    _export_geometry_types,
     _export_timeout_seconds,
 )
+from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers import osmium_cli_fetcher
 from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.osm import OSMPipeline
 from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.elevation import (
     _stitch_tile_grids,
@@ -62,6 +64,23 @@ class TestDedupeFeatures:
         merged = pd.concat([g1, g2], ignore_index=True)
         out = OsmiumCLIFetcher._dedupe_features(merged)
         assert len(out) == 3
+
+
+class TestPbfCacheIdentity:
+    def test_same_bbox_from_different_regions_has_different_namespace(
+            self, tmp_path):
+        beijing = tmp_path / "beijing-latest.osm.pbf"
+        zhejiang = tmp_path / "zhejiang-latest.osm.pbf"
+        beijing.write_bytes(b"beijing")
+        zhejiang.write_bytes(b"zhejiang")
+        fetcher = OsmiumCLIFetcher()
+
+        beijing_key = fetcher._pbf_cache_namespace(str(beijing))
+        zhejiang_key = fetcher._pbf_cache_namespace(str(zhejiang))
+
+        assert beijing_key != zhejiang_key
+        assert "beijing-latest.osm.pbf" in beijing_key
+        assert "zhejiang-latest.osm.pbf" in zhejiang_key
 
 
 class TestPipelineCleanup:
@@ -175,6 +194,11 @@ class TestOsmiumBinaryOverride:
     def test_portable_backend_uses_active_python(self, monkeypatch):
         monkeypatch.delenv("OSMIUM_BIN", raising=False)
         monkeypatch.setenv("PATH", "")
+        monkeypatch.setattr(
+            osmium_cli_fetcher,
+            "_STANDARD_EXECUTABLE_DIRS",
+            (),
+        )
 
         fetcher = OsmiumCLIFetcher()
         command = fetcher._get_osmium_command()
@@ -183,11 +207,37 @@ class TestOsmiumBinaryOverride:
         assert command[0] == sys.executable
         assert command[1].endswith("tools/osmium_pyosmium.py")
 
+    def test_homebrew_standard_path_wins_when_worker_path_is_minimal(
+            self, monkeypatch, tmp_path):
+        executable = tmp_path / "osmium"
+        executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        executable.chmod(0o755)
+        monkeypatch.delenv("OSMIUM_BIN", raising=False)
+        monkeypatch.setenv("PATH", "")
+        monkeypatch.setattr(
+            osmium_cli_fetcher,
+            "_STANDARD_EXECUTABLE_DIRS",
+            (str(tmp_path),),
+        )
+
+        fetcher = OsmiumCLIFetcher()
+
+        assert fetcher.osmium_available
+        assert fetcher._get_osmium_command() == [str(executable)]
+
     def test_portable_export_budget_handles_dense_road_extract(self):
         portable = [sys.executable, "/repo/tools/osmium_pyosmium.py"]
 
         assert _export_timeout_seconds(4_886.5, portable) >= 720
         assert _export_timeout_seconds(4_886.5, ["/usr/bin/osmium"]) < 300
+
+    def test_export_geometry_types_match_downstream_consumers(self):
+        assert _export_geometry_types("building") == "polygon"
+        assert _export_geometry_types("vegetation") == "polygon"
+        assert _export_geometry_types("landuse") == "polygon"
+        assert _export_geometry_types("road") == "linestring"
+        assert _export_geometry_types("water") == "linestring,polygon"
+        assert _export_geometry_types("unknown") == "point,linestring,polygon"
 
     @pytest.mark.skipif(os.name == "nt", reason="POSIX executable bit")
     def test_portable_osmium_entry_is_executable(self):
@@ -209,7 +259,8 @@ class TestExtractionFailureSafety:
         monkeypatch.setattr(fetcher, "osmium_available", True)
         monkeypatch.setattr(
             fetcher, "_tile_cache_path",
-            lambda tag, ix, iy: str(tile_dir / f"{tag}_{ix}_{iy}.geojson"),
+            lambda tag, ix, iy, pbf_file: str(
+                tile_dir / f"{tag}_{ix}_{iy}.geojson"),
         )
         monkeypatch.setattr(fetcher, "_run_osmium_pipeline", lambda *a: False)
 
