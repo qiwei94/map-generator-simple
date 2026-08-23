@@ -19,6 +19,7 @@ from typing import Any, Iterable
 import geopandas as gpd
 import pandas as pd
 from shapely.geometry import LineString, MultiLineString
+from shapely.errors import GEOSException
 from shapely.ops import linemerge, unary_union
 
 
@@ -48,6 +49,7 @@ class WaterLineCandidate:
     waterway: str
     identity: str
     half_width_m: float
+    width_evidence: bool = False
 
 
 @dataclass
@@ -70,6 +72,54 @@ def water_identity(row: pd.Series, fallback: str) -> str:
         if value:
             return f"{key}:{value}"
     return fallback
+
+
+def is_exposed_water_line(row: pd.Series) -> bool:
+    """Reject mapped underground/covered water from visible material.
+
+    The feature remains in the unfiltered source network used for structural
+    block cutting.  This gate affects only the high-contrast water layer.
+    """
+
+    tunnel = _text(row.get("tunnel"))
+    covered = _text(row.get("covered"))
+    location = _text(row.get("location"))
+    if tunnel not in ("", "no", "false", "0"):
+        return False
+    if covered in ("yes", "true", "1"):
+        return False
+    if location in ("underground", "underwater"):
+        return False
+    return True
+
+
+def has_printable_water_mass(
+    geometry,
+    *,
+    nozzle_real_m: float,
+    min_core_ratio: float = 0.05,
+) -> bool:
+    """Return whether a surface reads as an area, not a sub-nozzle stroke.
+
+    Area alone cannot distinguish a lake from a 10 km × 20 m canal.  Eroding
+    by half a nozzle measures the two-dimensional printable core.  Requiring a
+    small retained fraction removes long hairline polygons while preserving
+    broad rivers, lakes, coastlines, and locally narrow shoreline details.
+    """
+
+    if geometry is None or geometry.is_empty or geometry.area <= 0:
+        return False
+    if nozzle_real_m <= 0 or not math.isfinite(nozzle_real_m):
+        raise ValueError("nozzle_real_m must be positive")
+    if not 0 <= min_core_ratio < 1:
+        raise ValueError("min_core_ratio must be in [0, 1)")
+    try:
+        core = geometry.buffer(-nozzle_real_m * 0.5)
+    except GEOSException:
+        return False
+    if core.is_empty:
+        return False
+    return float(core.area) / float(geometry.area) >= min_core_ratio
 
 
 def retain_continuous_water_source(
@@ -222,11 +272,14 @@ def select_visible_water_lines(
     *,
     bbox_local=None,
     nozzle_real_m: float,
+    visible_surface_ratio: float = 0.0,
 ) -> VisibleWaterSelection:
     """Select complete high-contrast water corridors under a physical budget."""
 
     if nozzle_real_m <= 0 or not math.isfinite(nozzle_real_m):
         raise ValueError("nozzle_real_m must be positive")
+    if visible_surface_ratio < 0 or not math.isfinite(visible_surface_ratio):
+        raise ValueError("visible_surface_ratio must be finite and non-negative")
     if not candidates:
         return VisibleWaterSelection([], {
             "policy_version": POLICY_VERSION,
@@ -257,32 +310,49 @@ def select_visible_water_lines(
         for key, items in groups.items()
     }
     group_ink = {}
+    group_has_width_evidence = {}
     for key, items in groups.items():
         full_width = max(
             nozzle_real_m,
             max(item.half_width_m for item in items) * 2.0,
         )
         group_ink[key] = group_metrics[key]["length_m"] * full_width / frame_area
+        group_has_width_evidence[key] = (
+            key[0] == "riverbank"
+            or any(item.width_evidence for item in items)
+        )
 
+    fallback_without_surface = False
     if apply_budget:
         eligible = [
             key for key in groups
             if (key[0] in _LARGE_VISIBLE_WATERWAYS
+                and group_has_width_evidence[key]
                 and max(group_metrics[key]["span_x"],
                         group_metrics[key]["span_y"])
                 >= _LARGE_MIN_FRAME_SPAN)
         ]
-        # Mountain or park scenes occasionally have no river/canal tagging.
-        # In that case one genuinely frame-spanning stream may carry the
-        # composition; drains and ditches never become high-contrast material.
-        if not eligible:
+        # If no surface polygon expresses water at all, keep at most one
+        # frame-spanning centreline as a data-quality fallback.  Where lakes,
+        # sea, or river polygons already anchor the scene, unsupported narrow
+        # centrelines add noise rather than identity.
+        if not eligible and visible_surface_ratio < 0.002:
             eligible = [
                 key for key in groups
-                if (key[0] == "stream"
+                if (key[0] in _LARGE_VISIBLE_WATERWAYS
                     and max(group_metrics[key]["span_x"],
                             group_metrics[key]["span_y"])
                     >= _LARGE_MIN_FRAME_SPAN)
             ]
+            if not eligible:
+                eligible = [
+                    key for key in groups
+                    if (key[0] == "stream"
+                        and max(group_metrics[key]["span_x"],
+                                group_metrics[key]["span_y"])
+                        >= _LARGE_MIN_FRAME_SPAN)
+                ]
+            fallback_without_surface = bool(eligible)
 
         class_priority = {"riverbank": 1.35, "river": 1.25, "canal": 1.0,
                           "stream": 0.7}
@@ -292,7 +362,9 @@ def select_visible_water_lines(
         ))
         used = 0.0
         for key in eligible:
-            if len(selected_keys) >= _LARGE_MAX_CORRIDORS:
+            max_corridors = (1 if fallback_without_surface
+                             else _LARGE_MAX_CORRIDORS)
+            if len(selected_keys) >= max_corridors:
                 break
             ratio = group_ink[key]
             if selected_keys and used + ratio > _LARGE_GLOBAL_INK_QUOTA:
@@ -341,6 +413,8 @@ def select_visible_water_lines(
         "visible_line_segments": len(output),
         "gap_bridges": bridge_count,
         "budget_applied": apply_budget,
+        "visible_surface_ratio": round(visible_surface_ratio, 6),
+        "fallback_without_surface": fallback_without_surface,
         "global_ink_quota_ratio": (_LARGE_GLOBAL_INK_QUOTA
                                    if apply_budget else None),
         "max_visible_corridors": (_LARGE_MAX_CORRIDORS
@@ -349,5 +423,7 @@ def select_visible_water_lines(
             f"{waterway}:{identity}"
             for waterway, identity in sorted(selected_keys)
         ],
+        "selected_width_evidence_groups": sum(
+            1 for key in selected_keys if group_has_width_evidence[key]),
         "class_budgets": class_evidence,
     })

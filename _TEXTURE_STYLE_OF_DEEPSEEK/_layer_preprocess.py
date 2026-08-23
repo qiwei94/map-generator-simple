@@ -89,6 +89,8 @@ from _TEXTURE_STYLE_OF_DEEPSEEK.print_profile import (
 from _TEXTURE_STYLE_OF_DEEPSEEK.road_roles import select_road_roles
 from _TEXTURE_STYLE_OF_DEEPSEEK.water_roles import (
     WaterLineCandidate,
+    has_printable_water_mass,
+    is_exposed_water_line,
     select_visible_water_lines,
     water_identity,
 )
@@ -832,6 +834,7 @@ def _extract_WL_WO(
     filled_hole_count = 0
     repaired_water_count = 0
     ordinary_polygon_drops = 0
+    unprintable_surface_drops = 0
     # 可打印下限 = 1 喷嘴宽（0.5×nozzle_real 半宽）。历史 1.5× 把大框
     # （scale 小、nozzle_real 大）的城市河道全部撑到 ~200m 宽蓝带。
     min_buffer = nozzle_real_m * 0.5
@@ -859,6 +862,10 @@ def _extract_WL_WO(
                     repaired_water_count += 1
                 poly = cleaned
                 area = poly.area
+                if not has_printable_water_mass(
+                        poly, nozzle_real_m=nozzle_real_m):
+                    unprintable_surface_drops += 1
+                    continue
                 if (area >= visual_polygon_min_area
                         and is_water_landmark(row, area_m2=area)):
                     WL_polys.append(poly)
@@ -869,18 +876,24 @@ def _extract_WL_WO(
 
         # LineString / MultiLineString
         elif isinstance(geom, (LineString, MultiLineString)):
-            if not is_water_landmark(row):
+            if not is_water_landmark(row) or not is_exposed_water_line(row):
                 continue
             lines = geom.geoms if isinstance(geom, MultiLineString) else [geom]
             waterway_type = row.get("waterway", "river")
             # 宽度解析：OSM width 标签 > 自适应回退（不查硬编码表）
             osm_width = row.get("width", None)
+            width_evidence = False
             if osm_width is not None:
                 try:
                     if not (isinstance(osm_width, float) and math.isnan(osm_width)):
                         parsed_w = float(osm_width)
                         if 0 < parsed_w < 5000:
                             half_width = parsed_w / 2.0
+                            # A factual width tag is useful only when the
+                            # source water itself spans at least one printable
+                            # strip.  Otherwise the renderer would still be
+                            # inventing most of the visible black width.
+                            width_evidence = parsed_w >= nozzle_real_m
                         else:
                             half_width = 30.0  # 无效标签回退
                     else:
@@ -906,12 +919,24 @@ def _extract_WL_WO(
                     identity=(identity if not identity.startswith("source:")
                               else f"{identity}:{part_index}"),
                     half_width_m=float(buffer_width),
+                    width_evidence=width_evidence,
                 ))
 
+    if bbox_local is not None:
+        xmin, ymin, xmax, ymax = (float(value) for value in bbox_local)
+        frame_area = max((xmax - xmin) * (ymax - ymin), 1.0)
+        visible_surface_ratio = min(
+            1.0,
+            sum(float(poly.area) for poly in [*WL_polys, *WO_polys])
+            / frame_area,
+        )
+    else:
+        visible_surface_ratio = 0.0
     visible_water = select_visible_water_lines(
         line_candidates,
         bbox_local=bbox_local,
         nozzle_real_m=nozzle_real_m,
+        visible_surface_ratio=visible_surface_ratio,
     )
     selected_water_lines = list(visible_water.lines)
     wl_lines_raw = [(line, waterway_type)
@@ -931,6 +956,7 @@ def _extract_WL_WO(
         "source_features": len(water_gdf),
         "ordinary_polygon_min_area_m2": ordinary_min_area,
         "ordinary_polygon_drops": ordinary_polygon_drops,
+        "unprintable_surface_drops": unprintable_surface_drops,
         "visible_landmark_polygons": len(WL_polys),
         "visible_ordinary_polygons": len(WO_polys),
     })

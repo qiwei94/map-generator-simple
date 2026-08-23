@@ -1,8 +1,11 @@
 import geopandas as gpd
+import pandas as pd
 from shapely.geometry import LineString, box
 
 from _TEXTURE_STYLE_OF_DEEPSEEK.water_roles import (
     WaterLineCandidate,
+    has_printable_water_mass,
+    is_exposed_water_line,
     retain_continuous_water_source,
     select_visible_water_lines,
 )
@@ -72,16 +75,16 @@ def test_large_area_uses_one_global_budget_instead_of_promoting_each_class():
     candidates = [
         WaterLineCandidate(
             LineString([(0, 5000), (10000, 5000)]),
-            "river", "name:identity river", 30),
+            "river", "name:identity river", 30, True),
         WaterLineCandidate(
             LineString([(0, 2000), (10000, 2000)]),
-            "canal", "name:identity canal", 20),
+            "canal", "name:identity canal", 30, True),
         WaterLineCandidate(
             LineString([(0, 1000), (10000, 1000)]),
-            "stream", "name:minor stream", 6),
+            "stream", "name:minor stream", 30, True),
         WaterLineCandidate(
             LineString([(0, 700), (10000, 700)]),
-            "drain", "name:storm drain", 3),
+            "drain", "name:storm drain", 30, True),
     ]
 
     selected = select_visible_water_lines(
@@ -101,7 +104,7 @@ def test_large_area_caps_visible_water_corridors_for_visual_hierarchy():
         WaterLineCandidate(
             LineString([(1000, 1000 + index * 1500),
                         (8500, 1000 + index * 1500)]),
-            "river", f"name:river {index}", 25)
+            "river", f"name:river {index}", 25, True)
         for index in range(5)
     ]
 
@@ -113,3 +116,55 @@ def test_large_area_caps_visible_water_corridors_for_visual_hierarchy():
 
     assert selected.evidence["selected_groups"] == 3
     assert selected.evidence["max_visible_corridors"] == 3
+
+
+def test_surface_water_suppresses_widthless_centrelines_at_city_scale():
+    candidates = [
+        WaterLineCandidate(
+            LineString([(0, 5000), (10000, 5000)]),
+            "river", "name:already expressed river", 30),
+    ]
+
+    selected = select_visible_water_lines(
+        candidates,
+        bbox_local=(0, 0, 10000, 10000),
+        nozzle_real_m=50.0,
+        visible_surface_ratio=0.01,
+    )
+
+    assert selected.lines == []
+    assert selected.evidence["selected_groups"] == 0
+
+
+def test_widthless_centreline_is_a_single_fallback_when_surface_is_missing():
+    candidates = [
+        WaterLineCandidate(
+            LineString([(0, 5000), (10000, 5000)]),
+            "river", "name:first", 30),
+        WaterLineCandidate(
+            LineString([(0, 3000), (10000, 3000)]),
+            "river", "name:second", 30),
+    ]
+
+    selected = select_visible_water_lines(
+        candidates,
+        bbox_local=(0, 0, 10000, 10000),
+        nozzle_real_m=50.0,
+    )
+
+    assert selected.evidence["selected_groups"] == 1
+    assert selected.evidence["fallback_without_surface"] is True
+
+
+def test_covered_or_underground_water_is_not_visible_material():
+    assert is_exposed_water_line(pd.Series({"tunnel": "culvert"})) is False
+    assert is_exposed_water_line(pd.Series({"covered": "yes"})) is False
+    assert is_exposed_water_line(pd.Series({"location": "underground"})) is False
+    assert is_exposed_water_line(pd.Series({"tunnel": "no"})) is True
+
+
+def test_long_sub_nozzle_polygon_is_not_promoted_by_area_alone():
+    assert has_printable_water_mass(
+        box(0, 0, 10000, 20), nozzle_real_m=50.0) is False
+    assert has_printable_water_mass(
+        box(0, 0, 10000, 500), nozzle_real_m=50.0) is True
