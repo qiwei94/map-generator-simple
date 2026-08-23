@@ -236,7 +236,14 @@ def analyze_city_signature(roads_gdf, buildings_gdf, bbox_local, profile,
     """Combine characteristic points without letting one signal hide bad data."""
     topology = analyze_road_topology(roads_gdf, bbox_local)
     center_score = _center_concentration(buildings_gdf, bbox_local)
-    water_score = float(water_framing.get("narrative_score") or 0.0)
+    water_ratio = float(_profile_value(profile, "water_ratio", 0.0) or 0.0)
+    # A high framing score from a few tiny ponds must not label a dry city as
+    # water-led.  Ramp from no evidence below 0.2% of the frame to full
+    # evidence at 1%; a genuinely frame-defining river, lake or coast easily
+    # clears that threshold at showcase scale.
+    water_presence = float(np.clip((water_ratio - 0.002) / 0.008, 0.0, 1.0))
+    water_score = (float(water_framing.get("narrative_score") or 0.0)
+                   * water_presence)
     relief_score = min(
         1.0, float(_profile_value(profile, "elevation_range_m", 0.0)) / 250.0)
     geography_score = max(water_score, relief_score)
@@ -258,7 +265,6 @@ def analyze_city_signature(roads_gdf, buildings_gdf, bbox_local, profile,
         profile, "road_density_km_per_km2", 0.0) or 0.0)
     building_density = float(_profile_value(
         profile, "building_density", 0.0) or 0.0)
-    water_ratio = float(_profile_value(profile, "water_ratio", 0.0) or 0.0)
     if scene_type == "urban":
         evidence = min(1.0, 0.55 * min(1.0, road_density / 5.0)
                        + 0.45 * min(1.0, building_density / 200.0))
