@@ -148,7 +148,17 @@ def classify_scene_type(profile, requested_prototype: str) -> str:
     bbox from receiving dense-city road and block styling even when its OSM
     building coverage is poor.
     """
-    if requested_prototype == "skyline":
+    road_density = float(getattr(
+        profile, "road_density_km_per_km2", 0.0) or 0.0)
+    # Some cities have poor OSM building coverage but a dense metropolitan
+    # road network.  Do not misclassify them as mountains merely because the
+    # requested prototype mentions terrain (Mexico City regression).
+    urban_network = (
+        profile.building_density >= 80
+        and road_density >= 12
+        and profile.water_ratio < 0.30
+    )
+    if requested_prototype == "skyline" or urban_network:
         return "urban"
     sparse = profile.building_density < 200
     nature_evidence = (

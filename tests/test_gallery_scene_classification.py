@@ -14,6 +14,7 @@ def _profile(**overrides):
         "water_ratio": 0.01,
         "elevation_range_m": 20.0,
         "vegetation_ratio": 0.03,
+        "road_density_km_per_km2": 20.0,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -41,3 +42,27 @@ def test_dense_skyline_keeps_urban_variants():
 
     assert scene == "urban"
     assert variants_for_scene(scene) is STYLE_VARIANTS
+
+
+def test_dense_road_network_overrides_sparse_terrain_hint():
+    scene = classify_scene_type(_profile(
+        building_density=198.3,
+        road_density_km_per_km2=26.1,
+        water_ratio=0.009,
+        elevation_range_m=484.0,
+        vegetation_ratio=0.095,
+    ), "terrain")
+
+    assert scene == "urban"
+
+
+def test_sparse_mountain_without_city_roads_remains_landscape():
+    scene = classify_scene_type(_profile(
+        building_density=20.0,
+        road_density_km_per_km2=2.0,
+        water_ratio=0.01,
+        elevation_range_m=484.0,
+        vegetation_ratio=0.15,
+    ), "terrain")
+
+    assert scene == "landscape"
