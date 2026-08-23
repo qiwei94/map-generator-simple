@@ -31,7 +31,8 @@ if _PROJECT_ROOT not in sys.path:
 
 # Windows GBK 控制台防 UnicodeEncodeError（其余字符集环境无影响）
 if hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(errors="replace")
+    sys.stdout.reconfigure(
+        errors="replace", line_buffering=True, write_through=True)
 
 from PIL import Image, ImageDraw, ImageFont
 
