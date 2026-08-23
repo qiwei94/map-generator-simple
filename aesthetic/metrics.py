@@ -78,6 +78,48 @@ def _water_metric(layers, water_mask: np.ndarray) -> float:
     return float(np.clip(dominance / 0.7, 0.0, 1.0))
 
 
+def _road_ink_metrics(
+    road_mask: np.ndarray,
+    water_mask: np.ndarray,
+    *,
+    n_cells: int = 16,
+) -> tuple[float, float]:
+    """Return land-only road ink ratio and local-window P95.
+
+    Large lakes, rivers, and oceans are intentional composition space and a
+    separate material.  Counting their black area as road clutter made coastal
+    cities impossible to compare with inland cities.  Fractional raster masks
+    are retained so antialiased widths still contribute proportionally.
+    """
+
+    road = np.clip(np.asarray(road_mask, dtype=float), 0.0, 1.0)
+    water = np.clip(np.asarray(water_mask, dtype=float), 0.0, 1.0)
+    if road.shape != water.shape or road.ndim != 2:
+        raise ValueError("road_mask and water_mask must be equal 2D arrays")
+    land = 1.0 - water
+    land_total = float(land.sum())
+    global_ratio = (float((road * land).sum()) / land_total
+                    if land_total > 1e-9 else 0.0)
+
+    rows, cols = road.shape
+    row_edges = np.linspace(0, rows, n_cells + 1, dtype=int)
+    col_edges = np.linspace(0, cols, n_cells + 1, dtype=int)
+    local = []
+    for i in range(n_cells):
+        for j in range(n_cells):
+            r0, r1 = row_edges[i], row_edges[i + 1]
+            c0, c1 = col_edges[j], col_edges[j + 1]
+            cell_land = land[r0:r1, c0:c1]
+            denominator = float(cell_land.sum())
+            # Do not let a tiny shoreline sliver create an extreme ratio.
+            if denominator < cell_land.size * 0.25:
+                continue
+            cell_road = road[r0:r1, c0:c1]
+            local.append(float((cell_road * cell_land).sum()) / denominator)
+    p95 = float(np.percentile(local, 95)) if local else 0.0
+    return global_ratio, p95
+
+
 def _edge_metric(layers, max_polys: int = 3000) -> float:
     """近直角拐角占比（网格城市轮廓应以 ~90° 为主；粗简化产生斜切尖角）。
 
@@ -128,7 +170,13 @@ def compute_metrics(layers, bundle: dict, prototype: str) -> dict:
     n_bl = len(layers.BL)
     n_total = n_bl + len(layers.BO)
     bl_ratio = n_bl / n_total if n_total > 0 else 0.0
-    road_ratio = float(bundle["road_mask"].mean()) if "road_mask" in bundle else 0.0
+    road_mask = bundle.get("road_mask")
+    road_ratio = float(road_mask.mean()) if road_mask is not None else 0.0
+    road_land_ratio, road_local_p95 = (
+        _road_ink_metrics(road_mask, wm)
+        if road_mask is not None
+        else (0.0, 0.0)
+    )
 
     metrics = {
         # coverage 用单调 ramp（raw/hi）：当前管线覆盖率远低于带下限，
@@ -153,6 +201,8 @@ def compute_metrics(layers, bundle: dict, prototype: str) -> dict:
             "n_BO": len(layers.BO),
             "bl_ratio": round(bl_ratio, 4),
             "road_px_ratio": round(road_ratio, 4),
+            "road_land_px_ratio": round(road_land_ratio, 4),
+            "road_local_p95": round(road_local_p95, 4),
             "water_px_ratio": round(float(wm.mean()), 4),
             "dsm_max_mm": round(float(dsm.max()), 3) if dsm.size else 0.0,
         },
