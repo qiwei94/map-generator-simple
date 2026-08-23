@@ -3,8 +3,11 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-from shapely.geometry import LineString
+import geopandas as gpd
+from shapely.geometry import LineString, box
+from types import SimpleNamespace
 
+import _TEXTURE_STYLE_OF_DEEPSEEK.render_glb as render_glb_module
 from _TEXTURE_STYLE_OF_DEEPSEEK.render_glb import (
     _TerrainSampler,
     _drape_lines,
@@ -39,3 +42,31 @@ def test_preview_quality_rejects_unknown_mode(tmp_path):
             object(), {"bbox_local": (0, 0, 10, 10), "scale": 1},
             str(tmp_path / "invalid.glb"), preview_quality="print",
         )
+
+
+def test_preview_does_not_reintroduce_raw_water_after_preprocess(
+        tmp_path, monkeypatch):
+    layers = SimpleNamespace(
+        block_base=[], VL=[], VO=[], WL=[box(100, 100, 900, 900)], WO=[],
+        roads_lines=[], BO=[], BL=[], road_roles={},
+    )
+    raw_water = gpd.GeoDataFrame({
+        "waterway": ["river"],
+        "geometry": [LineString([(0, 500), (1000, 500)])],
+    }, geometry="geometry", crs="EPSG:3857")
+
+    def fail_raw_water(*_args, **_kwargs):
+        raise AssertionError("raw water fallback must not run")
+
+    monkeypatch.setattr(render_glb_module, "_river_polys_from_gdf",
+                        fail_raw_water)
+    monkeypatch.setattr(render_glb_module, "_amap_water_polys",
+                        fail_raw_water)
+
+    output = tmp_path / "selected-water.glb"
+    render_glb_preview(
+        layers, {"bbox_local": (0, 0, 1000, 1000), "scale": 0.1},
+        str(output), water_gdf=raw_water, preview_quality="fast",
+    )
+
+    assert output.exists()

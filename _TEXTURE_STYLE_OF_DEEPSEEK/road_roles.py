@@ -18,12 +18,14 @@ import math
 from typing import Any
 
 import geopandas as gpd
+from shapely.geometry import Point
+from shapely.ops import unary_union
 
 from .buildings import ROAD_TIERS
 from .config import ROAD_DEFAULT_WIDTH_M, ROAD_FILTER, ROAD_WIDTHS
 
 
-POLICY_VERSION = "print-road-roles-v2"
+POLICY_VERSION = "print-road-roles-v3"
 
 _WIDTH_FACTORS = {
     "motorway": 1.35,
@@ -41,10 +43,10 @@ _WIDTH_FACTORS = {
 # class quotas keep a dense motorway system from consuming every visible slot
 # before primary/radial streets are considered.
 _LARGE_INK_QUOTAS = {
-    "motorway": 0.018,
-    "trunk": 0.006,
-    "primary": 0.022,
-    "secondary": 0.009,
+    "motorway": 0.012,
+    "trunk": 0.004,
+    "primary": 0.014,
+    "secondary": 0.005,
 }
 
 
@@ -150,8 +152,9 @@ def _apply_large_area_ink_budget(
     scale_mm_per_m: float,
     road_width_multiplier: float,
     min_colored_strip_mm: float,
+    nozzle_real_m: float,
 ) -> tuple[gpd.GeoDataFrame, dict[str, Any]]:
-    """Select named arterial groups under a conservative physical ink budget."""
+    """Select city-scale corridors, then restore only necessary connectors."""
 
     xmin, ymin, xmax, ymax = (float(v) for v in bbox_local)
     frame_area = max((xmax - xmin) * (ymax - ymin), 1.0)
@@ -165,6 +168,7 @@ def _apply_large_area_ink_budget(
     groups: dict[tuple[str, str], list[int]] = {}
     lengths: dict[tuple[str, str], float] = {}
     widths: dict[tuple[str, str], float] = {}
+    scores: dict[tuple[str, str], float] = {}
     for pos, row in work.iterrows():
         highway = str(row.get("highway") or "")
         # Interchange ramps are useful for routing, but at 15/25 km they turn
@@ -178,9 +182,14 @@ def _apply_large_area_ink_budget(
         if geom is None or geom.is_empty:
             continue
         raw_name = row.get("name")
-        name = (raw_name.strip().casefold()
-                if isinstance(raw_name, str) and raw_name.strip() else f"@{pos}")
-        key = (base, name)
+        raw_ref = row.get("ref")
+        if isinstance(raw_name, str) and raw_name.strip():
+            identity = f"name:{raw_name.strip().casefold()}"
+        elif isinstance(raw_ref, str) and raw_ref.strip():
+            identity = f"ref:{raw_ref.strip().casefold()}"
+        else:
+            identity = f"@{pos}"
+        key = (base, identity)
         groups.setdefault(key, []).append(pos)
         lengths[key] = lengths.get(key, 0.0) + float(geom.length)
         widths[key] = resolve_printable_road_width_m(
@@ -190,11 +199,25 @@ def _apply_large_area_ink_budget(
             min_colored_strip_mm=min_colored_strip_mm,
         )
 
+    for key, positions in groups.items():
+        geoms = [work.iloc[pos].geometry for pos in positions]
+        union = unary_union(geoms)
+        gxmin, gymin, gxmax, gymax = union.bounds
+        span_x = min(1.0, max(0.0, (gxmax - gxmin) / max(xmax - xmin, 1.0)))
+        span_y = min(1.0, max(0.0, (gymax - gymin) / max(ymax - ymin, 1.0)))
+        spread = max(span_x, span_y)
+        two_axis = min(span_x, span_y)
+        named_bonus = 1.15 if not key[1].startswith("@") else 1.0
+        # Frame-spanning radials and two-axis rings are city identity.  Total
+        # length remains the base signal, while geometry breaks name ties.
+        scores[key] = (lengths[key] * named_bonus
+                       * (1.0 + 0.55 * spread + 0.75 * two_axis))
+
     selected_positions: set[int] = set()
     class_evidence = {}
     for highway, quota in _LARGE_INK_QUOTAS.items():
         candidates = [key for key in groups if key[0] == highway]
-        candidates.sort(key=lambda key: (-lengths[key], key[1]))
+        candidates.sort(key=lambda key: (-scores[key], key[1]))
         used = 0.0
         selected_groups = 0
         for key in candidates:
@@ -211,21 +234,92 @@ def _apply_large_area_ink_budget(
             "estimated_ink_ratio": round(used, 6),
         }
 
+    # Budgeting whole corridors can legitimately omit most roads, but it must
+    # not leave a short OSM name-change segment or interchange link missing
+    # between two already selected corridors.  Add only short features whose
+    # two endpoints land on the selected network; dangling links stay hidden.
+    connector_positions: set[int] = set()
+    connector_ratio = 0.0
+    connector_ratio_limit = 0.0008
+    connector_max_length = min(max(xmax - xmin, ymax - ymin) * 0.04, 1000.0)
+    ordinary_connector_max_length = max(nozzle_real_m * 4.0, 250.0)
+    snap_distance = max(nozzle_real_m * 0.35, 15.0)
+    for _ in range(2):
+        if not selected_positions:
+            break
+        selected_union = unary_union(
+            [work.iloc[pos].geometry for pos in sorted(selected_positions)])
+        added_this_pass = 0
+        remaining = [pos for pos in range(len(work))
+                     if pos not in selected_positions]
+        remaining.sort(key=lambda pos: float(work.iloc[pos].geometry.length))
+        for pos in remaining:
+            row = work.iloc[pos]
+            geom = row.geometry
+            highway = str(row.get("highway") or "")
+            max_length = (connector_max_length if highway.endswith("_link")
+                          else ordinary_connector_max_length)
+            if geom is None or geom.is_empty or geom.length > max_length:
+                continue
+            parts = (list(geom.geoms)
+                     if geom.geom_type == "MultiLineString" else [geom])
+            endpoints = []
+            for part in parts:
+                try:
+                    endpoints.extend((Point(part.coords[0]), Point(part.coords[-1])))
+                except (AttributeError, IndexError, NotImplementedError):
+                    continue
+            if len(endpoints) < 2:
+                continue
+            near = sum(point.distance(selected_union) <= snap_distance
+                       for point in endpoints)
+            if near < 2:
+                continue
+            width = resolve_printable_road_width_m(
+                highway,
+                scale_mm_per_m=scale_mm_per_m,
+                road_width_multiplier=road_width_multiplier,
+                min_colored_strip_mm=min_colored_strip_mm,
+            )
+            ratio = float(geom.length) * width / frame_area
+            if connector_ratio + ratio > connector_ratio_limit:
+                continue
+            selected_positions.add(pos)
+            connector_positions.add(pos)
+            connector_ratio += ratio
+            added_this_pass += 1
+        if not added_this_pass:
+            break
+
     selected = work.iloc[sorted(selected_positions)].copy()
     all_estimated = sum(
         lengths[key] * widths[key] / frame_area for key in groups)
-    selected_estimated = sum(
-        lengths[key] * widths[key] / frame_area
-        for key, positions in groups.items()
-        if any(pos in selected_positions for pos in positions)
-    )
+    selected_estimated = 0.0
+    for pos in selected_positions:
+        row = work.iloc[pos]
+        selected_estimated += (
+            float(row.geometry.length)
+            * resolve_printable_road_width_m(
+                str(row.get("highway") or ""),
+                scale_mm_per_m=scale_mm_per_m,
+                road_width_multiplier=road_width_multiplier,
+                min_colored_strip_mm=min_colored_strip_mm,
+            )
+            / frame_area
+        )
     return selected, {
         "applied": True,
-        "method": "named_arterial_length_width_budget_v1",
+        "method": "city_identity_corridor_budget_v2",
         "candidate_features_without_links": sum(len(v) for v in groups.values()),
         "selected_features": len(selected),
         "candidate_estimated_ink_ratio": round(all_estimated, 6),
         "selected_estimated_ink_ratio": round(selected_estimated, 6),
+        "connector_features": len(connector_positions),
+        "connector_estimated_ink_ratio": round(connector_ratio, 6),
+        "connector_max_length_m": round(connector_max_length, 3),
+        "ordinary_connector_max_length_m": round(
+            ordinary_connector_max_length, 3),
+        "connector_snap_m": round(snap_distance, 3),
         "class_budgets": class_evidence,
     }
 
@@ -260,6 +354,7 @@ def select_road_roles(
             scale_mm_per_m=scale_mm_per_m,
             road_width_multiplier=road_width_multiplier,
             min_colored_strip_mm=min_colored_strip_mm,
+            nozzle_real_m=nozzle_real_m,
         )
 
     fallback = None

@@ -137,3 +137,53 @@ def test_large_area_ink_budget_keeps_each_arterial_class_but_drops_links():
     assert roles.evidence["visible_candidates"] == 9
     assert roles.evidence["visible_selected"] == len(roles.visible)
     assert roles.evidence["ink_budget"]["applied"] is True
+
+
+def test_large_area_identity_budget_restores_short_connector_between_selected_corridors():
+    roads = gpd.GeoDataFrame({
+        "highway": ["primary", "primary", "primary_link"],
+        "name": ["East Spine", "West Spine", None],
+        "geometry": [
+            LineString([(0, 4000), (4900, 4000)]),
+            LineString([(5100, 4000), (10000, 4000)]),
+            LineString([(4900, 4000), (5100, 4000)]),
+        ],
+    }, geometry="geometry", crs="EPSG:3857")
+
+    roles = select_road_roles(
+        roads,
+        topology_tier=4,
+        nozzle_real_m=50.0,
+        bbox_local=(0, 0, 10000, 10000),
+        scale_mm_per_m=0.01,
+        road_width_multiplier=2.0,
+        min_colored_strip_mm=0.63,
+    )
+
+    assert set(roles.visible["highway"]) == {"primary", "primary_link"}
+    assert roles.evidence["ink_budget"]["connector_features"] == 1
+
+
+def test_identity_score_prefers_two_axis_ring_over_equal_length_edge_road():
+    ring = LineString([
+        (2500, 2500), (7500, 2500), (7500, 7500),
+        (2500, 7500), (2500, 2500),
+    ])
+    edge = LineString([(0, 100), (10000, 100)])
+    roads = gpd.GeoDataFrame({
+        "highway": ["primary", "primary"],
+        "name": ["Central Ring", "Edge Road"],
+        "geometry": [ring, edge],
+    }, geometry="geometry", crs="EPSG:3857")
+
+    roles = select_road_roles(
+        roads,
+        topology_tier=4,
+        nozzle_real_m=50.0,
+        bbox_local=(0, 0, 10000, 10000),
+        scale_mm_per_m=0.01,
+        road_width_multiplier=2.0,
+        min_colored_strip_mm=0.63,
+    )
+
+    assert "Central Ring" in set(roles.visible["name"])

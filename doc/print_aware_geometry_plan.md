@@ -208,9 +208,36 @@ P1 实现进度（2026-08-23）：
 P1 当前测试：
 
 ```bash
-.venv/bin/python -m pytest tests -m 'not slow' -q
-# 413 passed, 2 skipped, 11 deselected
+.venv/bin/python -m pytest -m 'not slow' -q
+# 439 passed, 2 skipped, 11 deselected
 ```
+
+P1 正式 25 km 阶段证据（2026-08-23）：
+
+| 城市 | 节点 | 总耗时 | 3MF 大小 | 道路 `source → topology → visible` | 严格验证 | 视觉结论 |
+|---|---|---:|---:|---:|---|---|
+| 北京 | Windows WSL | 286 s | 91.41 MB | 53,715 → 34,572 → 824 | V1–V12 全通过，0/0 | 几何合格；封闭黑线偏重，环状/放射特征仍不够集中 |
+| 上海 | Intel Mac | 1,874.3 s | 89.21 MB | 51,536 → 39,112 → 1,557 | V1–V12 全通过，0/0 | 黄浦江 S 弯和两岸分区清楚；边缘分割线仍偏黑 |
+| 西湖 | Windows WSL | 122.8 s | 48.80 MB | 44,420 → 21,646 → 917 | V1–V12 全通过，0/0 | 钱塘江连续且西湖可辨；黑色地块边界仍影响高级感 |
+| 芝加哥 | controller / Windows 对照 | 运行中 | — | — | — | 同 bbox、同 profile 对照 Block base 热点优化 |
+
+每个已完成目录同时保存 `design_spec.json`，记录 artifact SHA-256、实际 bbox、
+打印 profile、要素证据与 V1–V12 结果。以上 0/0 只证明当前验证器覆盖的几何约束；
+它不等价于视觉优秀，也不能证明所有语义水层都存在。当前正式水体网格仍以统一材料
+的 0.4 mm 平底水板为主，V8/V9 通过主要证明该水板闭合且有厚度。
+
+这批实测还发现两个独立性能问题：
+
+- 非交互 SSH 的 `PATH` 漏掉 `/usr/local/bin`，使 Intel Mac 在原生 osmium 已安装时
+  仍走 portable pyosmium；现已显式探测标准 Homebrew 路径。该次上海 portable
+  提取仍得到 51,536 条道路，证明回退不是“零道路但无报错”。
+- Block base 网格在同一 cell 上反复对复杂 exclusion 做 `intersects`。现在先 union、
+  再 `shapely.prepare()`，并把 prepared geometry 放在谓词第一操作数。10,000 个
+  合成 block 的定向微基准从 1.0434 s 降至 0.0215 s，布尔结果完全一致；城市级
+  加速幅度以正在运行的芝加哥同输入对照为准，不把微基准倍数外推到整条 pipeline。
+
+默认参数尚未升级：四城 15 km 阵列仍未补齐，且可见道路之外的深色封闭分割线
+尚未完成语义拆分。现阶段结果属于 P1 验收证据，不自动替换网站首页样品或生产默认值。
 
 ### P2：水体层级与墨量预算
 
@@ -218,6 +245,42 @@ P1 当前测试：
 - 线状水体按显式 `width`、等级和打印尺度处理；
 - 实现分层墨量和局部 P95；
 - 海岸/湖岸回归覆盖纽约、芝加哥、东京、上海、西湖。
+
+P2 第一切片进度（2026-08-23，`agent/city-identity-composition`）：
+
+- 删除“所有水体按单个 feature 排序后只留 500 个”的全局截断。线状水体完整
+  保留到结构层；只有异常多的普通 polygon 才受独立安全上限约束，短连接段不会再
+  因面积排名从河网中间消失。
+- 新增 `water_roles.py`：命名河流/运河先按语义 identity 合并成完整走廊，再按
+  跨画幅程度、二维展开和物理墨量选择；同一走廊内小于两个喷嘴实地宽度的端点断口
+  才允许确定性补连。
+- 普通小水面不再因为“勉强达到一个可打印点”就自动进入纯黑层；25 km 场景要求
+  大约三个喷嘴足迹的面积，而命名或大型水面仍按 WL 保留。
+- 道路选择升级为 `print-road-roles-v3`：环状、放射和跨画幅走廊优先；墨量预算后
+  只补回两端都落在已选骨架上的短段。Block base 继续使用更密的 structural 网络，
+  因此减少深灰材料不会同步抹掉街区密度。
+- GLB 预览只消费 `preprocess_layers` 已解析的 WL/WO，不再把被视觉策略淘汰的原始
+  LineString 水网偷偷重新加回；PNG、GLB 与正式 terrain cutter 使用同一选择结果。
+
+北京 25 km 首轮对照（同 bbox、同打印 profile、同参数覆盖）：
+
+| 指标 | P1 旧结果 | 城市身份第一切片 |
+|---|---:|---:|
+| 水体源进入预处理 | 500 / 1546 | 1528 / 1528（裁框后） |
+| 命名水道候选 → 已选走廊/线段 | 103 raw lines | 126 → 11 groups / 13 merged lines |
+| 普通水面 WO（过滤前） | 85 | 52 |
+| 可见道路（最终） | 824 | 671 |
+| GLB 原始水线回灌 | 发生（925 条） | 0；只用 WL/WO |
+
+评审图：
+
+- P1：`output/print_p1_beijing_25km_shellfix/print_p1_beijing_25km_shellfix_topdown.png`
+- 城市身份第一切片：
+  `output/identity_beijing_25km_v2/identity_beijing_25km_v2_topdown.png`
+
+结论限定：北京的纯黑水网和深灰道路已明显减量，预览/正式语义也已对齐；但北京
+环路与中轴是否足够突出仍需上海、芝加哥同策略对照后再判断，当前切片不直接升级
+生产默认值。
 
 ### P3：视觉中心与语义 Z
 

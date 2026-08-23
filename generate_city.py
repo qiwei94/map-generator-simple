@@ -44,6 +44,7 @@ from _TEXTURE_STYLE_OF_DEEPSEEK._pipeline_cache import PipelineCache
 from _TEXTURE_STYLE_OF_DEEPSEEK._process_lock import acquire_lock
 from _TEXTURE_STYLE_OF_DEEPSEEK.exporter import export_deepseek_3mf, split_terrain_mesh
 from _TEXTURE_STYLE_OF_DEEPSEEK.config import compute_scale, WATERWAY_WIDTHS, TERRAIN_GRID, get_area_class, BUILDING_V2_HOTSPOT_RELAX
+from _TEXTURE_STYLE_OF_DEEPSEEK.water_roles import retain_continuous_water_source
 
 
 def build_parser():
@@ -411,10 +412,12 @@ if __name__ == "__main__":
 
     water_gdf['est_area'] = water_gdf.apply(lambda r: estimate_water_area(r.geometry, r), axis=1)
 
-    MAX_WATER = 500
-    if len(water_gdf) > MAX_WATER:
-        water_gdf = water_gdf.nlargest(MAX_WATER, 'est_area')
-        print(f"  Filtered to top {MAX_WATER} features")
+    water_gdf, water_source_roles = retain_continuous_water_source(water_gdf)
+    print("  Water source roles: "
+          f"{water_source_roles['retained_features']}/"
+          f"{water_source_roles['source_features']} retained; "
+          f"lines={water_source_roles['retained_line_features']}, "
+          f"polygons={water_source_roles['retained_polygon_features']}")
 
     # 显示命名水体
     if 'name' in water_gdf.columns:

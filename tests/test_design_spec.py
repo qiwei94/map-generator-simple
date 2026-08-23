@@ -14,6 +14,8 @@ def test_full_design_spec_records_artifact_and_feature_evidence(tmp_path):
     layers = SimpleNamespace(
         BL=[1, 2], BO=[1], VL=[], VO=[1, 2, 3], WL=[1], WO=[1],
         block_base=[1, 2, 3, 4], roads_lines=[1, 2, 3, 4, 5],
+        water_roles={"candidate_groups": 7, "selected_groups": 2,
+                     "gap_bridges": 1},
     )
 
     spec = build_design_spec(
@@ -27,6 +29,8 @@ def test_full_design_spec_records_artifact_and_feature_evidence(tmp_path):
         block_base={"requested_mode": "textured", "resolved_mode": "textured"},
         road_roles={"policy_version": "print-road-roles-v1",
                     "visible_segments": 5},
+        water_roles={"policy_version": "print-water-roles-v1",
+                     "selected_groups": 2},
     )
     path = write_design_spec(tmp_path, spec)
     saved = json.loads(open(path, encoding="utf-8").read())
@@ -39,6 +43,8 @@ def test_full_design_spec_records_artifact_and_feature_evidence(tmp_path):
     assert saved["evidence"]["printable_features"]["roads"] == 5
     assert saved["evidence"]["printable_features"]["water_landmarks"] == 1
     assert saved["road_roles"]["policy_version"] == "print-road-roles-v1"
+    assert saved["water_roles"]["policy_version"] == "print-water-roles-v1"
+    assert saved["evidence"]["printable_features"]["water_selected_groups"] == 2
 
 
 def test_design_spec_serializes_printability_report(tmp_path):

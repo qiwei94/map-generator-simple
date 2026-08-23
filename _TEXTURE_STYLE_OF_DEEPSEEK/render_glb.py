@@ -722,15 +722,20 @@ def render_glb_preview(layers, ctx: dict, output_path: str,
     # 关键：当 #1 或 #2 可用时，跳过 LineString buffer，
     #   避免用猜的宽度覆盖真实形状
     water_polys = list(_iter_polys(list(layers.WL) + list(layers.WO)))
-    has_polygon_water = bool(water_polys)  # OSM 有真实多边形水面
-    amap_polys = _amap_water_polys(ctx)
+    # preprocess_layers already resolves OSM polygons, selected line buffers
+    # and any accepted AMap supplement into WL/WO.  Re-fetching raw water here
+    # used to put hundreds of discarded waterways back into the 3D preview,
+    # making it disagree with both the review PNG and formal terrain cutters.
+    has_polygon_water = bool(water_polys)
+    amap_polys = [] if has_polygon_water else _amap_water_polys(ctx)
     has_satellite_water = bool(amap_polys)
     if has_satellite_water:
         print(f"  [glb] water: +{len(amap_polys)} satellite polys (true shape)")
         water_polys += amap_polys
 
     # 仅当无任何多边形水面数据时，才用 LineString buffer 补面
-    if water_gdf is not None and len(water_gdf) > 0 and not has_satellite_water:
+    if (water_gdf is not None and len(water_gdf) > 0
+            and not has_polygon_water and not has_satellite_water):
         # 统计 OSM LineString 中有无 width 标签
         lines_with_width = 0
         lines_total = 0
