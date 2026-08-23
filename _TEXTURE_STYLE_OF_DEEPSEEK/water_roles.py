@@ -22,7 +22,7 @@ from shapely.geometry import LineString, MultiLineString
 from shapely.ops import linemerge, unary_union
 
 
-POLICY_VERSION = "print-water-roles-v1"
+POLICY_VERSION = "print-water-roles-v2"
 
 _LINE_INK_QUOTAS = {
     "river": 0.0060,
@@ -32,6 +32,15 @@ _LINE_INK_QUOTAS = {
     "drain": 0.0004,
     "ditch": 0.0003,
 }
+
+# At 15/25 km every selected line must be widened to a printable strip.  A
+# per-waterway quota therefore gives minor streams and drains the same visual
+# entitlement as a city-defining river.  Use one shared foreground budget and
+# keep the low-order network for topology/block cutting only.
+_LARGE_VISIBLE_WATERWAYS = frozenset({"river", "riverbank", "canal"})
+_LARGE_GLOBAL_INK_QUOTA = 0.012
+_LARGE_MAX_CORRIDORS = 3
+_LARGE_MIN_FRAME_SPAN = 0.08
 
 @dataclass(frozen=True)
 class WaterLineCandidate:
@@ -183,10 +192,15 @@ def _bridge_named_corridor(
     return merged, len(connectors)
 
 
-def _group_score(lines: list[LineString], bbox_local) -> float:
+def _group_metrics(lines: list[LineString], bbox_local) -> dict[str, float]:
     total_length = sum(float(line.length) for line in lines)
     if not bbox_local or total_length <= 0:
-        return total_length
+        return {
+            "length_m": total_length,
+            "span_x": 0.0,
+            "span_y": 0.0,
+            "score": total_length,
+        }
     xmin, ymin, xmax, ymax = (float(value) for value in bbox_local)
     width = max(xmax - xmin, 1.0)
     height = max(ymax - ymin, 1.0)
@@ -197,9 +211,12 @@ def _group_score(lines: list[LineString], bbox_local) -> float:
     # Long frame-spanning rivers and bends are the strongest city dividers.
     spread = max(span_x, span_y)
     two_axis = min(span_x, span_y)
-    return total_length * (1.0 + 0.70 * spread + 0.35 * two_axis)
-
-
+    return {
+        "length_m": total_length,
+        "span_x": span_x,
+        "span_y": span_y,
+        "score": total_length * (1.0 + 0.70 * spread + 0.35 * two_axis),
+    }
 def select_visible_water_lines(
     candidates: list[WaterLineCandidate],
     *,
@@ -234,35 +251,70 @@ def select_visible_water_lines(
         frame_area = 1.0
 
     selected_keys: set[tuple[str, str]] = set()
+    group_metrics = {
+        key: _group_metrics(
+            [item.geometry for item in items], bbox_local)
+        for key, items in groups.items()
+    }
+    group_ink = {}
+    for key, items in groups.items():
+        full_width = max(
+            nozzle_real_m,
+            max(item.half_width_m for item in items) * 2.0,
+        )
+        group_ink[key] = group_metrics[key]["length_m"] * full_width / frame_area
+
+    if apply_budget:
+        eligible = [
+            key for key in groups
+            if (key[0] in _LARGE_VISIBLE_WATERWAYS
+                and max(group_metrics[key]["span_x"],
+                        group_metrics[key]["span_y"])
+                >= _LARGE_MIN_FRAME_SPAN)
+        ]
+        # Mountain or park scenes occasionally have no river/canal tagging.
+        # In that case one genuinely frame-spanning stream may carry the
+        # composition; drains and ditches never become high-contrast material.
+        if not eligible:
+            eligible = [
+                key for key in groups
+                if (key[0] == "stream"
+                    and max(group_metrics[key]["span_x"],
+                            group_metrics[key]["span_y"])
+                    >= _LARGE_MIN_FRAME_SPAN)
+            ]
+
+        class_priority = {"riverbank": 1.35, "river": 1.25, "canal": 1.0,
+                          "stream": 0.7}
+        eligible.sort(key=lambda key: (
+            -(group_metrics[key]["score"] * class_priority.get(key[0], 0.5)),
+            key[1],
+        ))
+        used = 0.0
+        for key in eligible:
+            if len(selected_keys) >= _LARGE_MAX_CORRIDORS:
+                break
+            ratio = group_ink[key]
+            if selected_keys and used + ratio > _LARGE_GLOBAL_INK_QUOTA:
+                continue
+            selected_keys.add(key)
+            used += ratio
+    else:
+        selected_keys.update(groups)
+
     class_evidence = {}
     classes = sorted({key[0] for key in groups})
     for waterway in classes:
-        keys = [key for key in groups if key[0] == waterway]
-        keys.sort(key=lambda key: (
-            -_group_score([item.geometry for item in groups[key]], bbox_local),
-            key[1],
-        ))
-        quota = _LINE_INK_QUOTAS.get(waterway, 0.0005)
-        used = 0.0
-        for key in keys:
-            items = groups[key]
-            length = sum(float(item.geometry.length) for item in items)
-            full_width = max(
-                nozzle_real_m,
-                max(item.half_width_m for item in items) * 2.0,
-            )
-            estimated_ratio = length * full_width / frame_area
-            if apply_budget and any(k[0] == waterway for k in selected_keys):
-                if used + estimated_ratio > quota:
-                    continue
-            selected_keys.add(key)
-            used += estimated_ratio
+        class_keys = [key for key in groups if key[0] == waterway]
+        selected_class_keys = [key for key in selected_keys
+                               if key[0] == waterway]
         class_evidence[waterway] = {
-            "candidate_groups": len(keys),
-            "selected_groups": sum(1 for key in selected_keys
-                                   if key[0] == waterway),
-            "quota_ratio": quota,
-            "estimated_ink_ratio": round(used, 6),
+            "candidate_groups": len(class_keys),
+            "selected_groups": len(selected_class_keys),
+            "legacy_class_quota_ratio": _LINE_INK_QUOTAS.get(
+                waterway, 0.0005),
+            "estimated_ink_ratio": round(
+                sum(group_ink[key] for key in selected_class_keys), 6),
         }
 
     output: list[tuple[LineString, str, float]] = []
@@ -282,12 +334,20 @@ def select_visible_water_lines(
 
     return VisibleWaterSelection(output, {
         "policy_version": POLICY_VERSION,
-        "method": "semantic_corridor_ink_budget_v1",
+        "method": "city_identity_global_water_budget_v2",
         "source_line_segments": len(candidates),
         "candidate_groups": len(groups),
         "selected_groups": len(selected_keys),
         "visible_line_segments": len(output),
         "gap_bridges": bridge_count,
         "budget_applied": apply_budget,
+        "global_ink_quota_ratio": (_LARGE_GLOBAL_INK_QUOTA
+                                   if apply_budget else None),
+        "max_visible_corridors": (_LARGE_MAX_CORRIDORS
+                                  if apply_budget else None),
+        "selected_group_identities": [
+            f"{waterway}:{identity}"
+            for waterway, identity in sorted(selected_keys)
+        ],
         "class_budgets": class_evidence,
     })

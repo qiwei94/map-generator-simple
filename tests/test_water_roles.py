@@ -66,3 +66,50 @@ def test_large_area_water_budget_prefers_frame_spanning_named_corridor():
     identities = selected.evidence["selected_groups"]
     assert identities < selected.evidence["candidate_groups"]
     assert any(line.length >= 9999 for line, _, _ in selected.lines)
+
+
+def test_large_area_uses_one_global_budget_instead_of_promoting_each_class():
+    candidates = [
+        WaterLineCandidate(
+            LineString([(0, 5000), (10000, 5000)]),
+            "river", "name:identity river", 30),
+        WaterLineCandidate(
+            LineString([(0, 2000), (10000, 2000)]),
+            "canal", "name:identity canal", 20),
+        WaterLineCandidate(
+            LineString([(0, 1000), (10000, 1000)]),
+            "stream", "name:minor stream", 6),
+        WaterLineCandidate(
+            LineString([(0, 700), (10000, 700)]),
+            "drain", "name:storm drain", 3),
+    ]
+
+    selected = select_visible_water_lines(
+        candidates,
+        bbox_local=(0, 0, 10000, 10000),
+        nozzle_real_m=50.0,
+    )
+
+    visible_types = {waterway for _, waterway, _ in selected.lines}
+    assert visible_types == {"river", "canal"}
+    assert selected.evidence["class_budgets"]["stream"]["selected_groups"] == 0
+    assert selected.evidence["class_budgets"]["drain"]["selected_groups"] == 0
+
+
+def test_large_area_caps_visible_water_corridors_for_visual_hierarchy():
+    candidates = [
+        WaterLineCandidate(
+            LineString([(1000, 1000 + index * 1500),
+                        (8500, 1000 + index * 1500)]),
+            "river", f"name:river {index}", 25)
+        for index in range(5)
+    ]
+
+    selected = select_visible_water_lines(
+        candidates,
+        bbox_local=(0, 0, 10000, 10000),
+        nozzle_real_m=50.0,
+    )
+
+    assert selected.evidence["selected_groups"] == 3
+    assert selected.evidence["max_visible_corridors"] == 3

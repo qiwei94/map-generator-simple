@@ -820,7 +820,7 @@ def _extract_WL_WO(
     """
     if water_gdf is None or len(water_gdf) == 0:
         return [], [], [], {
-            "policy_version": "print-water-roles-v1",
+            "policy_version": "print-water-roles-v2",
             "source_features": 0,
             "visible_line_segments": 0,
         }
@@ -836,9 +836,11 @@ def _extract_WL_WO(
     # （scale 小、nozzle_real 大）的城市河道全部撑到 ~200m 宽蓝带。
     min_buffer = nozzle_real_m * 0.5
     # A printable dot is not automatically a useful city-scale water mark.
-    # Require an ordinary pond to span roughly three nozzle footprints; named
-    # or genuinely large landmark water remains exempt through WL.
-    ordinary_min_area = max(1000.0, (nozzle_real_m * 3.0) ** 2)
+    # Require a water patch to occupy enough visual mass to read as water, not
+    # merely survive as a printable black dot.  All source polygons still
+    # participate in structural block cutting before this visible-layer gate.
+    visual_polygon_min_area = max(1000.0, (nozzle_real_m * 4.5) ** 2)
+    ordinary_min_area = visual_polygon_min_area
 
     for source_index, row in water_gdf.iterrows():
         geom = row.geometry
@@ -857,7 +859,8 @@ def _extract_WL_WO(
                     repaired_water_count += 1
                 poly = cleaned
                 area = poly.area
-                if is_water_landmark(row, area_m2=area):
+                if (area >= visual_polygon_min_area
+                        and is_water_landmark(row, area_m2=area)):
                     WL_polys.append(poly)
                 elif area >= ordinary_min_area:
                     WO_polys.append(poly)
