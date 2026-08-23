@@ -1,0 +1,119 @@
+{
+  "version": 1,
+  "policy": {
+    "default_change_requires": "all_required_runs_pass",
+    "topdown_sizes_km": [15, 25],
+    "full_3mf_sizes_km": [25],
+    "topdown_checks": [
+      "source_features_nonzero",
+      "visible_roads_nonzero",
+      "building_features_nonzero",
+      "scene_signature_preserved",
+      "local_ink_budget_passed"
+    ],
+    "full_3mf_checks": [
+      "source_features_nonzero",
+      "visible_roads_nonzero",
+      "building_features_nonzero",
+      "design_spec_present",
+      "validator_zero_errors",
+      "validator_zero_warnings"
+    ]
+  },
+  "scenarios": [
+    {
+      "key": "chicago",
+      "title": "芝加哥 · 密歇根湖岸",
+      "archetype": "dense_grid_major_lake",
+      "center": [41.8781, -87.7079866],
+      "pbf": "illinois-latest.osm.pbf",
+      "required": true,
+      "expected_traits": ["grid", "major_water", "dense_buildings"],
+      "extra_checks": ["major_water_present"],
+      "regression_risks": [
+        "湖面被误判为陆地或灰色背景",
+        "高密网格全部放粗后形成连续深色块",
+        "外防波堤抢占画面边缘"
+      ]
+    },
+    {
+      "key": "beijing",
+      "title": "北京 · 中轴与环路",
+      "archetype": "ring_radial_landlocked",
+      "center": [39.9042, 116.4074],
+      "pbf": "beijing-latest.osm.pbf",
+      "required": true,
+      "expected_traits": ["ring", "radial", "urban_axis"],
+      "extra_checks": ["ring_or_radial_signature_present"],
+      "regression_risks": [
+        "支路密度掩盖环路和中轴",
+        "过滤后只剩零碎道路，城市识别度消失",
+        "缺少大水体时画面失去层次"
+      ]
+    },
+    {
+      "key": "shanghai",
+      "title": "上海 · 黄浦江两岸",
+      "archetype": "dense_grid_major_river",
+      "center": [31.2304, 121.4737],
+      "pbf": "shanghai-latest.osm.pbf",
+      "required": true,
+      "expected_traits": ["major_water", "dense_buildings", "river_division"],
+      "extra_checks": ["major_water_present", "river_division_preserved"],
+      "regression_risks": [
+        "黄浦江退化为等宽细线",
+        "两岸道路与河网叠加导致局部墨量过高",
+        "高密建筑与可见道路粘连"
+      ]
+    },
+    {
+      "key": "westlake",
+      "showcase_key": "hangzhou",
+      "title": "杭州 · 西湖与钱塘江",
+      "archetype": "landscape_lake_major_river",
+      "center": [30.245, 120.15],
+      "pbf": "zhejiang-latest.osm.pbf",
+      "required": true,
+      "expected_traits": ["major_water", "terrain", "river_bend"],
+      "extra_checks": ["major_water_present", "river_division_preserved"],
+      "regression_risks": [
+        "西湖与钱塘江被归入相同等宽逻辑",
+        "小河小水面形成黑色噪点",
+        "block base 填满边缘"
+      ]
+    },
+    {
+      "key": "milan",
+      "title": "米兰 · 放射街区",
+      "archetype": "dense_radial_landlocked",
+      "center": [45.4642, 9.19],
+      "pbf": "nord-ovest-latest.osm.pbf",
+      "required": false,
+      "expected_traits": ["radial", "dense_buildings"],
+      "extra_checks": ["ring_or_radial_signature_present"],
+      "regression_risks": ["路网又黑又密，放射结构反而不可辨认"]
+    },
+    {
+      "key": "tokyo",
+      "title": "东京 · 东京湾",
+      "archetype": "dense_bay",
+      "center": [35.625, 139.785],
+      "pbf": "kanto-latest.osm.pbf",
+      "required": false,
+      "expected_traits": ["major_water", "dense_buildings", "bay"],
+      "extra_checks": ["major_water_present"],
+      "regression_risks": ["城市部分过多、东京湾过少，构图杂乱"]
+    },
+    {
+      "key": "mexico_city",
+      "title": "墨西哥城 · 高原都会",
+      "archetype": "dense_terrain_landlocked",
+      "center": [19.4326, -99.1332],
+      "pbf": "mexico-latest.osm.pbf",
+      "required": false,
+      "expected_traits": ["dense_buildings", "terrain"],
+      "extra_checks": [],
+      "regression_risks": ["小路过滤不足导致大面积黑色纹理"]
+    }
+  ]
+}
