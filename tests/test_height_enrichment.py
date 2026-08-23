@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers import height_enrichment
 
 
@@ -51,3 +53,40 @@ def test_cache_never_reuses_a_different_city(monkeypatch, tmp_path):
     )
 
     assert result is None
+
+
+def test_truncated_parquet_is_not_accepted_as_cache(tmp_path):
+    broken = tmp_path / "overture_31.23_121.47.parquet"
+    broken.write_bytes(b"PAR1")
+
+    result = height_enrichment._find_overture_cache(
+        (31.1, 121.3, 31.4, 121.7),
+        cache_dir=str(tmp_path),
+    )
+
+    assert result is None
+
+
+def test_offline_preview_does_not_attempt_download(monkeypatch, tmp_path):
+    import geopandas as gpd
+    from shapely.geometry import Point
+
+    osm = gpd.GeoDataFrame(
+        {"geometry": [Point(121.47, 31.23)]},
+        geometry="geometry", crs="EPSG:4326",
+    )
+    monkeypatch.setenv("OVERTURE_AUTO_DOWNLOAD", "0")
+    monkeypatch.setattr(
+        height_enrichment,
+        "_download_overture",
+        lambda *_args, **_kwargs: pytest.fail("download must be skipped"),
+    )
+
+    heights, names = height_enrichment.load_overture_heights(
+        osm,
+        bbox_wgs84=(31.1, 121.3, 31.4, 121.7),
+        cache_dir=str(tmp_path),
+    )
+
+    assert heights is None
+    assert names is None

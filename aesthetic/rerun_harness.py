@@ -85,6 +85,11 @@ class CityHarness:
         # the first unrelated region.
         set_pbf_file_path(p.pbf_abs)
         os.environ["OSM_PBF_FILE"] = p.pbf_abs
+        # Gallery previews prioritize feedback latency.  Cached Overture
+        # heights are still consumed, but a cache miss must not block this
+        # quick path for up to ten minutes.  Callers may explicitly set 1 to
+        # opt back in; formal generation keeps its existing download policy.
+        os.environ.setdefault("OVERTURE_AUTO_DOWNLOAD", "0")
         pbf_stat = os.stat(p.pbf_abs)
         pbf_source = {
             "basename": os.path.basename(p.pbf_abs),
