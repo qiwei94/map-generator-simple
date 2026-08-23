@@ -281,11 +281,14 @@ class CityHarness:
                 getattr(_cfg, "BUILDING_V2_AGGREGATE_SIMPLIFY_M", 60.0))),
             "bo_mode_override": str(params.get(
                 "bo_mode", getattr(_cfg, "BUILDING_V2_MODE", "oriented_bbox"))),
+            "road_width_multiplier_override": float(
+                params["road_width_multiplier"]),
         }
         if self.base_params.flat_mode:
             overrides["height_mode_override"] = "flat"
 
-        # 缓存指纹：只含影响 preprocess 的参数（road_width_multiplier 仅影响渲染）
+        # Visible road selection is print-width/ink-budget aware, so road width
+        # is intentionally part of the preprocess cache fingerprint.
         cache_key = dict(overrides)
         cache_key["height_max_mm"] = float(params["building_height_mm_max"])
         cache_key["height_min_mm"] = float(_cfg.BUILDING_HEIGHT_MIN_MM)
@@ -314,4 +317,4 @@ class CityHarness:
         # schema coupled to the coastline input revision; otherwise a corrected
         # 0.9% inland-water frame can reuse the old false 99.9% sea layers.
         return self.cache.get_or_compute(
-            "preprocess_v6", cache_key, _compute, label="preprocess")
+            "preprocess_v8", cache_key, _compute, label="preprocess")

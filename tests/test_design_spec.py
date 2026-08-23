@@ -25,6 +25,8 @@ def test_full_design_spec_records_artifact_and_feature_evidence(tmp_path):
         source_features={"roads": 253628, "water": 1224},
         printable_features=layer_evidence(layers),
         block_base={"requested_mode": "textured", "resolved_mode": "textured"},
+        road_roles={"policy_version": "print-road-roles-v1",
+                    "visible_segments": 5},
     )
     path = write_design_spec(tmp_path, spec)
     saved = json.loads(open(path, encoding="utf-8").read())
@@ -36,6 +38,7 @@ def test_full_design_spec_records_artifact_and_feature_evidence(tmp_path):
     assert saved["evidence"]["source_features"]["roads"] == 253628
     assert saved["evidence"]["printable_features"]["roads"] == 5
     assert saved["evidence"]["printable_features"]["water_landmarks"] == 1
+    assert saved["road_roles"]["policy_version"] == "print-road-roles-v1"
 
 
 def test_design_spec_serializes_printability_report(tmp_path):

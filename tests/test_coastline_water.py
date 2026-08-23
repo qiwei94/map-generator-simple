@@ -99,4 +99,5 @@ def test_gallery_combined_cache_is_invalidated_for_coastline_data():
               "rerun_harness.py").read_text(encoding="utf-8")
 
     assert '"water_schema": "coastline_guard_v4"' in source
-    assert '"preprocess_v6"' in source
+    # v8 also invalidates caches for physical road widths and ink budgets.
+    assert '"preprocess_v8"' in source

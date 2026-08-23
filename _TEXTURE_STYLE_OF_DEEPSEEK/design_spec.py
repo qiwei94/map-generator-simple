@@ -51,7 +51,7 @@ def artifact_identity(path: os.PathLike | str) -> dict:
 
 def layer_evidence(layers: Any) -> dict:
     """Capture non-zero acceptance evidence from a LayerPolygons-like object."""
-    return {
+    evidence = {
         "building_landmarks": len(getattr(layers, "BL", ()) or ()),
         "building_blocks": len(getattr(layers, "BO", ()) or ()),
         "vegetation_landmarks": len(getattr(layers, "VL", ()) or ()),
@@ -61,6 +61,17 @@ def layer_evidence(layers: Any) -> dict:
         "block_base_polygons": len(getattr(layers, "block_base", ()) or ()),
         "roads": len(getattr(layers, "roads_lines", ()) or ()),
     }
+    road_roles = getattr(layers, "road_roles", {}) or {}
+    for source_key, output_key in (
+        ("source_line_features", "road_source_lines"),
+        ("topology_candidates", "road_topology_candidates"),
+        ("structural_candidates", "road_structural_candidates"),
+        ("visible_candidates", "road_visible_candidates"),
+        ("visible_segments", "road_visible_segments"),
+    ):
+        if source_key in road_roles:
+            evidence[output_key] = int(road_roles[source_key])
+    return evidence
 
 
 def build_design_spec(
@@ -75,6 +86,7 @@ def build_design_spec(
     printable_features: Optional[Mapping[str, int]] = None,
     block_base: Optional[Mapping] = None,
     printability: Optional[Mapping] = None,
+    road_roles: Optional[Mapping] = None,
     pipeline: str = "generate_city_legacy",
 ) -> dict:
     """Build a validated DesignSpec dictionary without mutating generation."""
@@ -104,6 +116,7 @@ def build_design_spec(
         "profile": _json_value(profile or {}),
         "block_base": _json_value(block_base or {}),
         "printability": _json_value(printability or {}),
+        "road_roles": _json_value(road_roles or {}),
         "evidence": {
             "source_features": source,
             "printable_features": printable,

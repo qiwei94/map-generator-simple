@@ -121,6 +121,7 @@ def main() -> int:
         "scene_type": args.scene_type,
         "params": params,
         "printability": harness.ctx["printability"],
+        "road_roles": getattr(layers, "road_roles", {}),
         "evidence": {
             "building_density_per_km2": harness.profile.building_density,
             "water_ratio": harness.profile.water_ratio,

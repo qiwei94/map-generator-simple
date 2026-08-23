@@ -14,6 +14,10 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 from _TEXTURE_STYLE_OF_DEEPSEEK import config as _cfg
+from _TEXTURE_STYLE_OF_DEEPSEEK.road_roles import (
+    resolve_printable_road_width_m,
+    road_width_multiplier_from_layers,
+)
 
 from .config import REVIEW_GRID_SIZE, HEIGHT_DSM_SIZE
 
@@ -171,11 +175,24 @@ def render_review_bundle(layers, ctx: dict, road_width_multiplier: float,
         draw = ImageDraw.Draw(pil_img)
         road_widths = getattr(_cfg, "ROAD_WIDTHS", {})
         default_w = float(getattr(_cfg, "ROAD_DEFAULT_WIDTH_M", 10.0))
+        width_policy = getattr(layers, "road_roles", {}).get("width_policy", {})
+        min_strip_mm = width_policy.get("min_colored_strip_mm")
+        scale_mm_per_m = float(ctx.get("scale", 0.0))
+        effective_multiplier = road_width_multiplier_from_layers(
+            layers, road_width_multiplier)
         for item in layers.roads_lines:
             line, highway = item[0], item[1]
             if line is None or line.is_empty:
                 continue
-            w_m = road_widths.get(highway, default_w) * road_width_multiplier
+            if min_strip_mm and scale_mm_per_m > 0:
+                w_m = resolve_printable_road_width_m(
+                    highway,
+                    scale_mm_per_m=scale_mm_per_m,
+                    road_width_multiplier=effective_multiplier,
+                    min_colored_strip_mm=float(min_strip_mm),
+                )
+            else:
+                w_m = road_widths.get(highway, default_w) * effective_multiplier
             w_px = max(1, int(round(w_m / meters_per_px)))
             geoms = line.geoms if hasattr(line, "geoms") and not hasattr(
                 line, "coords") else [line]

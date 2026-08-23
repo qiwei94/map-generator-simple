@@ -1,6 +1,6 @@
 # 打印感知的城市浮雕重构方案
 
-状态：P0 已完成，P1 待城市样品基线确认后实施
+状态：P0 已完成；P1 道路职责分离已实现，正在进行多城市默认值验收
 工作分支：`agent/print-aware-foundation`
 
 ## 1. 目标与边界
@@ -173,6 +173,44 @@ P0 实测命令：
 四个核心城市都必须生成 15 km 与 25 km 俯视图，并生成 25 km 正式 3MF。
 米兰、东京、墨西哥城作为扩展观察组。任意一个必需运行或必需证据缺失，
 `evaluate_result_set()` 都会阻止默认参数升级；不能再用单个漂亮样品宣称泛化成功。
+
+P1 实现进度（2026-08-23）：
+
+- `road_roles.py` 已将同一份 OSM 道路分为 topology / structural / visible；
+- topology 仍用于构造街区，structural 只负责 block-base 结构缝，
+  visible 才进入 PNG、GLB 和 3MF 的对比材料；
+- 25 km 级可见道路执行“命名主干道连续分组 + 分级物理墨量预算”，
+  互通匝道保留在拓扑中但不默认渲染，避免立交变成黑结；
+- 道路宽度下限由成品比例、`min_colored_strip_mm` 和道路等级共同推导，
+  同一个已解析倍率保存在 `LayerPolygons.road_roles` 和 `design_spec.json`
+  中，预览与正式 mesh 不再各读一份全局参数；
+- 画廊缓存 schema 已升级，道路倍率和打印配置均进入指纹。
+
+芝加哥 25 km 首轮实测（同一份 block/base/building 几何，只替换 visible 道路）：
+
+| 证据 | P1 只分职责 | P1 + 打印宽度/墨量 |
+|---|---:|---:|
+| OSM 线要素 | 242,921 | 242,921 |
+| 可见候选 | 13,881 | 13,881 |
+| 实际可见线段 | 13,378 | 2,987 |
+| 预算选中的原始 feature | 未限额 | 3,106 |
+| 估算线宽面积比（重叠重复计算） | 未记录 | 5.19% |
+
+对比图：
+
+- 分职责基线：`output/style_gallery/print_roles_chicago_25km/dense_detail_topdown.png`；
+- 打印宽度/墨量原型：`output/style_gallery/print_ink_chicago_25km/dense_detail_topdown.png`；
+- 机读证据：`output/style_gallery/print_ink_chicago_25km/road_role_evidence.json`。
+
+这一轮明显减少了线噪声，但不以芝加哥单图宣告默认值可用。
+北京的环状/放射结构与上海的江面/两岸密度仍是阻断验收项。
+
+P1 当前测试：
+
+```bash
+.venv/bin/python -m pytest tests -m 'not slow' -q
+# 413 passed, 2 skipped, 11 deselected
+```
 
 ### P2：水体层级与墨量预算
 

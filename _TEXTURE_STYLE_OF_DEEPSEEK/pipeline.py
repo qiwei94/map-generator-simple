@@ -248,7 +248,14 @@ def run(lat1: float, lon1: float, lat2: float, lon2: float,
 
     if layers.roads_lines:
         try:
-            roads_mesh = build_deepseek_roads_v3(layers.roads_lines, terrain_solid, scale)
+            roads_mesh = build_deepseek_roads_v3(
+                layers.roads_lines,
+                terrain_solid,
+                scale,
+                road_width_multiplier=(getattr(layers, "road_roles", {})
+                                       .get("width_policy", {})
+                                       .get("road_width_multiplier")),
+            )
             if roads_mesh is not None:
                 print(f"  Road faces: {len(roads_mesh.faces):,}")
             else:

@@ -214,6 +214,37 @@ def test_preprocess_uses_declared_printer_nozzle_for_real_scale():
     assert layers.nozzle_real_m == pytest.approx(60.0)
 
 
+def test_preprocess_records_separate_road_roles_and_printable_seam_width():
+    roads = gpd.GeoDataFrame({
+        "highway": ["primary", "service", "footway"],
+        "geometry": [
+            LineString([(0, 250), (1000, 250)]),
+            LineString([(0, 500), (1000, 500)]),
+            LineString([(0, 750), (1000, 750)]),
+        ],
+    }, geometry="geometry", crs="EPSG:3857")
+    empty = gpd.GeoDataFrame(
+        {"geometry": []}, geometry="geometry", crs="EPSG:3857")
+    scale = 196.0 / 15000.0
+
+    layers = preprocess_layers(
+        empty, roads, empty, empty,
+        bbox_local=(0, 0, 1000, 1000),
+        scale=scale,
+        area_km2=225,
+    )
+
+    assert layers.road_roles["source_line_features"] == 3
+    assert layers.road_roles["topology_candidates"] == 2
+    assert layers.road_roles["structural_candidates"] == 1
+    assert layers.road_roles["visible_candidates"] == 1
+    assert layers.road_roles["visible_selected"] == 1
+    assert layers.road_roles["visible_segments"] == 1
+    assert layers.road_roles["structural_gap_model_mm"] == pytest.approx(0.55)
+    assert layers.road_roles["structural_gap_real_m"] == pytest.approx(
+        0.55 / scale)
+
+
 def test_water_holes_require_a_full_nozzle_width_to_survive():
     outer = box(0, 0, 1000, 1000)
     narrow_breakwater = box(100, 100, 700, 120)

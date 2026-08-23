@@ -353,6 +353,8 @@ def _transform_layers_to_exact(layers, dx, dy, clip_box):
     layers.block_base = bb
     layers.block_base_classes = bb_cls
     layers.roads_lines = roads
+    if getattr(layers, "road_roles", None):
+        layers.road_roles["visible_segments"] = len(roads)
     return layers
 
 
@@ -826,6 +828,8 @@ def main():
         _preprocess_overrides["density_threshold_override"] = auto_resolved.building_density_threshold
         _preprocess_overrides["count_threshold_override"] = auto_resolved.building_count_threshold
         _preprocess_overrides["print_limit_m2_override"] = auto_resolved.building_print_limit_m2
+        _preprocess_overrides["road_width_multiplier_override"] = (
+            auto_resolved.road_width_multiplier)
         if auto_resolved.flat_mode:
             _preprocess_overrides["height_mode_override"] = "flat"
     # 风格参数中的 config 级参数（模块顶层 import 吃不到补丁，必须显式传参）
@@ -869,6 +873,7 @@ def main():
             "print_limit": auto_resolved.building_print_limit_m2,
             "flat": auto_resolved.flat_mode,
             "hotspot_relax": auto_resolved.building_v2_hotspot_relax,
+            "road_width_multiplier": auto_resolved.road_width_multiplier,
         }, sort_keys=True)
         _style_fp = json.dumps({
             "bo_mode": style_overrides.get("bo_mode"),
@@ -901,7 +906,7 @@ def main():
             )
 
         layers = _snap_cache.get_or_compute(
-            "preprocess_v1",
+            "preprocess_v2",
             input_keys={
                 "snap_bbox": f"{fs:.4f},{fw:.4f},{fn:.4f},{fe:.4f}",
                 "auto": _auto_fp,
@@ -982,7 +987,7 @@ def main():
             _rw = (auto_resolved.road_width_multiplier
                    if auto_resolved is not None else 1.0)
             bundle = render_review_bundle(
-                layers, {"bbox_local": bbox_local}, _rw,
+                layers, {"bbox_local": bbox_local, "scale": scale}, _rw,
                 OUTPUT_DIR, CITY_NAME)
             print(f"  topdown: {bundle.get('topdown')}")
             print(f"  Time: {time.time() - t465:.1f}s")
@@ -1133,7 +1138,15 @@ def main():
     roads_mesh = None
     if layers.roads_lines:
         try:
-            roads_mesh = build_deepseek_roads_v3(layers.roads_lines, terrain_solid, scale)
+            roads_mesh = build_deepseek_roads_v3(
+                layers.roads_lines,
+                terrain_solid,
+                scale,
+                printer_profile=printer_profile,
+                road_width_multiplier=(getattr(layers, "road_roles", {})
+                                       .get("width_policy", {})
+                                       .get("road_width_multiplier")),
+            )
             if roads_mesh is not None:
                 print(f"  Road faces: {len(roads_mesh.faces):,}")
             else:
@@ -1334,6 +1347,7 @@ def main():
                 "base_thickness_mm": cli_args.base_thickness_mm,
             },
         ),
+        road_roles=getattr(layers, "road_roles", {}),
     )
     _design_spec_path = write_design_spec(OUTPUT_DIR, _design_spec)
     print(f"  DesignSpec: {_design_spec_path}")

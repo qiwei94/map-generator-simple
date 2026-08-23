@@ -673,7 +673,7 @@ if __name__ == "__main__":
         )
 
     layers = _pipeline_cache.get_or_compute(
-        'preprocess_v1', _preprocess_cache_key, _compute_preprocess,
+        'preprocess_v2', _preprocess_cache_key, _compute_preprocess,
         label='preprocess layers')
 
     print(f"  {layers.summary()}")
@@ -780,7 +780,14 @@ if __name__ == "__main__":
     roads_mesh = None
     if layers.roads_lines:
         try:
-            roads_mesh = build_deepseek_roads_v3(layers.roads_lines, terrain_solid, scale)
+            roads_mesh = build_deepseek_roads_v3(
+                layers.roads_lines,
+                terrain_solid,
+                scale,
+                road_width_multiplier=(getattr(layers, "road_roles", {})
+                                       .get("width_policy", {})
+                                       .get("road_width_multiplier")),
+            )
             if roads_mesh is not None:
                 print(f"  Road faces: {len(roads_mesh.faces):,}")
             else:
