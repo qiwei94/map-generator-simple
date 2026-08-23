@@ -65,7 +65,8 @@ def _find_overture_cache(
 
     Matches by parsing overture_{lat:.2f}_{lon:.2f}.parquet filenames
     and checking if the center coordinates fall within the query bbox.
-    Falls back to any .parquet file if no named match found.
+    Unidentified legacy files are never reused across regions: doing so can
+    suppress the correct download and silently attach the wrong city dataset.
 
     Returns path to parquet file, or None if no cache found.
     """
@@ -89,13 +90,6 @@ def _find_overture_cache(
                         return path
                 except ValueError:
                     continue
-
-    # Fallback: pick first parquet (legacy naming like hangzhou_buildings.parquet)
-    for fname in all_parquets:
-        if fname.endswith(".parquet"):
-            path = os.path.join(cache_dir, fname)
-            logger.info(f"Overture cache fallback: {fname}")
-            return path
 
     return None
 

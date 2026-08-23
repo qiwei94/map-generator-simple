@@ -39,3 +39,15 @@ def test_download_skips_cleanly_when_cli_is_unavailable(monkeypatch, tmp_path):
 
     assert result is None
     assert list(tmp_path.iterdir()) == []
+
+
+def test_cache_never_reuses_a_different_city(monkeypatch, tmp_path):
+    (tmp_path / "overture_41.88_-87.63.parquet").touch()
+    (tmp_path / "legacy_buildings.parquet").touch()
+
+    result = height_enrichment._find_overture_cache(
+        (39.85, 116.30, 39.95, 116.45),
+        cache_dir=str(tmp_path),
+    )
+
+    assert result is None
