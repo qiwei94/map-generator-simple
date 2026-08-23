@@ -35,12 +35,21 @@ capability evidence, not permission to deploy code or restart services.
 ## Intel Mac secondary compute
 
 - macOS 13.7.8, Intel, 16 GiB RAM; Python 3.9.6 project venv.
-- Portable pyosmium backend is functional; native osmium remains absent.
+- Native osmium 1.18.0 and aria2 1.37.0 were already installed under
+  `/usr/local/bin`; non-interactive SSH omitted that directory from `PATH`.
+  Commit `e68511c` now probes standard Homebrew paths, and the environment
+  doctor reads both tools as available without shell activation.
+- Portable pyosmium remains functional as the fallback.  The Shanghai 25 km
+  run made before the PATH fix extracted 51,536 road lines through that
+  backend, proving the fallback does not silently return zero.
+- `fast-simplification` 0.1.12 was installed from the exact CPython 3.9
+  x86_64 wheel.  The pre-install Shanghai run kept 1,811,896 terrain faces and
+  spent 280.3 seconds in Manifold repair; later runs can decimate before repair.
 - PyArrow 20.0.0 was installed from a controller-staged x86_64 wheel and
   `pip check` is clean.
-- Data at audit time: 8 local PBF files and 10 DEM files; no active generator.
-- This node is suitable for tests, cached/preprocessed work and bounded
-  secondary renders.  Native-extraction performance must not be claimed for it.
+- Latest readback: 19 OK, 2 warnings, 0 failures, 4 informational checks;
+  the warnings are optional Overture enrichment and project-local DEM count.
+- This node is suitable for tests and one bounded secondary render at a time.
 
 ## Cloud roles
 
@@ -56,19 +65,21 @@ capability evidence, not permission to deploy code or restart services.
 
 ## Remaining external capability
 
-`AMAP_KEY` was unset in the controller shell and in the live cloud Studio and
-worker processes.  High-grade water supplementation therefore remains an
-optional capability that is not currently enabled.  The pipeline must report
-that absence explicitly and continue with real OSM/coastline data; it must not
-claim Gaode corroboration.
+`AMAP_KEY` remains optional.  The no-label tile supplement does not use that
+API key, so a cache miss could previously issue hundreds of sequential live
+HTTP requests.  `AMAP_WATER_AUTO_FETCH=0` now consumes existing Gaode cache
+but skips live acquisition; cluster regressions use that mode and continue
+with real OSM/coastline plus the adaptive river-width fallback.  Live tile
+acquisition should be a separate prewarming operation with explicit evidence.
 
 ## Acceptance commands
 
 ```bash
 .venv/bin/python tools/env_doctor.py
-.venv/bin/python -m pytest tests -m "not slow"
+.venv/bin/python -m pytest -m "not slow"
 ```
 
-The second command passed with 408 tests, 2 skips and 11 slow-test
-deselections.  Running unscoped `pytest` still collects ad-hoc scripts under
-`tools/`; the supported test target is explicitly `tests/`.
+The second command passed with 439 tests, 2 skips and 11 slow-test
+deselections.  `pytest.ini` now restricts default discovery to `tests/`, so an
+unscoped invocation no longer imports ad-hoc network diagnostics under
+`tools/` or requires `AMAP_KEY` during collection.

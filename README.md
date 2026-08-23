@@ -97,6 +97,16 @@ pyosmium 回退。建筑高度补强还可安装 Overture 官方 CLI（macOS：
 管线需要 OSM 的 `.osm.pbf` 与高程 DEM。本地 `pbf_cache/` 放对应区域 PBF 即可生成。
 项目支持**三态数据可用性**：本地就绪 / 远端可拉取 / 无数据。配置一台数据源服务器后，缺失区域可在页面一键 `scp` 拉取（拉一次永久复用）。
 
+中国区域的高德无标注瓦片只作为可选水面补强。离线 worker 或正式回归应关闭
+实时抓取，避免缓存未命中时把数百个串行 HTTP 请求塞进生成关键路径：
+
+```bash
+AMAP_WATER_AUTO_FETCH=0 python generate_city_legacy.py ...
+```
+
+该开关仍会使用已有 `cache/amap_water/` 结果，只禁止实时下载；需要补强的区域应
+单独预热缓存后再生成。OSM 水体和自适应河宽回退始终保留。
+
 ### 3. 启动 Studio
 ```bash
 python webapp/server.py            # 默认 8787 端口
@@ -120,7 +130,7 @@ Studio 的“生成方式”保持相互隔离：
 ### 4. 测试
 ```bash
 python tools/env_doctor.py            # 只读检查运行时、CLI、数据与磁盘
-pytest tests/ -m "not slow"        # 离线套件（网络用例标 slow 默认跳过）
+pytest -m "not slow"                 # 离线套件（pytest.ini 固定发现 tests/）
 ```
 
 ### 5. 西湖 25KM CLI 与 PNG 预览
