@@ -210,8 +210,24 @@ def build_style_params(seed: dict, delta: dict) -> dict:
 
 # ─── 拼图对照表 ───────────────────────────────────────────────────────
 
+_CONTACT_SHEET_FONT_CANDIDATES = (
+    # WSL can reuse the licensed fonts from its Windows host without copying
+    # them into the repository or provisioning another package.
+    "/mnt/c/Windows/Fonts/msyh.ttc",
+    "/mnt/c/Windows/Fonts/simhei.ttf",
+    # Native macOS workers.
+    "/System/Library/Fonts/PingFang.ttc",
+    "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+    # Common Linux package location, followed by legacy name lookup.
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "msyh.ttc",
+    "simhei.ttf",
+    "arial.ttf",
+)
+
+
 def _load_font(size: int):
-    for name in ("msyh.ttc", "simhei.ttf", "arial.ttf"):
+    for name in _CONTACT_SHEET_FONT_CANDIDATES:
         try:
             return ImageFont.truetype(name, size)
         except Exception:
