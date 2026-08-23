@@ -85,6 +85,12 @@ class CityHarness:
         # the first unrelated region.
         set_pbf_file_path(p.pbf_abs)
         os.environ["OSM_PBF_FILE"] = p.pbf_abs
+        pbf_stat = os.stat(p.pbf_abs)
+        pbf_source = {
+            "basename": os.path.basename(p.pbf_abs),
+            "size_bytes": int(pbf_stat.st_size),
+            "mtime_ns": int(pbf_stat.st_mtime_ns),
+        }
 
         south, west, north, east = p.bbox
         bbox = bbox_to_utm(south, west, north, east)
@@ -214,6 +220,11 @@ class CityHarness:
             "width_m": bbox["width_m"], "height_m": bbox["height_m"],
             "elevation_grid": elevation_grid,
             "bbox_wgs84": p.bbox,
+            "pbf_source": pbf_source,
+            "source_feature_counts": {
+                key: 0 if gdfs.get(key) is None else len(gdfs[key])
+                for key in ("buildings", "roads", "water", "vegetation")
+            },
             "amap_water_polys": amap_water_polys,
             "printer_profile": self.printer_profile,
             "printability": build_printability_report(

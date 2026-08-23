@@ -208,6 +208,43 @@ def build_style_params(seed: dict, delta: dict) -> dict:
     return {k: _clamp_to_space(k, v) for k, v in params.items()}
 
 
+def validate_gallery_feature_evidence(layers, scene_type: str) -> dict:
+    """Reject visually empty urban output even when no exception occurred."""
+
+    road_roles = dict(getattr(layers, "road_roles", {}) or {})
+    evidence = {
+        "road_source_lines": int(road_roles.get("source_line_features", 0)),
+        "road_topology_candidates": int(
+            road_roles.get("topology_candidates", 0)),
+        "road_visible_candidates": int(
+            road_roles.get("visible_candidates", 0)),
+        "road_visible_segments": int(
+            road_roles.get("visible_segments", 0)),
+        "building_landmarks": len(getattr(layers, "BL", ()) or ()),
+        "building_blocks": len(getattr(layers, "BO", ()) or ()),
+        "block_base_polygons": len(
+            getattr(layers, "block_base", ()) or ()),
+    }
+    if scene_type == "urban":
+        failures = [
+            key for key in (
+                "road_source_lines",
+                "road_topology_candidates",
+                "road_visible_candidates",
+                "road_visible_segments",
+            )
+            if evidence[key] <= 0
+        ]
+        if (evidence["building_landmarks"]
+                + evidence["building_blocks"]
+                + evidence["block_base_polygons"] <= 0):
+            failures.append("urban_building_or_block_geometry")
+        if failures:
+            raise RuntimeError(
+                "urban feature evidence failed: " + ", ".join(failures))
+    return evidence
+
+
 # ─── 拼图对照表 ───────────────────────────────────────────────────────
 
 _CONTACT_SHEET_FONT_CANDIDATES = (
@@ -299,6 +336,11 @@ def generate_city_gallery(city: str, styles: list, out_root: str,
         "scene_type": scene_type,
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "profile": harness.profile.to_dict(),
+        "source": {
+            "pbf": dict(harness.ctx.get("pbf_source", {})),
+            "input_features": dict(
+                harness.ctx.get("source_feature_counts", {})),
+        },
         "framing": framing,
         "city_signature": city_signature,
         "seed_params": seed,
@@ -312,6 +354,8 @@ def generate_city_gallery(city: str, styles: list, out_root: str,
         t0 = time.time()
         try:
             layers = harness.run_round(params)
+            feature_evidence = validate_gallery_feature_evidence(
+                layers, scene_type)
             bundle = render_review_bundle(
                 layers, harness.ctx,
                 road_width_multiplier=float(params["road_width_multiplier"]),
@@ -333,6 +377,7 @@ def generate_city_gallery(city: str, styles: list, out_root: str,
             "metrics": result["metrics"],
             "details": result["details"],
             "road_roles": dict(getattr(layers, "road_roles", {}) or {}),
+            "feature_evidence": feature_evidence,
             "renders": {"topdown": os.path.basename(bundle["topdown"]),
                         "height": os.path.basename(bundle["height"])},
             "wall_s": round(wall, 1),
