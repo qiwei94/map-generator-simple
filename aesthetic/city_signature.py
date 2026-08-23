@@ -200,6 +200,56 @@ def analyze_road_topology(roads_gdf, bbox_local) -> dict:
     }
 
 
+def compare_visible_road_signature(source_roads, visible_roads,
+                                   bbox_local) -> dict:
+    """Check that road filtering preserves the source frame's main trait.
+
+    A visible network is not allowed to substitute a different attractive
+    pattern: if the source frame is ring-led, retaining an unrelated grid does
+    not count as preserving identity.  Weak/ambiguous source frames remain
+    non-blocking and are reported explicitly.
+    """
+
+    source = analyze_road_topology(source_roads, bbox_local)
+    visible = analyze_road_topology(visible_roads, bbox_local)
+
+    def strengths(topology):
+        return {
+            "ring": float(topology["ring_score"]),
+            "radial": float(topology["radial_score"]),
+            # Match the weighting used by road_signature_score.
+            "grid": float(topology["grid_score"]) * 0.85,
+        }
+
+    source_strengths = strengths(source)
+    visible_strengths = strengths(visible)
+    dominant_trait = max(source_strengths, key=source_strengths.get)
+    source_strength = source_strengths[dominant_trait]
+    visible_strength = visible_strengths[dominant_trait]
+
+    source_is_distinctive = source_strength >= 0.35
+    required_visible_strength = max(0.22, source_strength * 0.60)
+    passed = (not source_is_distinctive
+              or visible_strength >= required_visible_strength)
+    if not source_is_distinctive:
+        reason = "source frame has no dominant road signature"
+    elif passed:
+        reason = f"visible network preserves the source {dominant_trait} trait"
+    else:
+        reason = f"visible network lost the source {dominant_trait} trait"
+    return {
+        "passed": bool(passed),
+        "dominant_trait": dominant_trait,
+        "source_is_distinctive": bool(source_is_distinctive),
+        "source_strength": round(source_strength, 4),
+        "visible_strength": round(visible_strength, 4),
+        "required_visible_strength": round(required_visible_strength, 4),
+        "reason": reason,
+        "source": source,
+        "visible": visible,
+    }
+
+
 def _profile_value(profile, name: str, default=0.0):
     if isinstance(profile, dict):
         return profile.get(name, default)
