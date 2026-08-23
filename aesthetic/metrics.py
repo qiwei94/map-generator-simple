@@ -17,6 +17,13 @@ import numpy as np
 from .config import PROTOTYPE_TARGETS
 
 
+# Initial 25 km guardrails, calibrated against the first print-aware Chicago,
+# Beijing and Shanghai renders.  They are deliberately independent of the
+# water material: a large lake/river is composition space, not road clutter.
+ROAD_LAND_INK_MAX = 0.055
+ROAD_LOCAL_P95_MAX = 0.16
+
+
 def _band_score(v: float, lo: float, hi: float, falloff: float) -> float:
     """三角隶属度：带内 1.0，带外线性衰减到 0。"""
     if lo <= v <= hi:
@@ -120,6 +127,22 @@ def _road_ink_metrics(
     return global_ratio, p95
 
 
+def road_ink_budget_status(global_ratio: float, local_p95: float) -> dict:
+    """Return an auditable pass/fail decision for visible road clutter."""
+
+    if global_ratio < 0 or local_p95 < 0:
+        raise ValueError("road ink ratios must be non-negative")
+    passed = (global_ratio <= ROAD_LAND_INK_MAX
+              and local_p95 <= ROAD_LOCAL_P95_MAX)
+    return {
+        "passed": bool(passed),
+        "land_ratio": round(float(global_ratio), 4),
+        "land_ratio_max": ROAD_LAND_INK_MAX,
+        "local_p95": round(float(local_p95), 4),
+        "local_p95_max": ROAD_LOCAL_P95_MAX,
+    }
+
+
 def _edge_metric(layers, max_polys: int = 3000) -> float:
     """近直角拐角占比（网格城市轮廓应以 ~90° 为主；粗简化产生斜切尖角）。
 
@@ -177,6 +200,8 @@ def compute_metrics(layers, bundle: dict, prototype: str) -> dict:
         if road_mask is not None
         else (0.0, 0.0)
     )
+    road_ink_budget = road_ink_budget_status(
+        road_land_ratio, road_local_p95)
 
     metrics = {
         # coverage 用单调 ramp（raw/hi）：当前管线覆盖率远低于带下限，
@@ -203,6 +228,7 @@ def compute_metrics(layers, bundle: dict, prototype: str) -> dict:
             "road_px_ratio": round(road_ratio, 4),
             "road_land_px_ratio": round(road_land_ratio, 4),
             "road_local_p95": round(road_local_p95, 4),
+            "road_ink_budget": road_ink_budget,
             "water_px_ratio": round(float(wm.mean()), 4),
             "dsm_max_mm": round(float(dsm.max()), 3) if dsm.size else 0.0,
         },
