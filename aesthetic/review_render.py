@@ -145,7 +145,11 @@ def render_review_bundle(layers, ctx: dict, road_width_multiplier: float,
 
     is_landscape = scene_type in ("landscape", "water_landscape")
     road_color = (132, 133, 129) if is_landscape else _ROAD
-    water_color = (35, 42, 43) if is_landscape else _WATER
+    # Water is a single material in the printable model, so the review render
+    # must use the same pure-black visual language for every scene type.  A
+    # landscape-only graphite override made oceans look like unclassified
+    # background (New York/Chicago/Cape Town regression).
+    water_color = _WATER
 
     # ── 合成俯视（2x 栅格）──
     img = np.full((GR, GR, 3), _PAPER, dtype=np.uint8)
