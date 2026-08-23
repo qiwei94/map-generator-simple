@@ -1,0 +1,12 @@
+{
+  "bo_mode": "oriented_bbox",
+  "building_density_threshold": 0.005,
+  "building_count_threshold": 1,
+  "building_print_limit_m2": 1000.0,
+  "building_v2_road_tier": 5,
+  "road_width_multiplier": 2.0,
+  "building_height_mm_min": 2.8,
+  "building_height_mm_max": 6.4,
+  "building_simplify_tol_m": 5.0,
+  "aggregate_simplify_m": 10.0
+}
