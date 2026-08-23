@@ -23,7 +23,7 @@ from shapely.errors import GEOSException
 from shapely.ops import linemerge, unary_union
 
 
-POLICY_VERSION = "print-water-roles-v3"
+POLICY_VERSION = "print-water-roles-v4"
 
 _LINE_INK_QUOTAS = {
     "river": 0.0060,
@@ -42,6 +42,9 @@ _LARGE_VISIBLE_WATERWAYS = frozenset({"river", "riverbank", "canal"})
 _LARGE_GLOBAL_INK_QUOTA = 0.012
 _LARGE_MAX_CORRIDORS = 3
 _LARGE_MIN_FRAME_SPAN = 0.08
+_LARGE_MAX_LANDMARK_ENCLOSURES = 2
+_LARGE_MIN_ENCLOSURE_SPAN = 0.02
+_LARGE_LANDMARK_ENCLOSURE_QUOTA = 0.0015
 
 @dataclass(frozen=True)
 class WaterLineCandidate:
@@ -50,6 +53,7 @@ class WaterLineCandidate:
     identity: str
     half_width_m: float
     width_evidence: bool = False
+    identity_enclosure: bool = False
 
 
 @dataclass
@@ -72,6 +76,42 @@ def water_identity(row: pd.Series, fallback: str) -> str:
         if value:
             return f"{key}:{value}"
     return fallback
+
+
+def waterway_kind(row: pd.Series) -> str:
+    """Return one normalized visible-water class from mixed OSM tagging.
+
+    Area features such as historic moats are commonly tagged ``water=moat``
+    with an empty ``waterway`` column.  Treating pandas NaN as a string used
+    to turn these into an ineligible ``"nan"`` class at city scale.
+    """
+
+    waterway = _text(row.get("waterway"))
+    if waterway:
+        return waterway
+    water = _text(row.get("water"))
+    if water in {"river", "riverbank", "canal", "stream", "drain",
+                 "ditch", "moat"}:
+        return water
+    return "river"
+
+
+def is_identity_water_enclosure(row: pd.Series) -> bool:
+    """Recognize a named historic water enclosure worth local exaggeration.
+
+    This is deliberately narrower than :func:`is_water_landmark`: a named
+    river is not automatically a local enclosure.  Moats with an external
+    identity or a name are rare, finite city signatures such as the Forbidden
+    City moat, and may be widened to the printer floor without restoring the
+    surrounding minor-water network.
+    """
+
+    if waterway_kind(row) != "moat":
+        return False
+    has_name = bool(_text(row.get("name")) or _text(row.get("name:en")))
+    has_external_identity = bool(
+        _text(row.get("wikidata")) or _text(row.get("wikipedia")))
+    return has_name or has_external_identity
 
 
 def is_exposed_water_line(row: pd.Series) -> bool:
@@ -289,6 +329,7 @@ def select_visible_water_lines(
             "visible_line_segments": 0,
             "gap_bridges": 0,
             "budget_applied": False,
+            "landmark_enclosure_groups": 0,
         })
 
     groups: dict[tuple[str, str], list[WaterLineCandidate]] = {}
@@ -323,7 +364,33 @@ def select_visible_water_lines(
         )
 
     fallback_without_surface = False
+    landmark_enclosure_keys: set[tuple[str, str]] = set()
     if apply_budget:
+        # Preserve a tiny number of compact, two-axis semantic enclosures
+        # before selecting frame-spanning rivers.  Their separate small quota
+        # prevents the exception from weakening the global water ink budget.
+        enclosure_candidates = [
+            key for key, items in groups.items()
+            if (any(item.identity_enclosure for item in items)
+                and min(group_metrics[key]["span_x"],
+                        group_metrics[key]["span_y"])
+                >= _LARGE_MIN_ENCLOSURE_SPAN)
+        ]
+        enclosure_candidates.sort(key=lambda key: (
+            -group_metrics[key]["score"], key[1]))
+        enclosure_ink = 0.0
+        for key in enclosure_candidates:
+            if len(landmark_enclosure_keys) >= _LARGE_MAX_LANDMARK_ENCLOSURES:
+                break
+            ratio = group_ink[key]
+            if (landmark_enclosure_keys
+                    and enclosure_ink + ratio
+                    > _LARGE_LANDMARK_ENCLOSURE_QUOTA):
+                continue
+            landmark_enclosure_keys.add(key)
+            selected_keys.add(key)
+            enclosure_ink += ratio
+
         eligible = [
             key for key in groups
             if (key[0] in _LARGE_VISIBLE_WATERWAYS
@@ -364,10 +431,13 @@ def select_visible_water_lines(
         for key in eligible:
             max_corridors = (1 if fallback_without_surface
                              else _LARGE_MAX_CORRIDORS)
-            if len(selected_keys) >= max_corridors:
+            selected_corridors = len(selected_keys - landmark_enclosure_keys)
+            if selected_corridors >= max_corridors:
                 break
+            if key in selected_keys:
+                continue
             ratio = group_ink[key]
-            if selected_keys and used + ratio > _LARGE_GLOBAL_INK_QUOTA:
+            if selected_corridors and used + ratio > _LARGE_GLOBAL_INK_QUOTA:
                 continue
             selected_keys.add(key)
             used += ratio
@@ -406,7 +476,7 @@ def select_visible_water_lines(
 
     return VisibleWaterSelection(output, {
         "policy_version": POLICY_VERSION,
-        "method": "surface_evidence_global_water_budget_v3",
+        "method": "surface_evidence_global_water_budget_v4",
         "source_line_segments": len(candidates),
         "candidate_groups": len(groups),
         "selected_groups": len(selected_keys),
@@ -419,6 +489,9 @@ def select_visible_water_lines(
                                    if apply_budget else None),
         "max_visible_corridors": (_LARGE_MAX_CORRIDORS
                                   if apply_budget else None),
+        "landmark_enclosure_groups": len(landmark_enclosure_keys),
+        "landmark_enclosure_quota_ratio": (
+            _LARGE_LANDMARK_ENCLOSURE_QUOTA if apply_budget else None),
         "selected_group_identities": [
             f"{waterway}:{identity}"
             for waterway, identity in sorted(selected_keys)

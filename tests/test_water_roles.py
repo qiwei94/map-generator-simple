@@ -5,9 +5,11 @@ from shapely.geometry import LineString, box
 from _TEXTURE_STYLE_OF_DEEPSEEK.water_roles import (
     WaterLineCandidate,
     has_printable_water_mass,
+    is_identity_water_enclosure,
     is_exposed_water_line,
     retain_continuous_water_source,
     select_visible_water_lines,
+    waterway_kind,
 )
 
 
@@ -168,3 +170,41 @@ def test_long_sub_nozzle_polygon_is_not_promoted_by_area_alone():
         box(0, 0, 10000, 20), nozzle_real_m=50.0) is False
     assert has_printable_water_mass(
         box(0, 0, 10000, 500), nozzle_real_m=50.0) is True
+
+
+def test_named_moat_uses_water_tag_when_waterway_is_missing():
+    row = pd.Series({
+        "waterway": float("nan"),
+        "water": "moat",
+        "name": "Historic City Moat",
+        "wikidata": "Q123",
+    })
+
+    assert waterway_kind(row) == "moat"
+    assert is_identity_water_enclosure(row) is True
+
+
+def test_city_scale_identity_moat_survives_without_promoting_minor_network():
+    moat = LineString([
+        (4000, 4000), (6000, 4000), (6000, 6000),
+        (4000, 6000), (4000, 4000),
+    ])
+    candidates = [
+        WaterLineCandidate(
+            moat, "moat", "wikidata:q123", 25,
+            width_evidence=False, identity_enclosure=True),
+        WaterLineCandidate(
+            LineString([(1000, 1000), (1800, 1000)]),
+            "canal", "name:minor canal", 25),
+    ]
+
+    selected = select_visible_water_lines(
+        candidates,
+        bbox_local=(0, 0, 10000, 10000),
+        nozzle_real_m=50.0,
+        visible_surface_ratio=0.01,
+    )
+
+    assert len(selected.lines) == 1
+    assert selected.lines[0][1] == "moat"
+    assert selected.evidence["landmark_enclosure_groups"] == 1

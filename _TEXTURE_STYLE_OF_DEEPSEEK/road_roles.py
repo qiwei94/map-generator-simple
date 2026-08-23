@@ -25,7 +25,7 @@ from .buildings import ROAD_TIERS
 from .config import ROAD_DEFAULT_WIDTH_M, ROAD_FILTER, ROAD_WIDTHS
 
 
-POLICY_VERSION = "print-road-roles-v3"
+POLICY_VERSION = "print-road-roles-v4"
 
 _WIDTH_FACTORS = {
     "motorway": 1.35,
@@ -43,10 +43,10 @@ _WIDTH_FACTORS = {
 # class quotas keep a dense motorway system from consuming every visible slot
 # before primary/radial streets are considered.
 _LARGE_INK_QUOTAS = {
-    "motorway": 0.012,
-    "trunk": 0.004,
-    "primary": 0.014,
-    "secondary": 0.005,
+    "motorway": 0.015,
+    "trunk": 0.005,
+    "primary": 0.018,
+    "secondary": 0.007,
 }
 
 
@@ -309,7 +309,7 @@ def _apply_large_area_ink_budget(
         )
     return selected, {
         "applied": True,
-        "method": "city_identity_corridor_budget_v2",
+        "method": "city_identity_corridor_budget_v3",
         "candidate_features_without_links": sum(len(v) for v in groups.values()),
         "selected_features": len(selected),
         "candidate_estimated_ink_ratio": round(all_estimated, 6),

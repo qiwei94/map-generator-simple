@@ -90,9 +90,11 @@ from _TEXTURE_STYLE_OF_DEEPSEEK.road_roles import select_road_roles
 from _TEXTURE_STYLE_OF_DEEPSEEK.water_roles import (
     WaterLineCandidate,
     has_printable_water_mass,
+    is_identity_water_enclosure,
     is_exposed_water_line,
     select_visible_water_lines,
     water_identity,
+    waterway_kind,
 )
 
 
@@ -879,7 +881,7 @@ def _extract_WL_WO(
             if not is_water_landmark(row) or not is_exposed_water_line(row):
                 continue
             lines = geom.geoms if isinstance(geom, MultiLineString) else [geom]
-            waterway_type = row.get("waterway", "river")
+            waterway_type = waterway_kind(row)
             # 宽度解析：OSM width 标签 > 自适应回退（不查硬编码表）
             osm_width = row.get("width", None)
             width_evidence = False
@@ -920,6 +922,7 @@ def _extract_WL_WO(
                               else f"{identity}:{part_index}"),
                     half_width_m=float(buffer_width),
                     width_evidence=width_evidence,
+                    identity_enclosure=is_identity_water_enclosure(row),
                 ))
 
     if bbox_local is not None:

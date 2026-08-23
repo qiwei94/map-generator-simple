@@ -357,6 +357,25 @@ full_identity_beijing_25km_formal_v5_0823_2350.3mf --json
 preprocess 555.0 秒，峰值约 19 GiB（25 GiB 配额），因此该节点只适合串行跑一个
 同级 25 km 高密城市。两个节点的 GLB postcheck 均确认全部图层落地。
 
+P2 北京视觉回读修正（2026-08-24）：面形/宽度证据版把所有亚喷嘴水面一起删除时，
+也误删了带 Wikidata/Wikipedia 的筒子河，故宫矩形身份随之消失；道路配额同时降得
+过低，使主干骨架显得过于稀疏。修正后不恢复小河网，也不全局加粗：
+
+- `print-water-roles-v4` 先归一化 `waterway` / `water` 标签，避免空
+  `waterway` 被 pandas NaN 变成无效的 `"nan"` 类型；
+- 仅命名的 `water=moat` 可进入最多 2 个、独立 0.15% 墨量的小型二维闭环预算，
+  因而恢复故宫护城河而不放回普通沟渠；
+- `print-road-roles-v4` 把四级道路预算从合计 3.5% 调到 4.5%，仍低于早期 5.5%
+  方案，并保持同一喷嘴线宽层级，没有以全局加粗掩盖构图问题。
+
+同 bbox 的 `identity_beijing_25km_identity_v6` draft 实测为：道路最终
+671 → 865，深灰道路像素 2.069% → 2.624%（早期偏密版 3.378%），水体
+18 WL + 15 WO + 0 line → 19 WL + 15 WO + 1 个筒子河闭环；GLB 9.49 MB，
+postcheck 全图层落地，总耗时 97.6 秒。结果路径：
+`output/identity_beijing_25km_identity_v6/identity_beijing_25km_identity_v6_topdown.png`。
+非慢速回归为 `461 passed, 2 skipped, 11 deselected`。该次是当前 M1 Mac 的本地
+缓存实测，不外推为其他节点性能结论；正式 3MF 的 legacy 顶面水体限制仍与上文一致。
+
 ### P3：视觉中心与语义 Z
 
 - 实现 `FocusSpec` 候选与确定性打分；

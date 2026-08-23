@@ -187,3 +187,30 @@ def test_identity_score_prefers_two_axis_ring_over_equal_length_edge_road():
     )
 
     assert "Central Ring" in set(roles.visible["name"])
+
+
+def test_city_scale_budget_keeps_a_second_supporting_secondary_axis():
+    roads = gpd.GeoDataFrame({
+        "highway": ["secondary"] * 8,
+        "name": [f"Grid {index}" for index in range(8)],
+        "geometry": [
+            LineString([(1000, 1000 + index * 900),
+                        (6000, 1000 + index * 900)])
+            for index in range(8)
+        ],
+    }, geometry="geometry", crs="EPSG:3857")
+
+    roles = select_road_roles(
+        roads,
+        topology_tier=4,
+        nozzle_real_m=50.0,
+        bbox_local=(0, 0, 10000, 10000),
+        scale_mm_per_m=0.01,
+        road_width_multiplier=2.0,
+        min_colored_strip_mm=0.63,
+    )
+
+    # Two 5 km corridors fit the v4 context budget; the prior 0.005 budget
+    # retained only one.  The remaining six still stay out of dark material.
+    assert len(roles.visible) == 2
+    assert roles.evidence["ink_budget"]["selected_estimated_ink_ratio"] <= 0.007
