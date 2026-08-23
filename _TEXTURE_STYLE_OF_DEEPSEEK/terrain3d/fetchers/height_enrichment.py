@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
+import sys
 from typing import Dict, Optional, Tuple
 
 import numpy as np
@@ -31,6 +33,28 @@ logger = logging.getLogger(__name__)
 _DEFAULT_CACHE_DIR = os.path.join(
     os.path.dirname(__file__), "..", "..", "..", "data", "height_cache"
 )
+
+
+def _resolve_overture_cli() -> Optional[str]:
+    """Return an executable Overture CLI without assuming an activated venv."""
+    override = os.environ.get("OVERTUREMAPS_BIN", "").strip()
+    candidates = []
+    if override:
+        candidates.append(override)
+
+    python_dir = os.path.dirname(sys.executable)
+    candidates.extend([
+        os.path.join(python_dir, "overturemaps"),
+        os.path.join(python_dir, "overturemaps.exe"),
+        shutil.which("overturemaps"),
+        os.path.expanduser("~/Library/Python/3.9/bin/overturemaps"),
+        "/opt/homebrew/bin/overturemaps",
+        "/usr/local/bin/overturemaps",
+    ])
+    for candidate in candidates:
+        if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return os.path.realpath(candidate)
+    return None
 
 
 def _find_overture_cache(
@@ -105,15 +129,13 @@ def _download_overture(
         logger.info(f"Overture file already exists: {output_path}")
         return output_path
 
-    # Find overturemaps CLI
-    cli_path = "overturemaps"
-    for p in [
-        os.path.expanduser("~/Library/Python/3.9/bin/overturemaps"),
-        "/usr/local/bin/overturemaps",
-    ]:
-        if os.path.exists(p):
-            cli_path = p
-            break
+    cli_path = _resolve_overture_cli()
+    if cli_path is None:
+        logger.warning(
+            "Overture height enrichment unavailable: install the overturemaps "
+            "CLI or set OVERTUREMAPS_BIN"
+        )
+        return None
 
     logger.info(f"Downloading Overture buildings: bbox={bbox_str} → {output_path}")
     try:

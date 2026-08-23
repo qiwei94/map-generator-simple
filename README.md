@@ -88,6 +88,11 @@ pip install -r requirements.txt
 ```
 Python ≥ 3.9。`manifold3d` 保证 watertight 输出；`Pillow` 读 EXIF；`fastapi/uvicorn` 跑 Web 服务。
 
+正式生成建议额外安装原生 `osmium-tool`；未安装时会自动使用项目内的
+pyosmium 回退。建筑高度补强还可安装 Overture 官方 CLI（macOS：
+`brew install overturemaps`）。CLI 与 `requirements.txt` 中的 `pyarrow`
+必须同时可用，否则管线会明确跳过 Overture，而不是把空补强当成成功。
+
 ### 2. 数据准备
 管线需要 OSM 的 `.osm.pbf` 与高程 DEM。本地 `pbf_cache/` 放对应区域 PBF 即可生成。
 项目支持**三态数据可用性**：本地就绪 / 远端可拉取 / 无数据。配置一台数据源服务器后，缺失区域可在页面一键 `scp` 拉取（拉一次永久复用）。
@@ -114,6 +119,7 @@ Studio 的“生成方式”保持相互隔离：
 
 ### 4. 测试
 ```bash
+python tools/env_doctor.py            # 只读检查运行时、CLI、数据与磁盘
 pytest tests/ -m "not slow"        # 离线套件（网络用例标 slow 默认跳过）
 ```
 
