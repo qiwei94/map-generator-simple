@@ -130,7 +130,7 @@ def test_showcase_api_omits_outputs_with_the_wrong_physical_area(
     result = server.api_showcase()
 
     assert [sample["title"] for sample in result["samples"]] == [
-        "Valid·Valid city"]
+        "Valid：Valid city"]
     assert result["samples"][0]["size_km"] == 15
 
 
@@ -212,7 +212,7 @@ def test_showcase_api_prepends_complete_25km_review_batch(
     result = server.api_showcase()
 
     assert [sample["title"] for sample in result["samples"]] == [
-        "Rome·Rome review"]
+        "Rome：Rome review"]
     sample = result["samples"][0]
     assert sample["size_km"] == 25
     assert sample["review_batch"] is True
@@ -225,7 +225,7 @@ def test_showcase_title_prefixes_the_concise_city_name():
     assert server._showcase_display_title({
         "title": "新加坡 · 滨海湾",
         "caption": "滨海水岸与花园城市",
-    }) == "新加坡·滨海水岸与花园城市"
+    }) == "新加坡：滨海水岸与花园城市"
 
 
 def test_replaced_legacy_samples_are_not_featured():

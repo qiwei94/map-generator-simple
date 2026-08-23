@@ -1176,8 +1176,11 @@ def _showcase_display_title(city: dict, fallback: str = "") -> str:
         return title
     city_name = title.split("·", 1)[0].strip()
     compact_caption = caption.replace(" ", "")
-    if city_name and not compact_caption.startswith(f"{city_name}·"):
-        return f"{city_name}·{caption}"
+    if city_name and not compact_caption.startswith(
+            (f"{city_name}：", f"{city_name}·")):
+        return f"{city_name}：{caption}"
+    if compact_caption.startswith(f"{city_name}·"):
+        return compact_caption.replace(f"{city_name}·", f"{city_name}：", 1)
     return caption
 
 
