@@ -3,12 +3,19 @@ from pathlib import Path
 import subprocess
 import sys
 
+import numpy as np
 import trimesh
 
 from _TEXTURE_STYLE_OF_DEEPSEEK.exporter import export_deepseek_3mf
+from tools.validate_3mf import _json_default
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_json_output_converts_numpy_scalars():
+    assert _json_default(np.bool_(True)) is True
+    assert _json_default(np.int64(7)) == 7
 
 
 def test_cli_json_reports_strict_zero_warning_acceptance(tmp_path):

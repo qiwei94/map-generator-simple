@@ -19,6 +19,16 @@ from _TEXTURE_STYLE_OF_DEEPSEEK.validator import (  # noqa: E402
 )
 
 
+def _json_default(value):
+    """Serialize NumPy scalar values returned by geometry checks."""
+
+    item = getattr(value, "item", None)
+    if callable(item):
+        return item()
+    raise TypeError(
+        f"Object of type {value.__class__.__name__} is not JSON serializable")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("path", type=Path)
@@ -32,7 +42,8 @@ def main() -> int:
         and not result.get("warnings")
     )
     if args.json:
-        print(json.dumps(result, ensure_ascii=False, indent=2))
+        print(json.dumps(
+            result, ensure_ascii=False, indent=2, default=_json_default))
     else:
         print_validation_report(result)
         print(f"  Strict acceptance: {'PASSED' if result['strict_passed'] else 'FAILED'}")
