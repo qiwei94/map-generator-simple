@@ -1,4 +1,4 @@
-"""Validator — 10 self-check rules against reference model specifications.
+"""Validator — self-check rules against reference model specifications.
 
 Validates the exported 3MF file by re-parsing it and checking geometry
 against the Urban Series reference model parameters.
@@ -171,6 +171,51 @@ def _compute_face_normals(vertices: np.ndarray, faces: np.ndarray) -> np.ndarray
     lengths = np.linalg.norm(normals, axis=1, keepdims=True)
     lengths[lengths < 1e-10] = 1.0
     return normals / lengths
+
+
+def _edge_manifold_counts(vertices: np.ndarray,
+                          faces: np.ndarray) -> Tuple[bool, int, int]:
+    """Return index validity, boundary-edge count, non-manifold-edge count.
+
+    Edges are encoded as uint64 keys instead of materialising an ``(3F, 2)``
+    int64 matrix.  That keeps strict validation practical for city-scale
+    block-base objects containing millions of triangles.
+    """
+    if len(faces) == 0:
+        return True, 0, 0
+    vertex_count = len(vertices)
+    indices_ok = bool(
+        vertex_count > 0
+        and faces.min() >= 0
+        and faces.max() < vertex_count
+    )
+    if not indices_ok:
+        return False, -1, -1
+
+    face_count = len(faces)
+    keys = np.empty(face_count * 3, dtype=np.uint64)
+    base = np.uint64(vertex_count)
+    chunk_size = 1_000_000
+    for edge_i, (a, b) in enumerate(((0, 1), (1, 2), (2, 0))):
+        edge_offset = edge_i * face_count
+        for start in range(0, face_count, chunk_size):
+            stop = min(start + chunk_size, face_count)
+            left = faces[start:stop, a].astype(np.uint64, copy=False)
+            right = faces[start:stop, b].astype(np.uint64, copy=False)
+            lo = np.minimum(left, right)
+            hi = np.maximum(left, right)
+            keys[edge_offset + start:edge_offset + stop] = lo * base + hi
+
+    keys.sort()
+    if len(keys) == 1:
+        return True, 1, 0
+    changes = np.flatnonzero(keys[1:] != keys[:-1]) + 1
+    run_ends = np.append(changes, len(keys))
+    run_starts = np.empty_like(run_ends)
+    run_starts[0] = 0
+    run_starts[1:] = changes
+    counts = run_ends - run_starts
+    return True, int((counts == 1).sum()), int((counts > 2).sum())
 
 
 def _get_extruder_map_from_3mf(objects: Dict[str, dict]) -> Dict[str, int]:
@@ -411,12 +456,9 @@ def validate_3mf(filepath: str) -> Dict[str, any]:
         v = vegetation_obj["vertices"]
         f = vegetation_obj["faces"]
         finite_ok = bool(np.isfinite(v).all())
-        edges = np.sort(np.vstack((f[:, [0, 1]], f[:, [1, 2]], f[:, [2, 0]])),
-                        axis=1)
-        _, edge_counts = np.unique(edges, axis=0, return_counts=True)
-        boundary_edges = int((edge_counts == 1).sum())
-        nonmanifold_edges = int((edge_counts > 2).sum())
-        closed_edge_manifold = boundary_edges == 0 and nonmanifold_edges == 0
+        indices_ok, boundary_edges, nonmanifold_edges = _edge_manifold_counts(v, f)
+        closed_edge_manifold = (
+            indices_ok and boundary_edges == 0 and nonmanifold_edges == 0)
         if terrain_obj is not None and len(terrain_obj["vertices"]) > 0:
             terrain_v = terrain_obj["vertices"]
             xy_epsilon = 0.05
@@ -430,7 +472,7 @@ def validate_3mf(filepath: str) -> Dict[str, any]:
             in_bounds = True
         v12_ok = finite_ok and closed_edge_manifold and in_bounds
         v12_detail = (
-            f"finite={finite_ok}, in_bounds={in_bounds}, "
+            f"finite={finite_ok}, indices={indices_ok}, in_bounds={in_bounds}, "
             f"boundary_edges={boundary_edges}, "
             f"nonmanifold_edges={nonmanifold_edges}"
         )
@@ -444,10 +486,46 @@ def validate_3mf(filepath: str) -> Dict[str, any]:
         "detail": v12_detail,
     })
 
+    # ---- V13: Block base is finite, in bounds, and closed edge-manifold ----
+    block_base_obj = objects.get("block_base")
+    if block_base_obj and len(block_base_obj["faces"]) > 0:
+        v = block_base_obj["vertices"]
+        f = block_base_obj["faces"]
+        finite_ok = bool(np.isfinite(v).all())
+        indices_ok, boundary_edges, nonmanifold_edges = _edge_manifold_counts(v, f)
+        closed_edge_manifold = (
+            indices_ok and boundary_edges == 0 and nonmanifold_edges == 0)
+        if terrain_obj is not None and len(terrain_obj["vertices"]) > 0:
+            terrain_v = terrain_obj["vertices"]
+            xy_epsilon = 0.05
+            in_bounds = bool(
+                v[:, 0].min() >= terrain_v[:, 0].min() - xy_epsilon
+                and v[:, 0].max() <= terrain_v[:, 0].max() + xy_epsilon
+                and v[:, 1].min() >= terrain_v[:, 1].min() - xy_epsilon
+                and v[:, 1].max() <= terrain_v[:, 1].max() + xy_epsilon
+            )
+        else:
+            in_bounds = True
+        v13_ok = finite_ok and closed_edge_manifold and in_bounds
+        v13_detail = (
+            f"finite={finite_ok}, indices={indices_ok}, in_bounds={in_bounds}, "
+            f"boundary_edges={boundary_edges}, "
+            f"nonmanifold_edges={nonmanifold_edges}"
+        )
+    else:
+        v13_ok = True
+        v13_detail = "not applicable"
+    results["rules"].append({
+        "id": "V13",
+        "name": "Block base is finite, in bounds, and closed edge-manifold",
+        "passed": v13_ok,
+        "detail": v13_detail,
+    })
+
     # Aggregate results
     for rule in results["rules"]:
         if not rule["passed"]:
-            if rule["id"] in ("V2", "V4", "V8", "V9", "V10"):
+            if rule["id"] in ("V2", "V4", "V8", "V9", "V10", "V13"):
                 results["errors"].append(f"{rule['id']}: {rule['name']}")
             else:
                 results["warnings"].append(f"{rule['id']}: {rule['name']}")

@@ -435,6 +435,47 @@ class TestBlockBaseV3:
         result = build_deepseek_block_base_v3([tiny], terrain, 2000.0)
         assert result is None
 
+    def test_touching_textured_polygons_remain_independent_closed_shells(self):
+        """Touching block bodies must not be welded into a non-manifold mesh."""
+        from shapely.geometry import box
+        from _TEXTURE_STYLE_OF_DEEPSEEK.block_base import build_deepseek_block_base_v3
+
+        terrain = _make_flat_terrain_mesh()
+        polys = [box(100, 100, 200, 200), box(200, 100, 300, 200)]
+        result = build_deepseek_block_base_v3(
+            polys, terrain, 2000.0, brick_style=False,
+            block_classes=["residential", "commercial"],
+            grid_step_mm=5.0,
+        )
+
+        assert result is not None
+        assert result.is_watertight
+        assert result.is_winding_consistent
+        assert len(result.split(only_watertight=False)) == 2
+
+    def test_invalid_textured_part_falls_back_to_flat(self, monkeypatch):
+        """One broken textured body degrades locally instead of poisoning 3MF."""
+        from shapely.geometry import box
+        from _TEXTURE_STYLE_OF_DEEPSEEK import block_base
+
+        open_triangle = trimesh.Trimesh(
+            vertices=[[0, 0, 0], [1, 0, 0], [0, 1, 0]],
+            faces=[[0, 1, 2]], process=False,
+        )
+        monkeypatch.setattr(
+            block_base, "_polygon_to_textured_mesh",
+            lambda *args, **kwargs: open_triangle,
+        )
+
+        result = block_base.build_deepseek_block_base_v3(
+            [box(100, 100, 200, 200)], _make_flat_terrain_mesh(), 2000.0,
+            brick_style=False, block_classes=["residential"],
+        )
+
+        assert result is not None
+        assert result.is_watertight
+        assert result.is_winding_consistent
+
 
 class TestBlockBaseEdgeFilter:
     def test_retreat_removes_edge_and_filters_transition_by_occupancy(self):
