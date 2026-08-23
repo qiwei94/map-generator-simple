@@ -4,6 +4,8 @@ Builds terrain in model mm space directly, avoiding Z-mapping issues from
 mixing real-meter and model-mm coordinate systems.
 """
 
+from __future__ import annotations
+
 import numpy as np
 import trimesh
 
@@ -163,7 +165,9 @@ def build_deepseek_terrain(elevation_grid: np.ndarray,
                            height_m: float,
                            area_km2: float,
                            scale: float,
-                           water_gdf=None) -> trimesh.Trimesh:
+                           water_gdf=None,
+                           base_thickness_mm: float | None = None
+                           ) -> trimesh.Trimesh:
     """Build the deepseek-style terrain: watertight terrain solid.
 
     Args:
@@ -184,8 +188,17 @@ def build_deepseek_terrain(elevation_grid: np.ndarray,
     # Step 2: Scale XY from real meters to model mm
     mesh.vertices[:, :2] *= scale
 
-    # Function-level import: allows runtime monkey-patch from auto-params
-    from _TEXTURE_STYLE_OF_DEEPSEEK.config import Z_GAMMA, TERRAIN_THICKNESS_MM
+    # Function-level import: allows runtime-resolved parameters to drive both
+    # the print mesh and the GLB preview from the same request contract.
+    from _TEXTURE_STYLE_OF_DEEPSEEK.config import (
+        Z_GAMMA, TERRAIN_THICKNESS_MM, WATER_BASE_THICKNESS_MM,
+        Z_WATER_BASE_MM,
+    )
+    resolved_base_mm = (WATER_BASE_THICKNESS_MM if base_thickness_mm is None
+                        else float(base_thickness_mm))
+    if resolved_base_mm < 0.4:
+        raise ValueError("base thickness must be at least 0.4mm")
+    terrain_base_z = Z_WATER_BASE_MM + resolved_base_mm
 
     # Step 3: Map surface Z to model mm (0..TERRAIN_THICKNESS_MM + Z_TERRAIN_BASE)
     z_surface = mesh.vertices[:, 2]
@@ -195,12 +208,12 @@ def build_deepseek_terrain(elevation_grid: np.ndarray,
     if z_range > 0.01:
         t = (z_surface - z_min) / z_range  # 0..1 normalized
         t = np.power(t, Z_GAMMA)            # power curve: <1 boosts low relief
-        mesh.vertices[:, 2] = t * TERRAIN_THICKNESS_MM + Z_TERRAIN_BASE
+        mesh.vertices[:, 2] = t * TERRAIN_THICKNESS_MM + terrain_base_z
     else:
-        mesh.vertices[:, 2] = TERRAIN_THICKNESS_MM / 2 + Z_TERRAIN_BASE
+        mesh.vertices[:, 2] = TERRAIN_THICKNESS_MM / 2 + terrain_base_z
 
     # Step 4: Build watertight solid (add walls + bottom in model mm)
-    solid = _add_walls_and_bottom(mesh, Z_TERRAIN_BASE)
+    solid = _add_walls_and_bottom(mesh, terrain_base_z)
 
     # Step 5: Validate and repair
     # Use optimize_and_repair_mesh as safety net: it decimates large meshes

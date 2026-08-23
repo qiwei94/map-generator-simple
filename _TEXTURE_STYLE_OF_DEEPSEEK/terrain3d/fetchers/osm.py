@@ -135,7 +135,7 @@ FEATURE_CONFIGS: Dict[str, dict] = {
     },
     "water": {
         "tag_filters": {
-            "natural": "water",
+            "natural": ["water", "coastline"],
             "waterway": True,
             "landuse": "reservoir",
             "water": True,
@@ -427,10 +427,23 @@ class OSMPipeline:
         # Remove empty geometries
         gdf = gdf[~gdf.geometry.is_empty & gdf.geometry.notna()].copy()
 
-        # Deduplicate by osm_id
+        # Deduplicate identified OSM features.  Some osmium/OGR exports keep
+        # the osm_id column but populate it with NULL for every feature.  A
+        # plain drop_duplicates(subset="osm_id") would then collapse an
+        # entire road network to a single row.  Anonymous features are not
+        # safe to deduplicate by ID, so preserve them here; the tiled fetcher
+        # already performs geometry-fingerprint deduplication when needed.
         if "osm_id" in gdf.columns:
             before = len(gdf)
-            gdf = gdf.drop_duplicates(subset="osm_id", keep="first")
+            has_osm_id = gdf["osm_id"].notna()
+            dedupe_columns = ["osm_id"]
+            if "osm_type" in gdf.columns:
+                dedupe_columns.insert(0, "osm_type")
+            duplicate_ids = pd.Series(False, index=gdf.index)
+            duplicate_ids.loc[has_osm_id] = gdf.loc[has_osm_id].duplicated(
+                subset=dedupe_columns, keep="first"
+            )
+            gdf = gdf.loc[~duplicate_ids].copy()
             if len(gdf) < before:
                 logger.info("Step 4 [%s]: Removed %d duplicates",
                              self.feature_type, before - len(gdf))
@@ -729,6 +742,37 @@ def fetch_water(
     config = FEATURE_CONFIGS["water"]
     pipeline = OSMPipeline(pbf_path, "water", (south, west, north, east), config)
     result = pipeline.run(export_gpkg=export_gpkg)
+
+    # City-sized extracts can break multipolygon relations whose outer rings
+    # extend far beyond the frame (Lake Michigan is the canonical example).
+    # Recover those polygons from a compact per-PBF relation cache built before
+    # bbox clipping, then add only water area missing from the normal result.
+    try:
+        from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.large_water_relations import (
+            fetch_large_water_relations,
+            merge_large_water_relations,
+        )
+        relation_water = fetch_large_water_relations(
+            pbf_path,
+            (south, west, north, east),
+            pipeline._cli_fetcher._get_osmium_command(),
+        )
+        result = merge_large_water_relations(result, relation_water)
+    except Exception as exc:
+        logger.warning("Large-water relation supplement failed: %s", exc)
+
+    # Oceans are usually directed natural=coastline ways in OSM, not water
+    # polygons.  Materialize a bbox-clipped sea polygon here so PNG, quick GLB
+    # and formal 3MF all consume the exact same water geometry.
+    if not result.empty:
+        from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.coastline import (
+            materialize_coastal_water,
+        )
+        result = materialize_coastal_water(
+            result, (south, west, north, east))
+        if export_gpkg:
+            export_step_to_gpkg(result, export_gpkg,
+                                "step5_coastal_water")
 
     # Apply WATER_MIN_AREA_M2 filter for polygons
     if not result.empty:

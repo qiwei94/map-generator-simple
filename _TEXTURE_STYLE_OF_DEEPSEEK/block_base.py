@@ -10,7 +10,7 @@ Extruder: E6, warm beige #E8E2D4
 
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import trimesh
@@ -22,6 +22,97 @@ from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.processors.terrain import sample_terra
 from _TEXTURE_STYLE_OF_DEEPSEEK._geom_utils import shapely_poly_to_crosssection
 from _TEXTURE_STYLE_OF_DEEPSEEK.config import BLOCK_BASE_THICKNESS_MM
 from _TEXTURE_STYLE_OF_DEEPSEEK._z_displacement import get_displacement
+
+
+def filter_block_base_edges(
+    polys: List[Polygon],
+    bbox_local: "tuple[float, float, float, float]",
+    scale: float,
+    retreat_mm: float,
+    transition_mm: float = 1.5,
+    occupied_polys: "List[Polygon] | None" = None,
+    min_coverage: float = 0.02,
+) -> Tuple[List[Polygon], List[int], Dict[str, int]]:
+    """Remove the artificial block-base carpet at the model boundary.
+
+    Blocks touching the outer retreat ring are removed whole, so the result
+    does not create a ruler-straight inset cut.  Inside the following
+    transition band, only blocks with enough building/urban footprint are
+    retained.  The returned indices let callers keep semantic classes aligned.
+    All polygon coordinates are in source metres; the public controls are in
+    printable model millimetres.
+    """
+    from shapely.geometry import box as shapely_box
+    from shapely.ops import unary_union
+    from shapely.strtree import STRtree
+
+    if not polys or retreat_mm <= 0:
+        indices = list(range(len(polys)))
+        return list(polys), indices, {
+            "input": len(polys),
+            "kept": len(polys),
+            "outer_removed": 0,
+            "transition_removed": 0,
+        }
+    if scale <= 0:
+        raise ValueError("scale must be positive")
+    if transition_mm < 0:
+        raise ValueError("transition_mm must be non-negative")
+    if not 0 <= min_coverage <= 1:
+        raise ValueError("min_coverage must be between 0 and 1")
+
+    frame = shapely_box(*bbox_local)
+    retreat_m = retreat_mm / scale
+    transition_m = transition_mm / scale
+    outer_safe = frame.buffer(-retreat_m, join_style=2)
+    inner_safe = frame.buffer(-(retreat_m + transition_m), join_style=2)
+    if outer_safe.is_empty:
+        return [], [], {
+            "input": len(polys),
+            "kept": 0,
+            "outer_removed": len(polys),
+            "transition_removed": 0,
+        }
+
+    occupied = [
+        poly for poly in (occupied_polys or [])
+        if isinstance(poly, Polygon) and not poly.is_empty and poly.area > 0
+    ]
+    occupied_tree = STRtree(occupied) if occupied else None
+
+    kept: List[Polygon] = []
+    kept_indices: List[int] = []
+    outer_removed = 0
+    transition_removed = 0
+
+    for index, poly in enumerate(polys):
+        if not isinstance(poly, Polygon) or poly.is_empty:
+            continue
+        # Drop the complete polygon if any of it reaches the no-base ring.
+        if not outer_safe.covers(poly):
+            outer_removed += 1
+            continue
+        if inner_safe.is_empty or not inner_safe.covers(poly):
+            coverage = 0.0
+            if occupied_tree is not None:
+                matches = occupied_tree.query(poly)
+                if len(matches):
+                    candidates = [occupied[int(i)] for i in matches]
+                    covered = unary_union(candidates).intersection(poly).area
+                    coverage = covered / poly.area if poly.area > 0 else 0.0
+            if coverage < min_coverage:
+                transition_removed += 1
+                continue
+        kept.append(poly)
+        kept_indices.append(index)
+
+    stats = {
+        "input": len(polys),
+        "kept": len(kept),
+        "outer_removed": outer_removed,
+        "transition_removed": transition_removed,
+    }
+    return kept, kept_indices, stats
 
 
 def _polygon_to_manifold(poly: Polygon, scale: float, z_base: float,
@@ -345,26 +436,32 @@ def _build_flat(
     scale: float,
     thickness_mm: float,
 ) -> Optional[trimesh.Trimesh]:
-    """Legacy flat extrusion path via manifold3d."""
+    """Flat extrusion path via manifold3d.
+
+    Terrain height is sampled in one vectorized batch.  Besides being much
+    faster for city-scale inputs, this keeps ``flat`` a genuinely lightweight
+    alternative to the per-polygon textured path.
+    """
     parts: list[manifold3d.Manifold] = []
-    n_skipped = 0
+    valid_indices = [
+        i for i, poly in enumerate(polys)
+        if not poly.is_empty and poly.area >= 10.0
+    ]
+    n_skipped = len(polys) - len(valid_indices)
+    if not valid_indices:
+        return None
 
-    for poly in polys:
-        if poly.is_empty or poly.area < 10.0:
+    centroids_x = np.array([polys[i].centroid.x for i in valid_indices]) * scale
+    centroids_y = np.array([polys[i].centroid.y for i in valid_indices]) * scale
+    terrain_z = sample_terrain_z(terrain_mesh, centroids_x, centroids_y)
+
+    for sample_i, poly_i in enumerate(valid_indices):
+        if sample_i >= len(terrain_z) or np.isnan(terrain_z[sample_i]):
             n_skipped += 1
             continue
 
-        centroid = poly.centroid
-        tz = sample_terrain_z(
-            terrain_mesh,
-            np.array([centroid.x]) * scale,
-            np.array([centroid.y]) * scale,
-        )
-        if len(tz) == 0 or np.isnan(tz[0]):
-            n_skipped += 1
-            continue
-
-        z_base = float(tz[0])
+        poly = polys[poly_i]
+        z_base = float(terrain_z[sample_i])
         man = _polygon_to_manifold(poly, scale, z_base, thickness_mm)
         if not man.is_empty():
             parts.append(man)

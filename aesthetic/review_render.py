@@ -98,7 +98,8 @@ def _hillshade(heightmap: np.ndarray, pixel_size: float,
 
 
 def render_review_bundle(layers, ctx: dict, road_width_multiplier: float,
-                         out_dir: str, tag: str) -> dict:
+                         out_dir: str, tag: str,
+                         scene_type: str = "urban") -> dict:
     """渲染评审图包。
 
     Returns:
@@ -142,6 +143,14 @@ def render_review_bundle(layers, ctx: dict, road_width_multiplier: float,
     water_mask_d = _rasterize_mask(raster_d,
                                    list(layers.WL) + list(layers.WO)).astype(bool)
 
+    is_landscape = scene_type in ("landscape", "water_landscape")
+    road_color = (132, 133, 129) if is_landscape else _ROAD
+    # Water is a single material in the printable model, so the review render
+    # must use the same pure-black visual language for every scene type.  A
+    # landscape-only graphite override made oceans look like unclassified
+    # background (New York/Chicago/Cape Town regression).
+    water_color = _WATER
+
     # ── 合成俯视（2x 栅格）──
     img = np.full((GR, GR, 3), _PAPER, dtype=np.uint8)
     img[block_2x] = _BLOCK_BASE
@@ -176,13 +185,13 @@ def render_review_bundle(layers, ctx: dict, road_width_multiplier: float,
                 except Exception:
                     continue
                 if len(pts) >= 2:
-                    draw.line(pts, fill=_ROAD, width=w_px)
+                    draw.line(pts, fill=road_color, width=w_px)
                     road_draw.line(pts, fill=1, width=w_px)
     road_mask = _downscale_mask(np.array(road_canvas), G)
 
     # 水体最后压上（纯黑）
     img2 = np.array(pil_img)
-    img2[water_2x] = _WATER
+    img2[water_2x] = water_color
     pil_img = Image.fromarray(img2, mode="RGB")
 
     # 2x → 1x LANCZOS（抗锯齿的关键一步）

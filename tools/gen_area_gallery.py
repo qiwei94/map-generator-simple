@@ -24,7 +24,10 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 if hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(errors="replace")
+    # Long 25 km stages can otherwise sit in an 8 KiB redirected-output
+    # buffer for many minutes and look hung to the batch monitor.
+    sys.stdout.reconfigure(
+        errors="replace", line_buffering=True, write_through=True)
 
 from aesthetic.presets import CityPreset, register_preset  # noqa: E402
 from tools.batch_generate_gallery import (  # noqa: E402

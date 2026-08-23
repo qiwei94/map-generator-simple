@@ -22,6 +22,8 @@ from typing import List, Tuple, Dict, Optional, Set
 import numpy as np
 import pandas as pd
 import geopandas as gpd
+from shapely import make_valid, prepare
+from shapely.errors import GEOSException
 from shapely.geometry import (
     LineString,
     MultiLineString,
@@ -38,7 +40,6 @@ from _TEXTURE_STYLE_OF_DEEPSEEK._landmark import (
     LandmarkCategory,
     is_vegetation_landmark,
     is_water_landmark,
-    is_road_landmark,
     compute_top_percent_threshold,
     compute_hotspot_block_ids,
 )
@@ -130,22 +131,66 @@ def _subtract(polys: List[Polygon], minus_geom) -> List[Polygon]:
     """
     if minus_geom is None or minus_geom.is_empty:
         return list(polys)
+
+    def _parts(geom):
+        if geom is None or geom.is_empty:
+            return []
+        if isinstance(geom, Polygon):
+            if geom.is_valid:
+                return [geom]
+            try:
+                return _parts(make_valid(geom))
+            except GEOSException:
+                return []
+        if hasattr(geom, "geoms"):
+            out_parts = []
+            for child in geom.geoms:
+                out_parts.extend(_parts(child))
+            return out_parts
+        return []
+
+    # Repair a bad union once instead of triggering the same GEOS failure for
+    # every city block. OSM free holes and self-intersections are common enough
+    # that subtraction must treat them as data quality, not a fatal style error.
+    safe_minus = minus_geom
+    try:
+        if not safe_minus.is_valid:
+            safe_minus = make_valid(safe_minus)
+    except GEOSException:
+        try:
+            safe_minus = safe_minus.buffer(0)
+        except GEOSException:
+            safe_minus = None
+    if safe_minus is None or safe_minus.is_empty:
+        return list(polys)
+    try:
+        prepare(safe_minus)
+    except GEOSException:
+        pass
+
     out = []
     for p in polys:
         if not isinstance(p, Polygon) or p.is_empty:
             continue
-        if not p.intersects(minus_geom):
-            out.append(p)
-            continue
-        diff = p.difference(minus_geom)
-        if diff.is_empty:
-            continue
-        if isinstance(diff, Polygon):
-            out.append(diff)
-        elif hasattr(diff, "geoms"):
-            for g in diff.geoms:
-                if isinstance(g, Polygon) and not g.is_empty:
-                    out.append(g)
+        try:
+            source = p if p.is_valid else make_valid(p)
+            # safe_minus is reused for every source polygon. Keep the prepared
+            # cutter on the left so GEOS reuses its spatial index instead of
+            # rebuilding work for thousands of city/vegetation blocks.
+            if not safe_minus.intersects(source):
+                out.extend(_parts(source))
+                continue
+            out.extend(_parts(source.difference(safe_minus)))
+        except GEOSException:
+            # Last-resort zero-buffer repair. If GEOS still cannot subtract,
+            # retain the repaired source polygon: a small visual overlap is
+            # preferable to aborting the entire gallery style.
+            try:
+                source = p.buffer(0)
+                cutter = safe_minus.buffer(0)
+                out.extend(_parts(source.difference(cutter)))
+            except GEOSException:
+                out.extend(_parts(p))
     return out
 
 
@@ -694,6 +739,49 @@ def _extract_VL_VO(
 # B.1.4.5: 提取水体 (WL / WO)
 # ---------------------------------------------------------------------------
 
+def _close_unprintable_water_gaps(
+    poly: Polygon,
+    nozzle_real_m: float,
+) -> Polygon:
+    """Close holes and edge-connected slits below one printed nozzle line.
+
+    Large OSM lake relations legitimately contain inner rings for piers and
+    breakwaters.  At city scale some are kilometres long but only a few metres
+    wide, so preserving them creates conspicuous hairline gaps in both the PNG
+    preview and the matching 3MF.  A hole is retained only when eroding it by
+    half a real-world nozzle width leaves a printable core.
+    """
+    if poly.is_empty or nozzle_real_m <= 0:
+        return poly
+
+    half_nozzle = nozzle_real_m * 0.5
+    printable_holes = []
+    for ring in poly.interiors:
+        try:
+            hole = Polygon(ring)
+            if not hole.is_empty and not hole.buffer(-half_nozzle).is_empty:
+                printable_holes.append(ring.coords)
+        except GEOSException:
+            printable_holes.append(ring.coords)
+
+    result = Polygon(poly.exterior.coords, printable_holes)
+    if result.is_empty or not result.is_valid:
+        return poly
+
+    # A clipped multipolygon hole can open onto the bbox edge and become a
+    # narrow notch rather than an interior ring.  Morphological closing fills
+    # those sub-nozzle slits while keeping straight shorelines and printable
+    # islands intact.
+    try:
+        closed = result.buffer(half_nozzle, join_style=2).buffer(
+            -half_nozzle, join_style=2)
+        if isinstance(closed, Polygon) and not closed.is_empty and closed.is_valid:
+            return closed
+    except GEOSException:
+        pass
+    return result
+
+
 def _extract_WL_WO(
     water_gdf: gpd.GeoDataFrame,
     nozzle_real_m: float,
@@ -713,6 +801,8 @@ def _extract_WL_WO(
     WL_polys: List[Polygon] = []
     WO_polys: List[Polygon] = []
     wl_lines_raw: List[Tuple[LineString, str]] = []
+    filled_hole_count = 0
+    repaired_water_count = 0
     # 可打印下限 = 1 喷嘴宽（0.5×nozzle_real 半宽）。历史 1.5× 把大框
     # （scale 小、nozzle_real 大）的城市河道全部撑到 ~200m 宽蓝带。
     min_buffer = nozzle_real_m * 0.5
@@ -728,6 +818,11 @@ def _extract_WL_WO(
             for poly in polys:
                 if poly.is_empty:
                     continue
+                cleaned = _close_unprintable_water_gaps(poly, nozzle_real_m)
+                filled_hole_count += len(poly.interiors) - len(cleaned.interiors)
+                if not cleaned.equals(poly):
+                    repaired_water_count += 1
+                poly = cleaned
                 area = poly.area
                 if is_water_landmark(row, area_m2=area):
                     WL_polys.append(poly)
@@ -776,7 +871,9 @@ def _extract_WL_WO(
                     WL_polys.append(buf)
 
     print(f"  _extract_WL_WO: {len(WL_polys)} WL, {len(WO_polys)} WO, "
-          f"{len(wl_lines_raw)} raw lines (min_buffer={min_buffer:.1f}m)")
+          f"{len(wl_lines_raw)} raw lines, {filled_hole_count} unprintable holes filled "
+          f"across {repaired_water_count} repaired polygons "
+          f"(min_buffer={min_buffer:.1f}m)")
     return WL_polys, WO_polys, wl_lines_raw
 
 
@@ -801,33 +898,76 @@ def _extract_roads(
     area_class = get_area_class(area_km2)
     highway_filter = ROAD_FILTER.get(area_class, None)
 
-    # Build BL union for subtraction
+    # Filter before Python iteration.  Dense cities can contain hundreds of
+    # thousands of road features; GeoDataFrame.iterrows() materializes one
+    # pandas Series per feature and dominated gallery generation time.
+    work = roads_gdf
+    if highway_filter is not None:
+        highway_values = work["highway"] if "highway" in work.columns else None
+        if highway_values is None:
+            n_skip_filter = len(work)
+            work = work.iloc[0:0]
+        else:
+            keep = highway_values.isin(highway_filter)
+            n_skip_filter = int((~keep).sum())
+            work = work.loc[keep]
+    else:
+        n_skip_filter = 0
+
+    # Build and prepare the BL union for repeated spatial predicates.  Shapely
+    # preparation is in-place and makes the intersects test substantially
+    # cheaper without changing the subsequent difference geometry.
     bl_union = None
     if BL_polys:
         try:
             bl_union = unary_union(BL_polys)
+            prepare(bl_union)
         except Exception:
             pass
 
     result: List[Tuple[LineString, str, bool]] = []
-    n_skip_filter = 0
     n_skip_short = 0
     n_subtracted = 0
 
-    for _, row in roads_gdf.iterrows():
-        highway = row.get("highway", "residential")
-        if highway_filter is not None and highway not in highway_filter:
-            n_skip_filter += 1
-            continue
+    def _column(name: str, default=None):
+        if name in work.columns:
+            return work[name].to_numpy(copy=False)
+        return np.full(len(work), default, dtype=object)
 
-        geom = row.geometry
+    geometries = work.geometry.to_numpy(copy=False)
+    highways = _column("highway", "residential")
+    names = _column("name")
+    bridges = _column("bridge")
+    wikidata_values = _column("wikidata")
+    wikipedia_values = _column("wikipedia")
+
+    def _is_bridge_landmark(name, highway, bridge, wikidata, wikipedia) -> bool:
+        # Equivalent to is_road_landmark(), kept scalar and allocation-free for
+        # the hot loop.  Missing values are deliberately rejected first.
+        if pd.isna(name) or pd.isna(highway) or pd.isna(bridge):
+            return False
+        if bridge in ("no", "0"):
+            return False
+        if highway in {"footway", "path", "steps", "track", "cycleway",
+                       "service", "pedestrian", "bridleway", "corridor"}:
+            return False
+        if pd.notna(wikidata) or pd.notna(wikipedia):
+            return True
+        return any(token in str(name) for token in
+                   ("大桥", "Bridge", "Viaduct", "高架", "立交"))
+
+    for geom, highway, name, bridge, wikidata, wikipedia in zip(
+        geometries, highways, names, bridges, wikidata_values, wikipedia_values,
+    ):
         if geom is None or geom.is_empty:
             continue
         if not isinstance(geom, (LineString, MultiLineString)):
             continue
 
         lines = geom.geoms if isinstance(geom, MultiLineString) else [geom]
-        is_bridge = is_road_landmark(row)
+        is_bridge = _is_bridge_landmark(
+            name, highway, bridge, wikidata, wikipedia,
+        )
 
         for line in lines:
             if line.length < 10.0:
@@ -835,7 +975,9 @@ def _extract_roads(
                 continue
 
             # Subtract BL footprint
-            if bl_union is not None and line.intersects(bl_union):
+            # Keep the prepared geometry on the left-hand side so GEOS can
+            # actually reuse its spatial index for every road predicate.
+            if bl_union is not None and bl_union.intersects(line):
                 try:
                     diff = line.difference(bl_union)
                     if diff.is_empty:
@@ -1215,6 +1357,19 @@ def _compute_block_base(
 # B.1.4: 主入口
 # ---------------------------------------------------------------------------
 
+def _effective_road_tier(requested: Optional[int], area_km2: float) -> int:
+    """Apply a printable-scale ceiling to city-block road detail.
+
+    Tier 5 adds footways, paths, steps and tracks.  At large-area model scales
+    those lines are narrower than the real-world nozzle footprint, yet they can
+    make polygonization process hundreds of thousands of extra segments.
+    """
+    tier = requested if requested is not None else 5
+    if get_area_class(area_km2) == "large":
+        return min(tier, 4)
+    return tier
+
+
 def preprocess_layers(
     buildings_gdf: gpd.GeoDataFrame,
     roads_gdf: gpd.GeoDataFrame,
@@ -1279,7 +1434,12 @@ def preprocess_layers(
 
     # ---- Step 2: city blocks ----
     t2 = time.time()
-    effective_road_tier = road_tier_override if road_tier_override is not None else 5
+    requested_road_tier = road_tier_override if road_tier_override is not None else 5
+    effective_road_tier = _effective_road_tier(
+        requested_road_tier, area_km2)
+    if effective_road_tier != requested_road_tier:
+        print(f"[preprocess] road_tier capped {requested_road_tier} → "
+              f"{effective_road_tier} for printable large-area detail")
     wgdf = water_gdf if water_gdf is not None and len(water_gdf) > 0 else None
     if roads_gdf is not None and len(roads_gdf) > 0:
         city_blocks = _build_city_blocks(roads_gdf, wgdf, road_tier=effective_road_tier, bbox_local=bbox_local)

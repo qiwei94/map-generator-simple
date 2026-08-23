@@ -4,7 +4,7 @@
 
 标准流程（所有要素类型，包括水体）：
 1. osmium extract - 区域裁剪
-2. osmium tags-filter - 标签过滤（水体用 natural=water water waterway landuse=reservoir）
+2. osmium tags-filter - 标签过滤（水体含 coastline，后续闭合为海面）
 3. osmium export - 导出 GeoJSON
 4. Python 读取 GeoJSON → GeoDataFrame
 """
@@ -12,6 +12,7 @@
 import logging
 import os
 import subprocess
+import sys
 import tempfile
 from typing import Dict, Optional
 
@@ -24,8 +25,53 @@ logger = logging.getLogger(__name__)
 DEFAULT_PBF_DIR = os.path.join(os.path.dirname(__file__), '..', '..', '..', 'pbf_cache')
 
 
+def _bbox_option(west, south, east, north) -> str:
+    """Return an unambiguous bbox token for native and portable osmium.
+
+    A western-hemisphere bbox begins with ``-``.  Keeping the option and value
+    in one token avoids backend-specific option parsing differences, and both
+    native osmium and the portable pyosmium backend accept this spelling.
+    """
+    return f'--bbox={west},{south},{east},{north}'
+
+
+def _export_timeout_seconds(filtered_size_kib: float,
+                            osmium_command) -> int:
+    """Scale export time without killing the portable backend mid-feature."""
+    portable = (len(osmium_command) != 1
+                or os.path.basename(str(osmium_command[0])) != "osmium")
+    if portable:
+        # Cairo roads: a 4.8 MiB filtered PBF legitimately takes roughly
+        # 8 minutes in pyosmium on the Intel Mac.  The old 136 second budget
+        # cached an empty road layer as a false success.
+        return max(300, min(1800, int(filtered_size_kib / 8) + 120))
+    return max(120, min(600, int(filtered_size_kib / 64) + 60))
+
+
 class OsmiumCLIFetcher:
     """使用 osmium CLI 获取 OSM 数据"""
+
+    # osmium export emits sparse properties, but GeoPandas expands their union
+    # into a dense table.  Writing that table back to per-tile GeoJSON repeats
+    # every null-valued regional tag for every feature.  In dense extracts this
+    # turned a ~150 MB Paris frame into 500-800 MB *per tile*.  Keep the fields
+    # consumed by filtering, height estimation, landmark classification and
+    # layer builders; geometry is appended separately by _prune_cache_columns.
+    _CACHE_COLUMNS = (
+        'osm_type', 'osm_id',
+        'building', 'building:part', 'height', 'building:height',
+        'building:levels', 'building:levels:underground', 'min_height',
+        'name', 'name:en', 'wikidata', 'wikipedia', 'historic', 'heritage',
+        'tourism', 'amenity', 'man_made', 'tower:type', 'religion',
+        'government', 'military', 'museum',
+        'highway', 'bridge', 'tunnel', 'covered', 'layer', 'width',
+        'natural', 'water', 'waterway', 'landuse', 'leisure', 'boundary',
+        'railway', 'intermittent',
+    )
+
+    # Water v2 adds coastline ways.  Keep it in a separate namespace so old
+    # GeoJSON/tile caches (which cannot contain coastlines) are never reused.
+    _CACHE_NAMESPACES = {'water': 'water_coastline_v2'}
 
     # 标准标签过滤表达式（使用 nwr = node/way/relation）
     # 适用于建筑、道路、植被等普通要素
@@ -54,9 +100,9 @@ class OsmiumCLIFetcher:
         ),
         'park': 'nwr/leisure=park,garden nwr/landuse=recreation_ground',
         'wetland': 'nwr/natural=wetland,marsh,swamp',
-        # 水体全量过滤：江河湖泊一网打尽
-        # 去掉了 r/ 前缀和 =* 后缀，让 Way 和 Relation 都能匹配
-        'water': 'natural=water water waterway landuse=reservoir',
+        # 水体全量过滤：江河湖泊 + OSM 以定向线表达的海岸。
+        'water': ('nwr/natural=water,coastline nwr/water nwr/waterway '
+                  'nwr/landuse=reservoir'),
         # 自然/植被地标：保护区 + 国家公园 + 命名湿地 / 景区
         # （西溪 OSM: boundary=national_park + leisure=nature_reserve + wikidata=Q1089272）
         'protected_area': ('nwr/boundary=national_park,protected_area '
@@ -129,6 +175,22 @@ class OsmiumCLIFetcher:
     def _check_tool(self, tool_name: str) -> bool:
         """检查命令行工具是否可用"""
         try:
+            override = (os.environ.get('OSMIUM_BIN')
+                        if tool_name == 'osmium' else None)
+            if override:
+                if not os.path.isfile(override) or not os.access(override, os.X_OK):
+                    logger.warning("OSMIUM_BIN is not executable: %s", override)
+                    return False
+                result = subprocess.run(
+                    [override, '--version'], capture_output=True, timeout=5)
+                return result.returncode == 0
+
+            if tool_name == 'osmium':
+                command = self._get_osmium_command()
+                result = subprocess.run(
+                    command + ['--version'], capture_output=True, timeout=10)
+                return result.returncode == 0
+
             if self.conda_env_path:
                 # Try both Scripts and Library/bin directories
                 conda_dirs = [
@@ -199,9 +261,50 @@ class OsmiumCLIFetcher:
                 return result.returncode == 0
         except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
             return False
+
+    def _get_osmium_command(self) -> list:
+        """Resolve native osmium or the bundled pyosmium backend.
+
+        The bundled entry must run under the *current* Python interpreter.
+        Relying on ``#!/usr/bin/env python3`` can select a system Python which
+        does not have pyosmium even though the active pipeline environment does.
+        """
+        override = os.environ.get('OSMIUM_BIN')
+        if override and os.path.isfile(override) and os.access(override, os.X_OK):
+            return [override]
+
+        candidate = self._get_tool_path('osmium')
+        if candidate != 'osmium':
+            return [candidate]
+
+        import shutil
+        native = shutil.which('osmium')
+        bundled_entry = os.path.abspath(os.path.join(
+            os.path.dirname(__file__), '..', '..', '..', 'tools', 'osmium'))
+        bundled_backend = os.path.join(os.path.dirname(bundled_entry),
+                                       'osmium_pyosmium.py')
+        if native and os.path.realpath(native) != os.path.realpath(bundled_entry):
+            return [native]
+
+        try:
+            import osmium  # noqa: F401 - availability probe for current Python
+        except ImportError:
+            if native:
+                return [native]
+            return ['osmium']
+        if os.path.isfile(bundled_backend):
+            return [sys.executable, bundled_backend]
+        if native:
+            return [native]
+        return ['osmium']
     
     def _get_tool_path(self, tool_name: str) -> str:
         """获取工具的完整路径"""
+        override = (os.environ.get('OSMIUM_BIN')
+                    if tool_name == 'osmium' else None)
+        if override and os.path.isfile(override) and os.access(override, os.X_OK):
+            return override
+
         if self.conda_env_path:
             # Try both Scripts and Library/bin directories
             conda_dirs = [
@@ -283,7 +386,8 @@ class OsmiumCLIFetcher:
         # 输出到项目 tmp/ 目录下（不缓存）
         project_tmp = os.path.join(os.path.dirname(__file__), '..', '..', '..', 'tmp')
         os.makedirs(project_tmp, exist_ok=True)
-        output_path = os.path.join(project_tmp, f"osmium_{tag_type}_{south:.4f}_{west:.4f}_{north:.4f}_{east:.4f}.geojson")
+        cache_tag = self._CACHE_NAMESPACES.get(tag_type, tag_type)
+        output_path = os.path.join(project_tmp, f"osmium_{cache_tag}_{south:.4f}_{west:.4f}_{north:.4f}_{east:.4f}.geojson")
 
         logger.info(f"使用 CLI 方式获取 {tag_type} 数据...")
         logger.info(f"边界框: ({south:.4f}, {west:.4f}, {north:.4f}, {east:.4f})")
@@ -383,13 +487,34 @@ class OsmiumCLIFetcher:
     # 合并时靠 osm_type+osm_id 去重。
     _TILE_BUFFER_DEG = 0.002
 
-    @staticmethod
-    def _try_read_geojson_cache(path):
+    @classmethod
+    def _prune_cache_columns(cls, gdf, tag_type=None):
+        """Drop export-only tag columns before a frame can inflate memory/cache.
+
+        The whitelist is deliberately a shared superset for every layer.  This
+        keeps cache files compatible across feature types while retaining every
+        field used by downstream filters, height enrichment and landmark rules.
+        """
+        if gdf is None:
+            return gdf
+        keep = [column for column in cls._CACHE_COLUMNS
+                if column in gdf.columns]
+        if 'geometry' in gdf.columns:
+            keep.append('geometry')
+        return gdf.loc[:, keep].copy()
+
+    @classmethod
+    def _try_read_geojson_cache(cls, path, tag_type=None):
         """读 GeoJSON 缓存：合法（含空集合）返回 GeoDataFrame，损坏/不存在返回 None。"""
         if not os.path.exists(path) or os.path.getsize(path) == 0:
             return None
         try:
-            return gpd.read_file(path)
+            # Column projection happens inside the GDAL reader, before a dense
+            # pandas table is allocated.  This is essential when opening old
+            # Paris tiles whose schemas contain thousands of mostly-null tags.
+            return cls._prune_cache_columns(
+                gpd.read_file(path, columns=list(cls._CACHE_COLUMNS)),
+                tag_type)
         except Exception:
             return None
 
@@ -412,9 +537,33 @@ class OsmiumCLIFetcher:
     def _tile_cache_path(self, tag_type, ix, iy):
         project_root = os.path.dirname(os.path.dirname(os.path.dirname(
             os.path.dirname(os.path.abspath(__file__)))))
-        d = os.path.join(project_root, 'cache', 'tiles', tag_type)
+        cache_tag = self._CACHE_NAMESPACES.get(tag_type, tag_type)
+        d = os.path.join(project_root, 'cache', 'tiles', cache_tag)
         os.makedirs(d, exist_ok=True)
         return os.path.join(d, f"{ix}_{iy}.geojson")
+
+    @staticmethod
+    def _should_refresh_full_frame(missing_count, total_count,
+                                   missing_bbox=None, frame_bbox=None):
+        """Return True when reusing sparse tiles would cost more memory than a refresh.
+
+        A merged extraction already spans the bounding rectangle of every missing
+        tile.  When that rectangle covers the requested frame, or at least half
+        the frame is missing, loading the existing GeoJSON tiles first only keeps
+        duplicate feature sets alive during the split/concat step.  Dense cities
+        can turn that duplication into multi-gigabyte RSS spikes.
+        """
+        if missing_count < 2 or total_count <= 0:
+            return False
+        if missing_count * 2 >= total_count:
+            return True
+        if missing_bbox is None or frame_bbox is None:
+            return False
+        ms, mw, mn, me = missing_bbox
+        fs, fw, fn, fe = frame_bbox
+        eps = 1e-10
+        return (ms <= fs + eps and mw <= fw + eps and
+                mn >= fn - eps and me >= fe - eps)
 
     @staticmethod
     def _atomic_write_gdf(gdf, path):
@@ -471,10 +620,11 @@ class OsmiumCLIFetcher:
         # 1) 全框缓存快路径（与 Phase 1 全框缓存兼容）
         project_tmp = os.path.join(os.path.dirname(__file__), '..', '..', '..', 'tmp')
         os.makedirs(project_tmp, exist_ok=True)
+        cache_tag = self._CACHE_NAMESPACES.get(tag_type, tag_type)
         full_path = os.path.join(
             project_tmp,
-            f"osmium_{tag_type}_{fs:.4f}_{fw:.4f}_{fn:.4f}_{fe:.4f}.geojson")
-        gdf = self._try_read_geojson_cache(full_path)
+            f"osmium_{cache_tag}_{fs:.4f}_{fw:.4f}_{fn:.4f}_{fe:.4f}.geojson")
+        gdf = self._try_read_geojson_cache(full_path, tag_type)
         if gdf is not None:
             print(f"  [CLI Pipeline] Using cached GeoJSON (full-frame): {full_path}")
             if len(gdf) == 0:
@@ -483,19 +633,68 @@ class OsmiumCLIFetcher:
             print(f"  [CLI Pipeline] Loaded {len(gdf)} features from cache\n")
             return self._enrich_building_heights(gdf, tag_type, fs, fw, fn, fe)
 
-        # 2) 瓦片路径
+        # 2) 瓦片路径。先只看文件是否存在，不立刻把所有 GeoJSON 读进
+        # 内存。巴黎等高密城市的单瓦片可达数百 MB；若大部分瓦片缺失，
+        # 后面本来就要做一次近似整框提取，提前加载旧瓦片会造成数倍峰值。
         ix0, iy0, ix1, iy1 = tile_range(fs, fw, fn, fe, step)
-        frames, missing = [], []
+        cached_paths, missing = [], []
         for iy in range(iy0, iy1 + 1):
             for ix in range(ix0, ix1 + 1):
                 tp = self._tile_cache_path(tag_type, ix, iy)
-                tgdf = self._try_read_geojson_cache(tp)
-                if tgdf is not None:
-                    frames.append(tgdf)
-                    print(f"  [Tile Cache] HIT {tag_type} tile ({ix},{iy}): "
-                          f"{len(tgdf)} features")
+                if os.path.exists(tp) and os.path.getsize(tp) > 0:
+                    cached_paths.append((ix, iy, tp))
                 else:
                     missing.append((ix, iy, tp))
+
+        total_tiles = len(cached_paths) + len(missing)
+        if cached_paths and missing:
+            buf = self._TILE_BUFFER_DEG
+            ms = min(tile_bbox(ix, iy, step)[0] for ix, iy, _ in missing) - buf
+            mw = min(tile_bbox(ix, iy, step)[1] for ix, iy, _ in missing) - buf
+            mn = max(tile_bbox(ix, iy, step)[2] for ix, iy, _ in missing) + buf
+            me = max(tile_bbox(ix, iy, step)[3] for ix, iy, _ in missing) + buf
+            if self._should_refresh_full_frame(
+                    len(missing), total_tiles, (ms, mw, mn, me),
+                    (fs, fw, fn, fe)):
+                print(f"  [Tile Cache] {tag_type}: {len(missing)}/{total_tiles} "
+                      "tiles missing; full-frame refresh avoids duplicate RSS")
+                tmp_out = full_path + f".tmp{os.getpid()}"
+                try:
+                    ok = self._run_osmium_pipeline(
+                        pbf_file, tag_type, fs, fw, fn, fe, tmp_out)
+                    if ok:
+                        os.replace(tmp_out, full_path)
+                    elif os.path.exists(tmp_out):
+                        os.remove(tmp_out)
+                except Exception:
+                    if os.path.exists(tmp_out):
+                        os.remove(tmp_out)
+                    raise
+                if not ok:
+                    raise RuntimeError(
+                        f"osmium {tag_type} full-frame refresh failed; "
+                        "refusing to cache a false empty result")
+                gdf = self._prune_cache_columns(
+                    gpd.read_file(full_path,
+                                  columns=list(self._CACHE_COLUMNS)),
+                    tag_type)
+                self._split_to_tiles(gdf, tag_type,
+                                     ix0, iy0, ix1, iy1, step)
+                print(f"  [Tile Cache] {tag_type}: {len(gdf)} features, "
+                      "full-frame refresh split done\n")
+                return self._enrich_building_heights(
+                    gdf, tag_type, fs, fw, fn, fe)
+
+        # Only now load reusable tiles. Corrupt files are downgraded to misses.
+        frames = []
+        for ix, iy, tp in cached_paths:
+            tgdf = self._try_read_geojson_cache(tp, tag_type)
+            if tgdf is not None:
+                frames.append(tgdf)
+                print(f"  [Tile Cache] HIT {tag_type} tile ({ix},{iy}): "
+                      f"{len(tgdf)} features")
+            else:
+                missing.append((ix, iy, tp))
 
         if frames and not missing:
             merged = pd.concat(frames, ignore_index=True) \
@@ -523,8 +722,12 @@ class OsmiumCLIFetcher:
                     os.remove(tmp_out)
                 raise
             if not ok:
-                return gpd.GeoDataFrame()
-            gdf = gpd.read_file(full_path)
+                raise RuntimeError(
+                    f"osmium {tag_type} cold-frame extract failed; "
+                    "refusing to cache a false empty result")
+            gdf = self._prune_cache_columns(
+                gpd.read_file(full_path, columns=list(self._CACHE_COLUMNS)),
+                tag_type)
             self._split_to_tiles(gdf, tag_type, ix0, iy0, ix1, iy1, step)
             print(f"  [Tile Cache] {tag_type}: {len(gdf)} features, "
                   f"split into tiles done\n")
@@ -546,23 +749,29 @@ class OsmiumCLIFetcher:
             try:
                 ok = self._run_osmium_pipeline(
                     pbf_file, tag_type, us, uw, un, ue, tmp_out)
-                if ok:
-                    mgdf = gpd.read_file(tmp_out)
-                    # 按瓦片拆分缓存（仅覆盖缺失瓦片，不碰已有文件）；
-                    # 跨界要素由合并框完整提取，无需 buffer 重叠。
-                    from shapely.geometry import box
-                    for ix, iy, tp in missing:
-                        ts, tw, tn, te = tile_bbox(ix, iy, step)
-                        if len(mgdf) > 0:
-                            mask = mgdf.geometry.intersects(
-                                box(tw, ts, te, tn))
-                            part = mgdf[mask]
-                        else:
-                            part = mgdf
-                        self._atomic_write_gdf(part, tp)
-                        frames.append(part)
-                        print(f"  [Tile Cache] MISS->split {tag_type} tile "
-                              f"({ix},{iy}): {len(part)} features")
+                if not ok:
+                    raise RuntimeError(
+                        f"osmium {tag_type} merged tile extract failed; "
+                        "refusing to cache a false empty result")
+                mgdf = self._prune_cache_columns(
+                    gpd.read_file(tmp_out,
+                                  columns=list(self._CACHE_COLUMNS)),
+                    tag_type)
+                # 按瓦片拆分缓存（仅覆盖缺失瓦片，不碰已有文件）；
+                # 跨界要素由合并框完整提取，无需 buffer 重叠。
+                from shapely.geometry import box
+                for ix, iy, tp in missing:
+                    ts, tw, tn, te = tile_bbox(ix, iy, step)
+                    if len(mgdf) > 0:
+                        mask = mgdf.geometry.intersects(
+                            box(tw, ts, te, tn))
+                        part = mgdf[mask]
+                    else:
+                        part = mgdf
+                    self._atomic_write_gdf(part, tp)
+                    frames.append(part)
+                    print(f"  [Tile Cache] MISS->split {tag_type} tile "
+                          f"({ix},{iy}): {len(part)} features")
             finally:
                 if os.path.exists(tmp_out):
                     os.remove(tmp_out)
@@ -586,7 +795,11 @@ class OsmiumCLIFetcher:
                 print(f"  [Tile Cache] MISS->fetched {tag_type} tile "
                       f"({ix},{iy}): {len(tgdf)} features")
             else:
-                logger.warning(f"瓦片 ({ix},{iy}) 提取失败，跳过")
+                if os.path.exists(tmp_out):
+                    os.remove(tmp_out)
+                raise RuntimeError(
+                    f"osmium {tag_type} tile ({ix},{iy}) extract failed; "
+                    "refusing to cache a false empty result")
         merged = pd.concat(frames, ignore_index=True) \
             if len(frames) > 1 else frames[0]
         merged = self._dedupe_features(merged)
@@ -634,19 +847,19 @@ class OsmiumCLIFetcher:
         else:
             flags = 0
 
-        osmium_path = self._get_tool_path('osmium')
+        osmium_command = self._get_osmium_command()
 
         # 判断是否使用 relation-first 管线
         use_relation_first = tag_type in self.RELATION_FIRST_TYPES
 
         if use_relation_first:
             return self._run_relation_first_pipeline(
-                osmium_path, pbf_file, tag_type, south, west, north, east,
+                osmium_command, pbf_file, tag_type, south, west, north, east,
                 output_path, temp_dir, base_name, flags
             )
         else:
             return self._run_standard_pipeline(
-                osmium_path, pbf_file, tag_type, south, west, north, east,
+                osmium_command, pbf_file, tag_type, south, west, north, east,
                 output_path, temp_dir, base_name, flags
             )
 
@@ -701,7 +914,7 @@ class OsmiumCLIFetcher:
         return True
 
     def _run_standard_pipeline(
-        self, osmium_path, pbf_file, tag_type, south, west, north, east,
+        self, osmium_command, pbf_file, tag_type, south, west, north, east,
         output_path, temp_dir, base_name, flags
     ) -> bool:
         """标准管线：extract → tags-filter → export → (ogr2ogr clip for water)"""
@@ -714,9 +927,10 @@ class OsmiumCLIFetcher:
         # Step 1: bbox 裁剪（水体用 -s smart 保留跨 bbox 的完整 way/relation）
         area_pbf = os.path.join(temp_dir, f"{base_name}_area.pbf")
 
+        osmium_label = ' '.join(osmium_command)
         cmd1 = [
-            osmium_path, 'extract',
-            '-b', bbox_str,
+            *osmium_command, 'extract',
+            _bbox_option(west, south, east, north),
         ]
         if is_water:
             cmd1.extend(['-s', 'smart'])
@@ -727,9 +941,9 @@ class OsmiumCLIFetcher:
         ])
 
         smart_label = ' -s smart' if is_water else ''
-        logger.info(f"Step 1: {osmium_path} extract -b {bbox_str}{smart_label}")
+        logger.info(f"Step 1: {osmium_label} extract -b {bbox_str}{smart_label}")
         print(f"  [Step 1/{n_steps}] osmium extract (clipping area){' (smart mode)' if is_water else ''}...")
-        print(f"           Command: osmium extract -b {bbox_str}{smart_label} {pbf_file} -o {area_pbf} --overwrite")
+        print(f"           Command: {osmium_label} extract -b {bbox_str}{smart_label} {pbf_file} -o {area_pbf} --overwrite")
         t1 = time.time()
         result1 = None
         for attempt in range(3):
@@ -760,16 +974,16 @@ class OsmiumCLIFetcher:
             return False
 
         cmd2 = [
-            osmium_path, 'tags-filter',
+            *osmium_command, 'tags-filter',
             area_pbf,
         ] + filter_expr.split() + [
             '-o', filtered_pbf,
             '--overwrite'
         ]
 
-        logger.info(f"Step 2: {osmium_path} tags-filter {filter_expr}")
+        logger.info(f"Step 2: {osmium_label} tags-filter {filter_expr}")
         print(f"  [Step 2/{n_steps}] osmium tags-filter (filtering {tag_type} features)...")
-        print(f"           Command: osmium tags-filter {area_pbf} {filter_expr} -o {filtered_pbf} --overwrite")
+        print(f"           Command: {osmium_label} tags-filter {area_pbf} {filter_expr} -o {filtered_pbf} --overwrite")
         t2 = time.time()
         result2 = subprocess.run(cmd2, capture_output=True, timeout=300, creationflags=flags)
         elapsed2 = time.time() - t2
@@ -794,18 +1008,25 @@ class OsmiumCLIFetcher:
             raw_geojson = output_path
 
         cmd3 = [
-            osmium_path, 'export',
+            *osmium_command, 'export',
             filtered_pbf,
             '-o', raw_geojson,
             '-f', 'geojson',
             '--overwrite'
         ]
 
-        logger.info(f"Step 3: {osmium_path} export -f geojson")
+        logger.info(f"Step 3: {osmium_label} export -f geojson")
         print(f"  [Step 3/{n_steps}] osmium export (converting to GeoJSON)...")
-        print(f"           Command: osmium export {filtered_pbf} -o {raw_geojson} -f geojson --overwrite")
+        print(f"           Command: {osmium_label} export {filtered_pbf} -o {raw_geojson} -f geojson --overwrite")
         t3 = time.time()
-        result3 = subprocess.run(cmd3, capture_output=True, timeout=120, creationflags=flags)
+        # The portable Python-backed osmium fallback is much slower than the
+        # native C++ tool on dense extracts. Scale the export budget with the
+        # filtered PBF size instead of killing a healthy export at 120 seconds.
+        export_timeout = _export_timeout_seconds(
+            filtered_size, osmium_command)
+        result3 = subprocess.run(
+            cmd3, capture_output=True, timeout=export_timeout,
+            creationflags=flags)
         elapsed3 = time.time() - t3
 
         if result3.returncode != 0:
@@ -891,7 +1112,7 @@ class OsmiumCLIFetcher:
         return True
 
     def _run_relation_first_pipeline(
-        self, osmium_path, pbf_file, tag_type, south, west, north, east,
+        self, osmium_command, pbf_file, tag_type, south, west, north, east,
         output_path, temp_dir, base_name, flags
     ) -> bool:
         """Relation-first 管线：tags-filter → export → ogr2ogr clip
@@ -909,16 +1130,17 @@ class OsmiumCLIFetcher:
 
         # Step 1a: extract 裁剪区域（避免对完整国家 PBF 做 tags-filter 触发 zlib buffer error）
         area_pbf = os.path.join(temp_dir, f"{base_name}_{tag_type}_area.pbf")
+        osmium_label = ' '.join(osmium_command)
         cmd_extract = [
-            osmium_path, 'extract',
-            '-b', bbox_str,
+            *osmium_command, 'extract',
+            _bbox_option(west, south, east, north),
             '-s', 'smart',
             pbf_file,
             '-o', area_pbf,
             '--overwrite'
         ]
 
-        logger.info(f"Step 1a: {osmium_path} extract -b {bbox_str}")
+        logger.info(f"Step 1a: {osmium_label} extract -b {bbox_str}")
         print(f"  [Step 1/3] osmium extract → tags-filter (extract area then filter {tag_type})...")
         print(f"           Extract: osmium extract -b {bbox_str} -s smart {pbf_file}")
         t1 = time.time()
@@ -944,7 +1166,7 @@ class OsmiumCLIFetcher:
         # Step 1b: tags-filter 在裁切后的小文件上（不会触发 buffer error）
         filtered_pbf = os.path.join(temp_dir, f"{base_name}_{tag_type}_full.pbf")
         cmd1 = [
-            osmium_path, 'tags-filter',
+            *osmium_command, 'tags-filter',
             area_pbf,
         ] + filter_expr.split() + [
             '-o', filtered_pbf,
@@ -972,16 +1194,16 @@ class OsmiumCLIFetcher:
         full_geojson = os.path.join(temp_dir, f"{base_name}_{tag_type}_full.geojson")
 
         cmd2 = [
-            osmium_path, 'export',
+            *osmium_command, 'export',
             filtered_pbf,
             '-o', full_geojson,
             '-f', 'geojson',
             '--overwrite'
         ]
 
-        logger.info(f"Step 2: {osmium_path} export -f geojson")
+        logger.info(f"Step 2: {osmium_label} export -f geojson")
         print(f"  [Step 2/3] osmium export (converting to GeoJSON)...")
-        print(f"           Command: osmium export {filtered_pbf} -o {full_geojson} -f geojson --overwrite")
+        print(f"           Command: {osmium_label} export {filtered_pbf} -o {full_geojson} -f geojson --overwrite")
         t2 = time.time()
         result2 = subprocess.run(cmd2, capture_output=True, timeout=120, creationflags=flags)
         elapsed2 = time.time() - t2
@@ -1093,8 +1315,8 @@ def sample_building_density(
     """
     import re, shutil, time as _time
     fetcher = get_cli_fetcher()
-    osmium_path = fetcher._get_tool_path('osmium')
-    if not osmium_path:
+    osmium_command = fetcher._get_osmium_command()
+    if not fetcher.osmium_available:
         return {'count_est': 0, 'area_km2': 0, 'density': 0, 'should_filter': False}
 
     t0 = _time.time()
@@ -1107,19 +1329,19 @@ def sample_building_density(
     try:
         # Step 1: osmium extract (bbox clip)
         subprocess.run([
-            osmium_path, 'extract',
-            '-b', f'{west},{south},{east},{north}', '-s', 'smart',
+            *osmium_command, 'extract',
+            _bbox_option(west, south, east, north), '-s', 'smart',
             pbf_file, '-o', area_pbf, '--overwrite'
         ], capture_output=True, timeout=120, check=True, creationflags=flags)
         # Step 2: osmium tags-filter (building only)
         subprocess.run([
-            osmium_path, 'tags-filter',
+            *osmium_command, 'tags-filter',
             area_pbf, 'nwr/building',
             '-o', bldg_pbf, '--overwrite'
         ], capture_output=True, timeout=60, check=True, creationflags=flags)
         # Step 3: osmium fileinfo -e (text format) → parse "Number of ways"
         info = subprocess.run([
-            osmium_path, 'fileinfo', '-e', bldg_pbf
+            *osmium_command, 'fileinfo', '-e', bldg_pbf
         ], capture_output=True, text=True, timeout=30, creationflags=flags)
         if info.returncode == 0:
             # Parse "Number of ways: 36118" from text output

@@ -1,0 +1,30 @@
+{
+  "source": "cloud-data /root/map-cache/pbf_cache",
+  "verified_at": "2026-08-22",
+  "files": {
+    "argentina-latest.osm.pbf": 419235157,
+    "beijing-latest.osm.pbf": 36060216,
+    "berlin-latest.osm.pbf": 98117813,
+    "cataluna-latest.osm.pbf": 263810852,
+    "centro-latest.osm.pbf": 378223877,
+    "egypt-latest.osm.pbf": 176429141,
+    "great-britain-latest.osm.pbf": 2130967799,
+    "guangdong-latest.osm.pbf": 165670572,
+    "hong-kong-latest.osm.pbf": 37067858,
+    "ile-de-france-latest.osm.pbf": 333674613,
+    "illinois-latest.osm.pbf": 350897349,
+    "jiangsu-latest.osm.pbf": 76671622,
+    "kanto-latest.osm.pbf": 468131030,
+    "madrid-latest.osm.pbf": 83405405,
+    "malaysia-singapore-brunei-latest.osm.pbf": 245981209,
+    "mexico-latest.osm.pbf": 626253207,
+    "new-south-wales-latest.osm.pbf": 261968040,
+    "new-york-latest.osm.pbf": 490825849,
+    "nord-ovest-latest.osm.pbf": 579996203,
+    "shanghai-latest.osm.pbf": 25393171,
+    "south-africa-latest.osm.pbf": 448087887,
+    "south-korea-latest.osm.pbf": 278884769,
+    "victoria-latest.osm.pbf": 234548400,
+    "zhejiang-latest.osm.pbf": 88401482
+  }
+}
