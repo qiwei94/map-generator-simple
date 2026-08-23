@@ -317,24 +317,45 @@ P2 水体构图第二、三轮实测（同一北京 25 km bbox）进一步确认
 .venv/bin/python generate_city_legacy.py \
   --bbox 39.7911535,116.2610224,40.0172465,116.5537776 \
   --pbf pbf_cache/beijing-latest.osm.pbf \
-  --city identity_beijing_25km_formal_v4 --review-png --auto-params \
+  --city identity_beijing_25km_formal_v5 --review-png --auto-params \
   --params-json data/print_profiles/city_identity_25km_classic.json \
   --no-cache --no-snap
 
 .venv/bin/python tools/validate_3mf.py \
-  output/identity_beijing_25km_formal_v4/\
-full_identity_beijing_25km_formal_v4_0823_2341.3mf --json
+  output/identity_beijing_25km_formal_v5/\
+full_identity_beijing_25km_formal_v5_0823_2350.3mf --json
 ```
 
-- 正式文件 70,320,284 bytes（67.06 MiB），SHA-256
-  `ccb3c523508e866b061e7fd9b4ec9d036586e0fdcbc1cc7512e817e89e353ed8`；
+- 正式文件 70,320,345 bytes（67.06 MiB），SHA-256
+  `d9bb88f707b4a898fcdc8a5e730e1608df94e96fc1eed13b6de687d0c12a3cf1`；
 - `design_spec.json` 与 3MF 同目录，记录 53,715 → 34,572 → 25,135 → 671
   的道路 source / topology / structural / visible 证据和完整 water roles；
 - terrain 100,000 faces、buildings 1,590,720、roads 14,688、water 12、
   vegetation 182,280，所有必需图层非零；
 - 项目验证器 V1–V13 全部通过，`passed=true`、`strict_passed=true`、
-  0 errors、0 warnings；总生成耗时 171.4 秒。该耗时仅代表当前 M1 Mac 的这次
+  0 errors、0 warnings；总生成耗时 174.5 秒。该耗时仅代表当前 M1 Mac 的这次
   实测，不外推到 Linux 云机或其他 Mac。
+
+严格验收仍有一个必须公开的既有限制：legacy 正式 builder 当前把水体导出为
+12 faces 的全幅 E3 平底板，日志明确显示 `18 WL + 15 WO skipped`；V8/V9 验证的是
+底板厚度和侧壁，不证明 WL/WO 在地形顶面实际可见。因此上述 0/0 能证明文件结构、
+材料映射和主要 mesh 约束合格，不能证明正式 3MF 的水面视觉与 draft GLB 完全一致。
+本分支已统一 PNG/GLB 的选择输入并把 WL/WO 证据写进 DesignSpec，但不在没有新的
+地形开孔方案验证前擅自恢复会损伤地形的全局 Manifold 水体布尔；该项必须在默认
+升级前单独解决。
+
+上海与芝加哥阻断场景也已使用同一策略完成 25 km draft 验收：
+
+| 城市 | 水体走廊 | 可见水面（过滤后） | 可见道路 | 纯黑占比 | ≥25 px 黑块 | draft GLB | 视觉结论 |
+|---|---:|---:|---:|---:|---:|---:|---|
+| 上海 | 294 candidates → 1 line | 26 WL + 16 WO | 1,481 | 3.548% → 2.821% | 132 → 65 | 9.53 MB | 黄浦江 S 弯与两岸分区保留，细水系不再主导画面 |
+| 芝加哥 | 74 candidates → 0 lines | 23 WL + 5 WO | 2,053 | 8.809% → 8.649% | 85 → 65 | 30.90 MB | 密歇根湖岸完整；黑色占比主要来自真实大湖，不为追指标削湖 |
+
+上海运行在 Intel Mac，preprocess 163.3 秒、GLB 52.7 秒；911.4 秒总时长还包含
+该节点本次数据/进程阶段，不归因于 1.1 秒的水体角色选择，也不外推到其他设备。
+芝加哥运行在 Windows WSL2，总时长 1,445.0 秒；758,876 个建筑读取 750.0 秒、
+preprocess 555.0 秒，峰值约 19 GiB（25 GiB 配额），因此该节点只适合串行跑一个
+同级 25 km 高密城市。两个节点的 GLB postcheck 均确认全部图层落地。
 
 ### P3：视觉中心与语义 Z
 
