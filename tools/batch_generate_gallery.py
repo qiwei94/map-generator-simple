@@ -36,6 +36,7 @@ if hasattr(sys.stdout, "reconfigure"):
 from PIL import Image, ImageDraw, ImageFont
 
 from aesthetic.config import PARAM_SPACE
+from aesthetic.city_signature import analyze_city_signature
 from aesthetic.metrics import compute_metrics
 from aesthetic.presets import get_preset, list_presets
 from aesthetic.rerun_harness import CityHarness
@@ -246,6 +247,19 @@ def generate_city_gallery(city: str, styles: list, out_root: str,
     framing = analyze_water_framing(
         harness.ctx.get("water"), harness.ctx["bbox_local"],
         harness.profile.water_ratio)
+    city_signature = analyze_city_signature(
+        harness.ctx.get("roads"), harness.ctx.get("buildings"),
+        harness.ctx["bbox_local"], harness.profile, framing, scene_type)
+    topology = city_signature["road_topology"]
+    if max(topology["ring_score"], topology["radial_score"],
+           topology["grid_score"] * 0.85) >= 0.45:
+        framing["recommended_size_km"] = 25
+        framing["reason"] = (
+            "检测到环状、放射状或网格化都市骨架，25 km 更能保留完整城市特征")
+    framing["city_signature_score"] = city_signature["overall"]
+    framing["ring_road_score"] = topology["ring_score"]
+    framing["radial_road_score"] = topology["radial_score"]
+    framing["grid_road_score"] = topology["grid_score"]
     variants = variants_for_scene(scene_type)
     print(f"  [gallery] scene_type={scene_type} "
           f"(prototype={preset.prototype}, "
@@ -259,6 +273,7 @@ def generate_city_gallery(city: str, styles: list, out_root: str,
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "profile": harness.profile.to_dict(),
         "framing": framing,
+        "city_signature": city_signature,
         "seed_params": seed,
         "styles": {},
     }
@@ -289,6 +304,7 @@ def generate_city_gallery(city: str, styles: list, out_root: str,
             "label": spec["label"], "desc": spec["desc"],
             "params": params, "score": score,
             "metrics": result["metrics"],
+            "details": result["details"],
             "renders": {"topdown": os.path.basename(bundle["topdown"]),
                         "height": os.path.basename(bundle["height"])},
             "wall_s": round(wall, 1),
