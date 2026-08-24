@@ -73,7 +73,7 @@ PRESETS = {
 # CLI 参数
 # ---------------------------------------------------------------------------
 
-def parse_args():
+def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description="统一城市 3MF 模型生成 (osmium CLI pipeline)"
     )
@@ -178,8 +178,17 @@ def parse_args():
         '--no-cache', action='store_true', default=False,
         help='禁用 preprocess 阶段缓存（强制重算）'
     )
+    parser.add_argument(
+        '--amap-salience', choices=('off', 'cache', 'network'),
+        default='off',
+        help=(
+            '高德道路/水体视觉显著性约束：off=关闭（默认），'
+            'cache=仅使用已有缓存，network=缓存缺失时下载；'
+            '仅在中国大陆适用，不替换 OSM 几何'
+        ),
+    )
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     # 合并 preset + 显式参数
     if args.preset:
@@ -229,6 +238,31 @@ def _load_printer_profile(path):
         return PrinterProfile(**payload)
     except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
         raise SystemExit(f"invalid --printer-profile-json: {exc}")
+
+
+def _load_amap_salience_guide(mode, bbox_wgs84, bbox_local):
+    """Resolve optional read-only AMap evidence without making it mandatory."""
+    if mode == "off":
+        return None, {
+            "status": "disabled",
+            "reason": "--amap-salience=off",
+        }
+    from aesthetic.amap_salience import build_amap_salience_guide
+    return build_amap_salience_guide(
+        bbox_wgs84,
+        bbox_local,
+        allow_network=(mode == "network"),
+    )
+
+
+def _amap_salience_cache_fingerprint(mode, evidence):
+    """Keep baseline/guided preprocess objects in distinct cache entries."""
+    return {
+        "mode": str(mode),
+        "status": str(evidence.get("status", "unknown")),
+        "palette_version": evidence.get("palette_version"),
+        "bbox_wgs84": evidence.get("bbox_wgs84"),
+    }
 
 
 # =====================================================================
@@ -868,6 +902,14 @@ def main():
         _hotspot_relax = (auto_resolved.building_v2_hotspot_relax
                           if auto_resolved is not None
                           else BUILDING_V2_HOTSPOT_RELAX)
+        _amap_guide, _amap_evidence = _load_amap_salience_guide(
+            cli_args.amap_salience,
+            (fs, fw, fn, fe),
+            _snap_bbox_local,
+        )
+        print("[preprocess] amap_salience: "
+              f"{_amap_evidence.get('status')} "
+              f"({_amap_evidence.get('reason', 'reference ready')})")
 
         _auto_fp = "none" if auto_resolved is None else json.dumps({
             "road_tier": auto_resolved.building_v2_road_tier,
@@ -905,6 +947,7 @@ def main():
                 utm_crs=utm_crs,
                 origin=_snap_origin,
                 printer_profile=printer_profile,
+                amap_salience_guide=_amap_guide,
                 **_preprocess_overrides,
             )
 
@@ -919,6 +962,8 @@ def main():
                 "block_base": ENABLE_BLOCK_BASE,
                 "merge": MERGE_BLOCK_LAYERS,
                 "printer_profile": printer_profile.to_dict(),
+                "amap_salience": _amap_salience_cache_fingerprint(
+                    cli_args.amap_salience, _amap_evidence),
             },
             compute_fn=_compute_layers_snap,
             label="preprocess(snap)",
@@ -929,6 +974,14 @@ def main():
         _dy = _snap_origin[1] - origin[1]
         layers = _transform_layers_to_exact(layers, _dx, _dy, bbox_local)
     else:
+        _amap_guide, _amap_evidence = _load_amap_salience_guide(
+            cli_args.amap_salience,
+            (south, west, north, east),
+            bbox_local,
+        )
+        print("[preprocess] amap_salience: "
+              f"{_amap_evidence.get('status')} "
+              f"({_amap_evidence.get('reason', 'reference ready')})")
         layers = preprocess_layers(
             buildings_gdf=buildings_gdf,
             roads_gdf=roads_gdf,
@@ -948,6 +1001,7 @@ def main():
             utm_crs=utm_crs,
             origin=origin,
             printer_profile=printer_profile,
+            amap_salience_guide=_amap_guide,
             **_preprocess_overrides,
         )
     print(f"  {layers.summary()}")

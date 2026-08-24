@@ -107,6 +107,19 @@ AMAP_WATER_AUTO_FETCH=0 python generate_city_legacy.py ...
 该开关仍会使用已有 `cache/amap_water/` 结果，只禁止实时下载；需要补强的区域应
 单独预热缓存后再生成。OSM 水体和自适应河宽回退始终保留。
 
+中国大陆区域还可实验性地把高德 style-7 无标注底图作为道路/水体的视觉显著性
+mask。它只在既有喷嘴与墨量预算内重排**完整的 OSM 道路/水体组**，不生成高德
+几何，也不控制 mesh、Z 或布尔运算。默认关闭；`cache` 绝不联网，`network` 仅在
+缓存缺失时获取参考瓦片：
+
+```bash
+python generate_city_legacy.py ... --amap-salience cache
+python generate_city_legacy.py ... --amap-salience network
+```
+
+中国大陆以外会自动回退到 OSM-only。该开关仍处于代表城市验证阶段，不是 Web
+生产默认值。
+
 ### 3. 启动 Studio
 ```bash
 python webapp/server.py            # 默认 8787 端口

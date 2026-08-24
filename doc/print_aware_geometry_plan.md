@@ -478,6 +478,37 @@ JSON 保存双方水面面积、互相覆盖率、差异面积、紧凑差异与
 对应单元测试覆盖紧凑漏水候选、线状水道模糊匹配和第二来源不可用三条路径；完整
 非慢速回归为 `473 passed, 2 skipped, 11 deselected`。
 
+P2 高德视觉显著性 mask（2026-08-24）：几何差分只能回答“两个来源哪里不同”，
+不能回答用户真正关心的“高德上哪些连续道路和水体最醒目”。因此新增
+`aesthetic/amap_salience.py`，从 style-7 无标注瓦片稳定色板提取三档道路和水体
+mask，并把它作为只读构图证据接入现有 OSM 选择器：
+
+- WGS84 四角先转 GCJ-02，再按 WebMercator 精确裁切，不接受约 500 m 偏移；
+- 道路只在现有硬墨量预算内重排完整 OSM group，不增加配额、不放粗、不拼接碎片；
+- 水体先保留 OSM 河宽、riverbank 等原生证据，高德只确认既有 OSM 线或填剩余名额；
+- 不把高德像素矢量化后写进 mesh，不让其控制 Z、全局高度或布尔运算；
+- 中国大陆以外明确 `not_applicable`，自动使用 OSM-only。
+
+最初实验曾给高德单独增加 0.8% 道路墨量，虽提高北京高速召回，却压低次干路召回，
+已判定失败并删除。当前“同预算重排”选择级实测如下（召回含 5 px 对齐容差）：
+
+| 城市 / 策略 | 主路 | 次干路 | 背景路 | 水体 |
+|---|---:|---:|---:|---:|
+| 北京 OSM-only | 48.88% | 42.49% | 25.03% | 24.33% |
+| 北京 AMap guide | 50.55% | 45.09% | 28.18% | 24.33% |
+| 上海 OSM-only | 15.01% | 35.32% | 25.05% | 89.58% |
+| 上海 AMap guide | 15.74% | 38.33% | 18.77% | 90.00% |
+
+上海说明“更像标准地图”和“保留更多背景密度”不是同一目标：主次结构与水体提升，
+背景路召回下降 6.28 个百分点。因此该能力通过
+`generate_city_legacy.py --amap-salience {off,cache,network}` 显式启用，默认 `off`，
+尚不升级 Web 默认值。`cache` 模式不联网；`network` 仅在参考缓存缺失时下载。
+选择级复现实验入口为 `tools/diagnose_amap_guided_selection.py`，图与 JSON 位于
+`output/amap_guided_beijing_25km_native_first/` 和
+`output/amap_guided_shanghai_25km_native_first/`。诊断不构建 mesh，因此不能代替
+3MF 水密、材料、喷嘴与验证器验收。对应完整非慢速回归为
+`484 passed, 2 skipped, 11 deselected`。
+
 ### P3：视觉中心与语义 Z
 
 - 实现 `FocusSpec` 候选与确定性打分；

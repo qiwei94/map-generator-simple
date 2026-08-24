@@ -300,3 +300,41 @@ def test_sparse_frame_keeps_one_complete_corridor_under_global_ink_limit():
     assert budget["class_budgets"]["primary"]["selected_groups"] == 0
     assert budget["empty_selection_fallback"]["identity"] == "name:only avenue"
     assert budget["selected_estimated_ink_ratio"] <= 0.055
+
+
+def test_visual_salience_promotes_complete_osm_identity_not_fragments():
+    class Guide:
+        version = "synthetic-salience-v1"
+
+        @staticmethod
+        def road_support(geometry):
+            supported = geometry.centroid.y > 1200
+            return {
+                "covered_fraction": 0.95 if supported else 0.0,
+                "weighted_salience": 0.90 if supported else 0.0,
+            }
+
+    roads = gpd.GeoDataFrame({
+        "highway": ["secondary"] * 8,
+        "name": [f"Corridor {letter}" for letter in "ABCDEFGH"],
+        "geometry": [
+            LineString([(1000, 1300 if index == 3 else 1000),
+                        (6000, 1300 if index == 3 else 1000)])
+            for index in range(8)
+        ],
+    }, geometry="geometry", crs="EPSG:3857")
+
+    baseline = select_road_roles(
+        roads, topology_tier=4, nozzle_real_m=50.0,
+        bbox_local=(0, 0, 10000, 10000), scale_mm_per_m=0.01)
+    guided = select_road_roles(
+        roads, topology_tier=4, nozzle_real_m=50.0,
+        bbox_local=(0, 0, 10000, 10000), scale_mm_per_m=0.01,
+        visual_salience_guide=Guide())
+
+    assert "Corridor D" not in set(baseline.visible["name"])
+    assert "Corridor D" in set(guided.visible["name"])
+    evidence = guided.evidence["ink_budget"]["visual_salience"]
+    assert evidence["enabled"] is True
+    assert evidence["selected_identities"] == [
+        "secondary:name:corridor d"]

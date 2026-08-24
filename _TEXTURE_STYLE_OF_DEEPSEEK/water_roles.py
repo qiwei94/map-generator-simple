@@ -23,7 +23,7 @@ from shapely.errors import GEOSException
 from shapely.ops import linemerge, unary_union
 
 
-POLICY_VERSION = "print-water-roles-v4"
+POLICY_VERSION = "print-water-roles-v5"
 
 _LINE_INK_QUOTAS = {
     "river": 0.0060,
@@ -54,6 +54,7 @@ class WaterLineCandidate:
     half_width_m: float
     width_evidence: bool = False
     identity_enclosure: bool = False
+    visual_salience: float = 0.0
 
 
 @dataclass
@@ -351,16 +352,30 @@ def select_visible_water_lines(
         for key, items in groups.items()
     }
     group_ink = {}
+    group_native_width_evidence = {}
     group_has_width_evidence = {}
+    group_visual_salience = {}
     for key, items in groups.items():
         full_width = max(
             nozzle_real_m,
             max(item.half_width_m for item in items) * 2.0,
         )
         group_ink[key] = group_metrics[key]["length_m"] * full_width / frame_area
-        group_has_width_evidence[key] = (
+        group_native_width_evidence[key] = (
             key[0] == "riverbank"
             or any(item.width_evidence for item in items)
+        )
+        total_length = sum(float(item.geometry.length) for item in items)
+        group_visual_salience[key] = (
+            sum(float(item.geometry.length) * float(item.visual_salience)
+                for item in items) / max(total_length, 1.0)
+        )
+        # AMap may confirm that an existing OSM centreline represents a broad,
+        # visually important water corridor.  This is external width evidence,
+        # never replacement geometry.
+        group_has_width_evidence[key] = (
+            group_native_width_evidence[key]
+            or group_visual_salience[key] >= 0.60
         )
 
     fallback_without_surface = False
@@ -423,10 +438,38 @@ def select_visible_water_lines(
 
         class_priority = {"riverbank": 1.35, "river": 1.25, "canal": 1.0,
                           "stream": 0.7}
-        eligible.sort(key=lambda key: (
-            -(group_metrics[key]["score"] * class_priority.get(key[0], 0.5)),
-            key[1],
-        ))
+        def native_rank(key):
+            return (
+                -(group_metrics[key]["score"]
+                  * class_priority.get(key[0], 0.5)),
+                key[1],
+            )
+
+        def visual_rank(key):
+            return (
+                -(group_metrics[key]["score"]
+                  * class_priority.get(key[0], 0.5)
+                  * (1.0 + 1.5 * group_visual_salience[key])),
+                key[1],
+            )
+
+        if fallback_without_surface:
+            eligible.sort(key=visual_rank)
+        else:
+            # Existing OSM width and riverbank evidence is the invariant.
+            # AMap may fill unused corridor slots, but it must never displace
+            # a corridor the native selector would already preserve.
+            native_eligible = sorted(
+                (key for key in eligible
+                 if group_native_width_evidence[key]),
+                key=native_rank,
+            )
+            visual_only_eligible = sorted(
+                (key for key in eligible
+                 if not group_native_width_evidence[key]),
+                key=visual_rank,
+            )
+            eligible = native_eligible + visual_only_eligible
         used = 0.0
         for key in eligible:
             max_corridors = (1 if fallback_without_surface
@@ -476,7 +519,7 @@ def select_visible_water_lines(
 
     return VisibleWaterSelection(output, {
         "policy_version": POLICY_VERSION,
-        "method": "surface_evidence_global_water_budget_v4",
+        "method": "surface_and_optional_salience_water_budget_v5",
         "source_line_segments": len(candidates),
         "candidate_groups": len(groups),
         "selected_groups": len(selected_keys),
@@ -498,5 +541,20 @@ def select_visible_water_lines(
         ],
         "selected_width_evidence_groups": sum(
             1 for key in selected_keys if group_has_width_evidence[key]),
+        "selected_native_width_evidence_groups": sum(
+            1 for key in selected_keys
+            if group_native_width_evidence[key]),
+        "visual_salience": {
+            "candidate_groups": sum(
+                value >= 0.60 for value in group_visual_salience.values()),
+            "selected_groups": sum(
+                group_visual_salience[key] >= 0.60
+                for key in selected_keys),
+            "selected_identities": [
+                f"{key[0]}:{key[1]}"
+                for key in sorted(selected_keys)
+                if group_visual_salience[key] >= 0.60
+            ],
+        },
         "class_budgets": class_evidence,
     })

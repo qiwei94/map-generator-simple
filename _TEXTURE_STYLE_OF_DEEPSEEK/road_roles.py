@@ -26,7 +26,7 @@ from .buildings import ROAD_TIERS
 from .config import ROAD_DEFAULT_WIDTH_M, ROAD_FILTER, ROAD_WIDTHS
 
 
-POLICY_VERSION = "print-road-roles-v5"
+POLICY_VERSION = "print-road-roles-v6"
 
 _WIDTH_FACTORS = {
     "motorway": 1.35,
@@ -53,6 +53,8 @@ _LARGE_CONTEXT_INK_QUOTA = 0.008
 _LARGE_HARD_INK_LIMIT = 0.055
 _CONTEXT_GRID_SIZE = 6
 _PROTECTED_RING_INK_LIMIT = 0.018
+_VISUAL_SALIENCE_MIN_COVERAGE = 0.30
+_VISUAL_SALIENCE_MIN_WEIGHT = 0.20
 
 _NUMBERED_RING_RE = re.compile(
     r"(?:([一二三四五六七八九十\d]+)\s*环|"
@@ -226,6 +228,7 @@ def _apply_large_area_ink_budget(
     road_width_multiplier: float,
     min_colored_strip_mm: float,
     nozzle_real_m: float,
+    visual_salience_guide=None,
 ) -> tuple[gpd.GeoDataFrame, dict[str, Any]]:
     """Select city-scale corridors, then restore only necessary connectors."""
 
@@ -244,6 +247,7 @@ def _apply_large_area_ink_budget(
     scores: dict[tuple[str, str], float] = {}
     position_ratios: dict[int, float] = {}
     group_geometries = {}
+    visual_group_support = {}
     ring_positions: dict[str, set[int]] = {}
     for pos, row in work.iterrows():
         highway = str(row.get("highway") or "")
@@ -294,8 +298,17 @@ def _apply_large_area_ink_budget(
         named_bonus = 1.15 if not key[1].startswith("@") else 1.0
         # Frame-spanning radials and two-axis rings are city identity.  Total
         # length remains the base signal, while geometry breaks name ties.
-        scores[key] = (lengths[key] * named_bonus
-                       * (1.0 + 0.55 * spread + 0.75 * two_axis))
+        base_score = (lengths[key] * named_bonus
+                      * (1.0 + 0.55 * spread + 0.75 * two_axis))
+        if visual_salience_guide is not None:
+            support = visual_salience_guide.road_support(union)
+            visual_group_support[key] = support
+            base_score *= (
+                1.0
+                + 2.0 * float(support.get("weighted_salience", 0.0))
+                + 0.5 * float(support.get("covered_fraction", 0.0))
+            )
+        scores[key] = base_score
 
     selected_positions: set[int] = set()
     protected_ring_evidence = {
@@ -385,6 +398,12 @@ def _apply_large_area_ink_budget(
             if not remaining:
                 continue
             estimated_ratio = sum(position_ratios[pos] for pos in remaining)
+            if visual_salience_guide is not None:
+                current_ratio = sum(
+                    position_ratios.get(pos, 0.0)
+                    for pos in selected_positions)
+                if current_ratio + estimated_ratio > _LARGE_HARD_INK_LIMIT:
+                    continue
             # Do not let the first very long/duplicated corridor bypass its
             # entire class budget.  Continue scanning for a smaller complete
             # identity; otherwise one trunk name can consume the global hard
@@ -578,9 +597,22 @@ def _apply_large_area_ink_budget(
             )
             / frame_area
         )
+    selected_visual_keys = [
+        key for key, support in visual_group_support.items()
+        if (any(pos in selected_positions for pos in groups[key])
+            and not key[1].startswith("@")
+            and float(support.get("covered_fraction", 0.0))
+            >= _VISUAL_SALIENCE_MIN_COVERAGE
+            and float(support.get("weighted_salience", 0.0))
+            >= _VISUAL_SALIENCE_MIN_WEIGHT)
+    ]
+    selected_visual_ratio = sum(
+        position_ratios.get(pos, 0.0)
+        for key in selected_visual_keys for pos in groups[key]
+        if pos in selected_positions)
     return selected, {
         "applied": True,
-        "method": "identity_then_spatial_context_v5",
+        "method": "identity_spatial_context_and_optional_salience_v6",
         "candidate_features_without_links": sum(len(v) for v in groups.values()),
         "selected_features": len(selected),
         "candidate_estimated_ink_ratio": round(all_estimated, 6),
@@ -598,6 +630,30 @@ def _apply_large_area_ink_budget(
         "context_ink_quota_ratio": _LARGE_CONTEXT_INK_QUOTA,
         "hard_ink_limit_ratio": _LARGE_HARD_INK_LIMIT,
         "protected_ring": protected_ring_evidence,
+        "visual_salience": {
+            "enabled": visual_salience_guide is not None,
+            "mode": "rank_complete_osm_groups_within_existing_budgets",
+            "reference_version": (getattr(
+                visual_salience_guide, "version", None)
+                if visual_salience_guide is not None else None),
+            "supported_candidate_groups": sum(
+                1 for support in visual_group_support.values()
+                if (float(support.get("covered_fraction", 0.0))
+                    >= _VISUAL_SALIENCE_MIN_COVERAGE
+                    and float(support.get("weighted_salience", 0.0))
+                    >= _VISUAL_SALIENCE_MIN_WEIGHT)),
+            "selected_groups": len(selected_visual_keys),
+            "selected_features": sum(
+                sum(pos in selected_positions for pos in groups[key])
+                for key in selected_visual_keys),
+            "selected_estimated_ink_ratio": round(
+                selected_visual_ratio, 6),
+            "ink_quota_ratio": None,
+            "selected_identities": [
+                f"{highway}:{identity}"
+                for highway, identity in sorted(selected_visual_keys)
+            ],
+        },
         "empty_selection_fallback": empty_selection_fallback,
         "context_target_units": context_target_total,
         "context_satisfied_before": context_before,
@@ -615,6 +671,7 @@ def select_road_roles(
     scale_mm_per_m: float | None = None,
     road_width_multiplier: float = 2.0,
     min_colored_strip_mm: float = 0.63,
+    visual_salience_guide=None,
 ) -> RoadRoleSelection:
     """Return role-specific GeoDataFrames and auditable candidate counts."""
 
@@ -637,6 +694,7 @@ def select_road_roles(
             road_width_multiplier=road_width_multiplier,
             min_colored_strip_mm=min_colored_strip_mm,
             nozzle_real_m=nozzle_real_m,
+            visual_salience_guide=visual_salience_guide,
         )
 
     fallback = None

@@ -807,6 +807,7 @@ def _extract_WL_WO(
     water_gdf: gpd.GeoDataFrame,
     nozzle_real_m: float,
     bbox_local=None,
+    visual_salience_guide=None,
 ) -> Tuple[
     List[Polygon],
     List[Polygon],
@@ -878,7 +879,14 @@ def _extract_WL_WO(
 
         # LineString / MultiLineString
         elif isinstance(geom, (LineString, MultiLineString)):
-            if not is_water_landmark(row) or not is_exposed_water_line(row):
+            visual_support = (
+                visual_salience_guide.water_support(geom)
+                if visual_salience_guide is not None else {
+                    "covered_fraction": 0.0})
+            externally_salient = (
+                float(visual_support.get("covered_fraction", 0.0)) >= 0.60)
+            if ((not is_water_landmark(row) and not externally_salient)
+                    or not is_exposed_water_line(row)):
                 continue
             lines = geom.geoms if isinstance(geom, MultiLineString) else [geom]
             waterway_type = waterway_kind(row)
@@ -923,6 +931,10 @@ def _extract_WL_WO(
                     half_width_m=float(buffer_width),
                     width_evidence=width_evidence,
                     identity_enclosure=is_identity_water_enclosure(row),
+                    visual_salience=float(
+                        visual_salience_guide.water_support(line).get(
+                            "covered_fraction", 0.0)
+                        if visual_salience_guide is not None else 0.0),
                 ))
 
     if bbox_local is not None:
@@ -1501,6 +1513,7 @@ def preprocess_layers(
     bo_mode_override: Optional[str] = None,
     road_width_multiplier_override: Optional[float] = None,
     printer_profile: Optional[PrinterProfile] = None,
+    amap_salience_guide=None,
 ) -> LayerPolygons:
     """主入口。把 raw OSM gdf 转成 6 类 polygon + roads_lines。
 
@@ -1561,6 +1574,7 @@ def preprocess_layers(
         scale_mm_per_m=scale,
         road_width_multiplier=effective_road_width_multiplier,
         min_colored_strip_mm=effective_printer.min_colored_strip_mm,
+        visual_salience_guide=amap_salience_guide,
     )
     print("[preprocess] road_roles: "
           f"source_lines={road_roles.evidence['source_line_features']}, "
@@ -1612,7 +1626,8 @@ def preprocess_layers(
     # ---- Step 6: WL / WO ----
     t6 = time.time()
     WL_polys, WO_polys, wl_lines_raw, water_role_evidence = _extract_WL_WO(
-        water_gdf, nozzle_real_m, bbox_local=bbox_local)
+        water_gdf, nozzle_real_m, bbox_local=bbox_local,
+        visual_salience_guide=amap_salience_guide)
     print(f"[preprocess] _extract_WL_WO: {time.time() - t6:.1f}s")
 
     # ---- Step 6b: 水体补全 (高德 + 自适应 buffer) ----

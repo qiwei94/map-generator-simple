@@ -138,6 +138,59 @@ def test_surface_water_suppresses_widthless_centrelines_at_city_scale():
     assert selected.evidence["selected_groups"] == 0
 
 
+def test_amap_salience_can_confirm_existing_widthless_osm_river():
+    candidates = [
+        WaterLineCandidate(
+            LineString([(0, 5000), (10000, 5000)]),
+            "river", "name:visible river", 30,
+            visual_salience=0.85),
+        WaterLineCandidate(
+            LineString([(0, 3000), (10000, 3000)]),
+            "river", "name:unsupported river", 30,
+            visual_salience=0.0),
+    ]
+
+    selected = select_visible_water_lines(
+        candidates,
+        bbox_local=(0, 0, 10000, 10000),
+        nozzle_real_m=50.0,
+        visible_surface_ratio=0.01,
+    )
+
+    assert len(selected.lines) == 1
+    assert selected.evidence["visual_salience"]["selected_identities"] == [
+        "river:name:visible river"]
+
+
+def test_amap_salience_fills_slots_without_displacing_native_water_evidence():
+    candidates = [
+        WaterLineCandidate(
+            LineString([(0, 1500), (5000, 1500)]),
+            "river", "name:native river", 30,
+            width_evidence=True),
+    ]
+    candidates.extend(
+        WaterLineCandidate(
+            LineString([(0, y), (10000, y)]),
+            "river", f"name:visual river {index}", 30,
+            visual_salience=0.95)
+        for index, y in enumerate((3000, 5000, 7000))
+    )
+
+    selected = select_visible_water_lines(
+        candidates,
+        bbox_local=(0, 0, 10000, 10000),
+        nozzle_real_m=50.0,
+        visible_surface_ratio=0.01,
+    )
+
+    assert "river:name:native river" in (
+        selected.evidence["selected_group_identities"])
+    assert selected.evidence["selected_native_width_evidence_groups"] == 1
+    assert selected.evidence["selected_groups"] == 2
+    assert selected.evidence["visual_salience"]["selected_groups"] == 1
+
+
 def test_widthless_centreline_is_a_single_fallback_when_surface_is_missing():
     candidates = [
         WaterLineCandidate(
