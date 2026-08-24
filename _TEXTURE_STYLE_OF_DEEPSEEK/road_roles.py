@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
+import re
 from typing import Any
 
 import geopandas as gpd
@@ -25,7 +26,7 @@ from .buildings import ROAD_TIERS
 from .config import ROAD_DEFAULT_WIDTH_M, ROAD_FILTER, ROAD_WIDTHS
 
 
-POLICY_VERSION = "print-road-roles-v4"
+POLICY_VERSION = "print-road-roles-v5"
 
 _WIDTH_FACTORS = {
     "motorway": 1.35,
@@ -48,6 +49,20 @@ _LARGE_INK_QUOTAS = {
     "primary": 0.018,
     "secondary": 0.007,
 }
+_LARGE_CONTEXT_INK_QUOTA = 0.008
+_LARGE_HARD_INK_LIMIT = 0.055
+_CONTEXT_GRID_SIZE = 6
+_PROTECTED_RING_INK_LIMIT = 0.018
+
+_NUMBERED_RING_RE = re.compile(
+    r"(?:([一二三四五六七八九十\d]+)\s*环|"
+    r"\b(\d+(?:st|nd|rd|th)?)\s+ring(?:\s+road)?\b)",
+    re.IGNORECASE,
+)
+_GENERIC_RING_TERMS = (
+    "inner ring", "outer ring", "ring road", "beltway", "orbital",
+    "périphérique", "peripherique", "tangenziale",
+)
 
 
 @dataclass
@@ -145,6 +160,64 @@ def road_width_multiplier_from_layers(layers: Any, fallback: float) -> float:
     return resolved
 
 
+def _sampled_grid_cells(geometry, bbox_local, grid_size: int) -> set[int]:
+    """Return grid cells traversed by a line without using its full bounds.
+
+    Bounds make a diagonal or ring appear to fill every interior cell.  Point
+    samples at under half a cell width retain the actual corridor footprint
+    and keep the context-selection pass deterministic and inexpensive.
+    """
+
+    xmin, ymin, xmax, ymax = (float(value) for value in bbox_local)
+    frame_width = max(xmax - xmin, 1.0)
+    frame_height = max(ymax - ymin, 1.0)
+    sample_step = min(frame_width, frame_height) / grid_size * 0.45
+    if geometry is None or geometry.is_empty:
+        return set()
+    if geometry.geom_type == "LineString":
+        parts = [geometry]
+    elif geometry.geom_type == "MultiLineString":
+        parts = list(geometry.geoms)
+    elif hasattr(geometry, "geoms"):
+        parts = [part for part in geometry.geoms
+                 if part.geom_type == "LineString"]
+    else:
+        parts = []
+
+    cells: set[int] = set()
+    for part in parts:
+        samples = max(1, int(math.ceil(float(part.length) / sample_step)))
+        for index in range(samples + 1):
+            point = part.interpolate(index / samples, normalized=True)
+            gx = int((point.x - xmin) / frame_width * grid_size)
+            gy = int((point.y - ymin) / frame_height * grid_size)
+            gx = min(grid_size - 1, max(0, gx))
+            gy = min(grid_size - 1, max(0, gy))
+            cells.add(gy * grid_size + gx)
+    return cells
+
+
+def ring_corridor_identity(value: Any) -> str:
+    """Collapse directional names of the same semantic urban ring.
+
+    OSM commonly maps one ring as east/west/north/south names and sometimes
+    changes highway class along the route.  A physical identity selector must
+    see one ring, not four unrelated high-scoring roads.
+    """
+
+    if not isinstance(value, str) or not value.strip():
+        return ""
+    normalized = " ".join(value.casefold().split())
+    match = _NUMBERED_RING_RE.search(normalized)
+    if match:
+        number = match.group(1) or match.group(2)
+        return f"numbered-ring:{number}"
+    for term in _GENERIC_RING_TERMS:
+        if term in normalized:
+            return f"named-ring:{term}"
+    return ""
+
+
 def _apply_large_area_ink_budget(
     visible: gpd.GeoDataFrame,
     *,
@@ -169,6 +242,9 @@ def _apply_large_area_ink_budget(
     lengths: dict[tuple[str, str], float] = {}
     widths: dict[tuple[str, str], float] = {}
     scores: dict[tuple[str, str], float] = {}
+    position_ratios: dict[int, float] = {}
+    group_geometries = {}
+    ring_positions: dict[str, set[int]] = {}
     for pos, row in work.iterrows():
         highway = str(row.get("highway") or "")
         # Interchange ramps are useful for routing, but at 15/25 km they turn
@@ -183,6 +259,11 @@ def _apply_large_area_ink_budget(
             continue
         raw_name = row.get("name")
         raw_ref = row.get("ref")
+        raw_name_en = row.get("name:en")
+        ring_identity = (ring_corridor_identity(raw_name)
+                         or ring_corridor_identity(raw_name_en))
+        if ring_identity:
+            ring_positions.setdefault(ring_identity, set()).add(pos)
         if isinstance(raw_name, str) and raw_name.strip():
             identity = f"name:{raw_name.strip().casefold()}"
         elif isinstance(raw_ref, str) and raw_ref.strip():
@@ -192,16 +273,19 @@ def _apply_large_area_ink_budget(
         key = (base, identity)
         groups.setdefault(key, []).append(pos)
         lengths[key] = lengths.get(key, 0.0) + float(geom.length)
-        widths[key] = resolve_printable_road_width_m(
+        width = resolve_printable_road_width_m(
             highway,
             scale_mm_per_m=scale_mm_per_m,
             road_width_multiplier=road_width_multiplier,
             min_colored_strip_mm=min_colored_strip_mm,
         )
+        widths[key] = width
+        position_ratios[pos] = float(geom.length) * width / frame_area
 
     for key, positions in groups.items():
         geoms = [work.iloc[pos].geometry for pos in positions]
         union = unary_union(geoms)
+        group_geometries[key] = union
         gxmin, gymin, gxmax, gymax = union.bounds
         span_x = min(1.0, max(0.0, (gxmax - gxmin) / max(xmax - xmin, 1.0)))
         span_y = min(1.0, max(0.0, (gymax - gymin) / max(ymax - ymin, 1.0)))
@@ -214,17 +298,101 @@ def _apply_large_area_ink_budget(
                        * (1.0 + 0.55 * spread + 0.75 * two_axis))
 
     selected_positions: set[int] = set()
+    protected_ring_evidence = {
+        "selected": False,
+        "candidate_groups": len(ring_positions),
+    }
+
+    # Choose at most one complete inner urban ring before class quotas.  This
+    # prevents directional OSM names or class transitions from punching large
+    # gaps into a defining landmark.  The closest compact two-axis ring wins;
+    # outer frame-edge beltways stay ordinary candidates.
+    protected_candidates = []
+    frame_width = max(xmax - xmin, 1.0)
+    frame_height = max(ymax - ymin, 1.0)
+    frame_center = Point((xmin + xmax) * 0.5, (ymin + ymax) * 0.5)
+    for identity, positions in ring_positions.items():
+        geometries = [work.iloc[pos].geometry for pos in sorted(positions)]
+        union = unary_union(geometries)
+        gxmin, gymin, gxmax, gymax = union.bounds
+        span_x = (gxmax - gxmin) / frame_width
+        span_y = (gymax - gymin) / frame_height
+        two_axis = min(span_x, span_y)
+        if two_axis < 0.16 or max(span_x, span_y) > 0.82:
+            continue
+        # A generic "Inner Ring"/"Ring Road" covering most of a 25 km frame
+        # is useful topology, but is not automatically the composition's hero.
+        # Numbered rings carry stronger city-specific semantics (for example
+        # Beijing's directional 二环 segments) and may use the wider envelope.
+        generic_limit = (0.64 if identity == "named-ring:inner ring"
+                         else 0.52)
+        if (identity.startswith("named-ring:")
+                and max(span_x, span_y) > generic_limit):
+            continue
+        ratio = 0.0
+        for pos in positions:
+            row = work.iloc[pos]
+            ratio += (
+                float(row.geometry.length)
+                * resolve_printable_road_width_m(
+                    str(row.get("highway") or ""),
+                    scale_mm_per_m=scale_mm_per_m,
+                    road_width_multiplier=road_width_multiplier,
+                    min_colored_strip_mm=min_colored_strip_mm,
+                )
+                / frame_area
+            )
+        if ratio > _PROTECTED_RING_INK_LIMIT:
+            continue
+        center_offset = union.centroid.distance(frame_center) / max(
+            min(frame_width, frame_height) * 0.5, 1.0)
+        compact_span = math.exp(
+            -((max(span_x, span_y) - 0.36) / 0.16) ** 2)
+        score = (two_axis * (1.0 - min(center_offset, 1.0))
+                 * compact_span)
+        protected_candidates.append((score, identity, positions, ratio,
+                                     span_x, span_y))
+
+    if protected_candidates:
+        protected_candidates.sort(key=lambda item: (-item[0], item[1]))
+        _, identity, positions, ratio, span_x, span_y = protected_candidates[0]
+        selected_positions.update(positions)
+        protected_ring_evidence = {
+            "selected": True,
+            "candidate_groups": len(ring_positions),
+            "eligible_groups": len(protected_candidates),
+            "identity": identity,
+            "features": len(positions),
+            "estimated_ink_ratio": round(ratio, 6),
+            "span_x": round(span_x, 4),
+            "span_y": round(span_y, 4),
+            "ink_limit_ratio": _PROTECTED_RING_INK_LIMIT,
+        }
+
     class_evidence = {}
     for highway, quota in _LARGE_INK_QUOTAS.items():
         candidates = [key for key in groups if key[0] == highway]
         candidates.sort(key=lambda key: (-scores[key], key[1]))
-        used = 0.0
+        used = sum(
+            position_ratios.get(pos, 0.0)
+            for pos in selected_positions
+            if str(work.iloc[pos].get("highway") or "") == highway
+        )
         selected_groups = 0
         for key in candidates:
-            estimated_ratio = lengths[key] * widths[key] / frame_area
-            if selected_groups and used + estimated_ratio > quota:
+            remaining = [pos for pos in groups[key]
+                         if pos not in selected_positions]
+            if not remaining:
                 continue
-            selected_positions.update(groups[key])
+            estimated_ratio = sum(position_ratios[pos] for pos in remaining)
+            # Do not let the first very long/duplicated corridor bypass its
+            # entire class budget.  Continue scanning for a smaller complete
+            # identity; otherwise one trunk name can consume the global hard
+            # ceiling and prevent the spatial pass from restoring the city's
+            # other defining axes.
+            if used + estimated_ratio > quota:
+                continue
+            selected_positions.update(remaining)
             used += estimated_ratio
             selected_groups += 1
         class_evidence[highway] = {
@@ -233,6 +401,109 @@ def _apply_large_area_ink_budget(
             "selected_groups": selected_groups,
             "estimated_ink_ratio": round(used, 6),
         }
+
+    empty_selection_fallback = None
+    if not selected_positions and groups:
+        # A one-road fixture or genuinely sparse OSM frame must not collapse
+        # to zero merely because its only complete identity exceeds a narrow
+        # per-class quota.  The global physical ceiling remains mandatory.
+        eligible = [
+            key for key in groups
+            if sum(position_ratios[pos] for pos in groups[key])
+            <= _LARGE_HARD_INK_LIMIT
+        ]
+        if eligible:
+            eligible.sort(key=lambda key: (-scores[key], key[1]))
+            key = eligible[0]
+            selected_positions.update(groups[key])
+            empty_selection_fallback = {
+                "highway": key[0],
+                "identity": key[1],
+                "features": len(groups[key]),
+                "estimated_ink_ratio": round(
+                    sum(position_ratios[pos] for pos in groups[key]), 6),
+            }
+
+    # The class budgets above protect long ring/radial/arterial identities,
+    # but a few high-scoring corridors can still leave most of the city blank.
+    # Add a limited second pass that fills underrepresented frame cells with
+    # complete named corridors.  Ink is now a hard ceiling, not the ranking
+    # objective: a candidate must first improve spatial structure.
+    group_cells = {
+        key: _sampled_grid_cells(
+            group_geometries[key], bbox_local, _CONTEXT_GRID_SIZE)
+        for key in groups
+    }
+    source_cell_counts = [0] * (_CONTEXT_GRID_SIZE ** 2)
+    selected_cell_counts = [0] * (_CONTEXT_GRID_SIZE ** 2)
+    for key, cells in group_cells.items():
+        for cell in cells:
+            source_cell_counts[cell] += 1
+    for pos in selected_positions:
+        for cell in _sampled_grid_cells(
+                work.iloc[pos].geometry, bbox_local, _CONTEXT_GRID_SIZE):
+            selected_cell_counts[cell] += 1
+
+    cell_targets = []
+    for cell, source_count in enumerate(source_cell_counts):
+        gx = cell % _CONTEXT_GRID_SIZE
+        gy = cell // _CONTEXT_GRID_SIZE
+        central = gx in (2, 3) and gy in (2, 3)
+        desired = 4 if central else 3
+        cell_targets.append(min(source_count, desired))
+
+    def _target_satisfaction(counts) -> int:
+        return sum(min(count, target)
+                   for count, target in zip(counts, cell_targets))
+
+    context_before = _target_satisfaction(selected_cell_counts)
+    base_group_ratio = sum(position_ratios.get(pos, 0.0)
+                           for pos in selected_positions)
+    context_group_keys: set[tuple[str, str]] = set()
+    context_positions: set[int] = set()
+    context_ratio = 0.0
+    while True:
+        best = None
+        for key, cells in group_cells.items():
+            remaining = [pos for pos in groups[key]
+                         if pos not in selected_positions]
+            if not remaining or len(cells) < 2:
+                continue
+            # Unnamed fragments must cross several cells to qualify as a
+            # corridor; otherwise dense OSM segmentation wins by tiny cost.
+            if key[1].startswith("@") and len(cells) < 3:
+                continue
+            ratio = sum(position_ratios[pos] for pos in remaining)
+            if (context_ratio + ratio > _LARGE_CONTEXT_INK_QUOTA
+                    or base_group_ratio + context_ratio + ratio
+                    > _LARGE_HARD_INK_LIMIT):
+                continue
+            contribution = sum(
+                max(0, cell_targets[cell] - selected_cell_counts[cell])
+                for cell in cells)
+            if contribution <= 0:
+                continue
+            connected_cells = sum(
+                selected_cell_counts[cell] > 0 for cell in cells)
+            # Contribution dominates.  Connectivity and identity score only
+            # break ties, so a famous edge motorway cannot consume a context
+            # slot that would complete the centre or an empty quadrant.
+            rank = (contribution, connected_cells, scores[key], -ratio,
+                    key[1])
+            if best is None or rank > best[0]:
+                best = (rank, key, remaining, ratio)
+        if best is None:
+            break
+        key, remaining, ratio = best[1:]
+        context_group_keys.add(key)
+        selected_positions.update(remaining)
+        context_positions.update(remaining)
+        context_ratio += ratio
+        for cell in group_cells[key]:
+            selected_cell_counts[cell] += 1
+
+    context_after = _target_satisfaction(selected_cell_counts)
+    context_target_total = sum(cell_targets)
 
     # Budgeting whole corridors can legitimately omit most roads, but it must
     # not leave a short OSM name-change segment or interchange link missing
@@ -309,7 +580,7 @@ def _apply_large_area_ink_budget(
         )
     return selected, {
         "applied": True,
-        "method": "city_identity_corridor_budget_v3",
+        "method": "identity_then_spatial_context_v5",
         "candidate_features_without_links": sum(len(v) for v in groups.values()),
         "selected_features": len(selected),
         "candidate_estimated_ink_ratio": round(all_estimated, 6),
@@ -320,6 +591,17 @@ def _apply_large_area_ink_budget(
         "ordinary_connector_max_length_m": round(
             ordinary_connector_max_length, 3),
         "connector_snap_m": round(snap_distance, 3),
+        "context_grid_size": _CONTEXT_GRID_SIZE,
+        "context_selected_groups": len(context_group_keys),
+        "context_selected_features": len(context_positions),
+        "context_estimated_ink_ratio": round(context_ratio, 6),
+        "context_ink_quota_ratio": _LARGE_CONTEXT_INK_QUOTA,
+        "hard_ink_limit_ratio": _LARGE_HARD_INK_LIMIT,
+        "protected_ring": protected_ring_evidence,
+        "empty_selection_fallback": empty_selection_fallback,
+        "context_target_units": context_target_total,
+        "context_satisfied_before": context_before,
+        "context_satisfied_after": context_after,
         "class_budgets": class_evidence,
     }
 
