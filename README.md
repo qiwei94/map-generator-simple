@@ -120,6 +120,12 @@ python generate_city_legacy.py ... --amap-salience network
 中国大陆以外会自动回退到 OSM-only。该开关仍处于代表城市验证阶段，不是 Web
 生产默认值。
 
+预处理完成后会额外保存 `composition_spec.json`，明确记录主道路、次级走廊、连接
+段、结构背景以及主/次水体。评审图与正式道路 builder 消费同一角色化物理宽度，
+次级道路只有在不突破喷嘴最小色条时才会变细。该文件是审计记录，不含坐标、mesh、
+Z 或布尔指令；完整职责与验收规则见
+[doc/composition_spec.md](doc/composition_spec.md)。
+
 ### 3. 启动 Studio
 ```bash
 python webapp/server.py            # 默认 8787 端口

@@ -50,6 +50,10 @@ from _TEXTURE_STYLE_OF_DEEPSEEK.print_profile import (
 )
 from _TEXTURE_STYLE_OF_DEEPSEEK.water_roles import retain_continuous_water_source
 from _TEXTURE_STYLE_OF_DEEPSEEK.config import compute_scale, WATERWAY_WIDTHS, TERRAIN_GRID, get_area_class, BUILDING_V2_HOTSPOT_RELAX
+from aesthetic.composition_spec import (
+    build_composition_spec,
+    write_composition_spec,
+)
 
 # ---------------------------------------------------------------------------
 # 城市预设
@@ -366,7 +370,9 @@ def _transform_layers_to_exact(layers, dx, dy, clip_box):
         bb_cls = list(layers.block_base_classes)
 
     roads = []
-    for line, tier, flag in layers.roads_lines:
+    for item in layers.roads_lines:
+        line, tier, flag = item[0], item[1], item[2]
+        role = item[3] if len(item) > 3 else None
         moved = translate(line, xoff=dx, yoff=dy)
         try:
             seg = moved.intersection(clip)
@@ -378,9 +384,12 @@ def _transform_layers_to_exact(layers, dx, dy, clip_box):
         if seg.is_empty:
             continue
         if seg.geom_type == "LineString":
-            roads.append((seg, tier, flag))
+            roads.append((seg, tier, flag, role) if role else
+                         (seg, tier, flag))
         elif seg.geom_type == "MultiLineString":
-            roads.extend((g, tier, flag) for g in seg.geoms if not g.is_empty)
+            roads.extend(((g, tier, flag, role) if role else
+                          (g, tier, flag))
+                         for g in seg.geoms if not g.is_empty)
 
     layers.BL = BL
     layers.BL_categories = BL_cat
@@ -1013,6 +1022,19 @@ def main():
     print(f"  {layers.summary()}")
     print(f"  Time: {time.time() - t45:.1f}s")
 
+    # CompositionSpec is written for both review-only and formal generation.
+    # It is an audit sidecar and never feeds geometry, Z, or booleans back into
+    # the pipeline.
+    _composition_spec = build_composition_spec(
+        city=CITY_NAME,
+        bbox_wgs84=(south, west, north, east),
+        layers=layers,
+        amap_evidence=_amap_evidence,
+    )
+    _composition_spec_path = write_composition_spec(
+        OUTPUT_DIR, _composition_spec)
+    print(f"  CompositionSpec: {_composition_spec_path}")
+
     # =====================================================================
     # Stage 4.6: Render PNG preview (optional, --png flag)
     # =====================================================================
@@ -1375,7 +1397,13 @@ def main():
         "landuse": len(landuse_gdf) if landuse_gdf is not None else 0,
     }
     _resolved_params = auto_resolved.to_dict() if auto_resolved is not None else {}
-    _decisions = (auto_resolved.reasons if auto_resolved is not None else {})
+    _decisions = dict(
+        auto_resolved.reasons if auto_resolved is not None else {})
+    _decisions["composition_spec"] = {
+        "filename": os.path.basename(_composition_spec_path),
+        "schema_version": _composition_spec["schema_version"],
+        "policy_version": _composition_spec["policy_version"],
+    }
     _profile = profile.to_dict() if profile is not None else {}
     _block_base_enabled = not cli_args.no_block_base
     _design_spec = build_design_spec(

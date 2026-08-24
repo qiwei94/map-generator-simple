@@ -26,7 +26,18 @@ from .buildings import ROAD_TIERS
 from .config import ROAD_DEFAULT_WIDTH_M, ROAD_FILTER, ROAD_WIDTHS
 
 
-POLICY_VERSION = "print-road-roles-v6"
+POLICY_VERSION = "print-road-roles-v7"
+COMPOSITION_ROLE_COLUMN = "_composition_role"
+
+# A role changes visual hierarchy, never source geometry.  The secondary and
+# connector factors may reduce an OSM source width, but the physical printer
+# floor in ``resolve_composed_road_width_m`` remains absolute.
+_COMPOSITION_WIDTH_FACTORS = {
+    "primary": 1.0,
+    "secondary": 0.90,
+    "connector": 0.85,
+    "foreground": 1.0,
+}
 
 _WIDTH_FACTORS = {
     "motorway": 1.35,
@@ -140,6 +151,40 @@ def resolve_printable_road_width_m(
                       * road_width_multiplier)
     hierarchy_floor_mm = min_colored_strip_mm * _WIDTH_FACTORS.get(highway, 1.0)
     return max(source_width_m, hierarchy_floor_mm / scale_mm_per_m)
+
+
+def resolve_composed_road_width_m(
+    highway: str,
+    *,
+    composition_role: str = "foreground",
+    scale_mm_per_m: float,
+    road_width_multiplier: float,
+    min_colored_strip_mm: float,
+) -> float:
+    """Resolve one role-aware width without violating the printer floor.
+
+    ``primary`` corridors retain the resolved foreground width.  ``secondary``
+    and ``connector`` corridors become quieter only when their factual/source
+    width is above the physical minimum; they can never become sub-printable.
+    """
+
+    if scale_mm_per_m <= 0 or not math.isfinite(scale_mm_per_m):
+        raise ValueError("scale_mm_per_m must be positive")
+    if road_width_multiplier <= 0 or not math.isfinite(road_width_multiplier):
+        raise ValueError("road_width_multiplier must be positive")
+    if min_colored_strip_mm <= 0 or not math.isfinite(min_colored_strip_mm):
+        raise ValueError("min_colored_strip_mm must be positive")
+    role_factor = _COMPOSITION_WIDTH_FACTORS.get(
+        str(composition_role or "foreground"), 1.0)
+    source_width_m = (
+        ROAD_WIDTHS.get(highway, ROAD_DEFAULT_WIDTH_M)
+        * road_width_multiplier
+        * role_factor
+    )
+    hierarchy_factor = max(
+        1.0, _WIDTH_FACTORS.get(highway, 1.0) * role_factor)
+    floor_m = min_colored_strip_mm * hierarchy_factor / scale_mm_per_m
+    return max(source_width_m, floor_m)
 
 
 def road_width_multiplier_from_layers(layers: Any, fallback: float) -> float:
@@ -581,7 +626,117 @@ def _apply_large_area_ink_budget(
         if not added_this_pass:
             break
 
+    def _semantic_identity_for_key(key: tuple[str, str]) -> str:
+        positions = groups[key]
+        ring_identities = sorted({
+            ring_corridor_identity(work.iloc[pos].get("name"))
+            or ring_corridor_identity(work.iloc[pos].get("name:en"))
+            for pos in positions
+        } - {""})
+        if ring_identities:
+            return ring_identities[0]
+        return "" if key[1].startswith("@") else key[1]
+
+    # A class budget decides what is visible, not what is a hero.  Collapse
+    # the already selected OSM groups into semantic identities and choose a
+    # small adaptive set of main corridors.  sqrt(N), bounded to 3..8 for a
+    # non-trivial city, avoids both a fixed global ink ratio and an unbounded
+    # list in dense cities.
+    selected_group_keys = [
+        key for key in groups
+        if any(pos in selected_positions - connector_positions
+               for pos in groups[key])
+    ]
+    identity_candidates: dict[str, dict[str, Any]] = {}
+    for key in selected_group_keys:
+        identity = _semantic_identity_for_key(key)
+        if not identity:
+            continue
+        entry = identity_candidates.setdefault(identity, {
+            "keys": [], "positions": set(), "cells": set(),
+            "score": 0.0, "visual_salience": 0.0,
+        })
+        entry["keys"].append(key)
+        entry["positions"].update(
+            pos for pos in groups[key] if pos in selected_positions)
+        entry["cells"].update(group_cells.get(key, set()))
+        entry["score"] += float(scores.get(key, 0.0))
+        support = visual_group_support.get(key, {})
+        entry["visual_salience"] = max(
+            float(entry["visual_salience"]),
+            float(support.get("weighted_salience", 0.0)),
+        )
+
+    for identity, entry in identity_candidates.items():
+        union = unary_union([
+            work.iloc[pos].geometry for pos in sorted(entry["positions"])
+        ])
+        ixmin, iymin, ixmax, iymax = union.bounds
+        entry["length_m"] = sum(
+            float(work.iloc[pos].geometry.length)
+            for pos in entry["positions"])
+        entry["span"] = max(
+            (ixmax - ixmin) / frame_width,
+            (iymax - iymin) / frame_height,
+        )
+        entry["rank_score"] = (
+            2.5 * float(entry["visual_salience"])
+            + 2.0 * min(1.0, float(entry["span"]) / 0.50)
+            + 1.0 * min(1.0, len(entry["cells"]) / 6.0)
+            + 0.5 * min(1.0, float(entry["length_m"])
+                        / max(frame_width, frame_height))
+        )
+
+    protected_identity = protected_ring_evidence.get("identity")
+    eligible_identities = [
+        identity for identity, entry in identity_candidates.items()
+        if (identity == protected_identity
+            or float(entry["span"]) >= 0.16
+            or len(entry["cells"]) >= 4)
+    ]
+    candidate_count = len(identity_candidates)
+    eligible_count = len(eligible_identities)
+    if eligible_count <= 2:
+        primary_target = eligible_count
+    else:
+        primary_target = min(8, max(3, int(math.ceil(
+            math.sqrt(eligible_count)))))
+    ranked_identities = sorted(
+        eligible_identities,
+        key=lambda identity: (
+            -(identity == protected_identity),
+            -float(identity_candidates[identity]["rank_score"]),
+            -float(identity_candidates[identity]["visual_salience"]),
+            -float(identity_candidates[identity]["span"]),
+            identity,
+        ),
+    )
+    primary_identities = set(ranked_identities[:primary_target])
+    if protected_identity in identity_candidates:
+        primary_identities.add(protected_identity)
+        if len(primary_identities) > max(primary_target, 1):
+            removable = [identity for identity in reversed(ranked_identities)
+                         if identity != protected_identity
+                         and identity in primary_identities]
+            if removable:
+                primary_identities.remove(removable[0])
+
+    primary_positions = set()
+    for identity in primary_identities:
+        primary_positions.update(identity_candidates[identity]["positions"])
+    primary_positions -= connector_positions
+    secondary_positions = (
+        selected_positions - primary_positions - connector_positions)
+    role_by_position = {
+        pos: ("connector" if pos in connector_positions
+              else "secondary" if pos in secondary_positions
+              else "primary")
+        for pos in selected_positions
+    }
     selected = work.iloc[sorted(selected_positions)].copy()
+    selected[COMPOSITION_ROLE_COLUMN] = [
+        role_by_position[pos] for pos in sorted(selected_positions)
+    ]
     all_estimated = sum(
         lengths[key] * widths[key] / frame_area for key in groups)
     selected_estimated = 0.0
@@ -610,6 +765,79 @@ def _apply_large_area_ink_budget(
         position_ratios.get(pos, 0.0)
         for key in selected_visual_keys for pos in groups[key]
         if pos in selected_positions)
+
+    def _identity_for_position(pos: int) -> str | None:
+        row = work.iloc[pos]
+        highway = str(row.get("highway") or "unknown")
+        ring = (ring_corridor_identity(row.get("name"))
+                or ring_corridor_identity(row.get("name:en")))
+        if ring:
+            identity = ring
+        elif isinstance(row.get("name"), str) and row.get("name").strip():
+            identity = f"name:{row.get('name').strip().casefold()}"
+        elif isinstance(row.get("ref"), str) and row.get("ref").strip():
+            identity = f"ref:{row.get('ref').strip().casefold()}"
+        else:
+            return None
+        return f"{highway}:{identity}"
+
+    def _role_evidence(role: str, positions: set[int]) -> dict[str, Any]:
+        return {
+            "role": role,
+            "features": len(positions),
+            "identities": sorted({identity for pos in positions
+                                  if (identity := _identity_for_position(pos))}),
+            "anonymous_features": sum(
+                _identity_for_position(pos) is None for pos in positions),
+            "estimated_ink_ratio": round(sum(
+                float(work.iloc[pos].geometry.length)
+                * resolve_composed_road_width_m(
+                    str(work.iloc[pos].get("highway") or ""),
+                    composition_role=role,
+                    scale_mm_per_m=scale_mm_per_m,
+                    road_width_multiplier=road_width_multiplier,
+                    min_colored_strip_mm=min_colored_strip_mm,
+                ) / frame_area
+                for pos in positions
+            ), 6),
+        }
+
+    rejected_features = max(0, len(visible) - len(selected_positions))
+    composition_roles = {
+        "schema_version": "1.0",
+        "method": "adaptive_semantic_identity_hierarchy_v2",
+        "candidate_identities": candidate_count,
+        "eligible_primary_identities": eligible_count,
+        "primary_identity_target": primary_target,
+        "primary_semantic_identities": sorted(primary_identities),
+        "primary_identity_ranking": [
+            {
+                "identity": identity,
+                "score": round(float(
+                    identity_candidates[identity]["rank_score"]), 6),
+                "visual_salience": round(float(
+                    identity_candidates[identity]["visual_salience"]), 6),
+                "span": round(float(
+                    identity_candidates[identity]["span"]), 6),
+                "grid_cells": len(identity_candidates[identity]["cells"]),
+                "length_m": round(float(
+                    identity_candidates[identity]["length_m"]), 3),
+            }
+            for identity in ranked_identities[:max(primary_target, 1)]
+        ],
+        "primary": _role_evidence("primary", primary_positions),
+        "secondary": _role_evidence("secondary", secondary_positions),
+        "connector": _role_evidence("connector", connector_positions),
+        "background": {
+            "role": "block_base_only",
+            "features": rejected_features,
+            "reason": "retained for topology/structural seams, hidden as ink",
+        },
+        "rejected_fragments": {
+            "features": rejected_features,
+            "reason": "failed identity, spatial contribution, or ink budget",
+        },
+    }
     return selected, {
         "applied": True,
         "method": "identity_spatial_context_and_optional_salience_v6",
@@ -659,6 +887,7 @@ def _apply_large_area_ink_budget(
         "context_satisfied_before": context_before,
         "context_satisfied_after": context_after,
         "class_budgets": class_evidence,
+        "composition_roles": composition_roles,
     }
 
 
@@ -696,6 +925,9 @@ def select_road_roles(
             nozzle_real_m=nozzle_real_m,
             visual_salience_guide=visual_salience_guide,
         )
+    elif len(visible) > 0:
+        visible = visible.copy()
+        visible[COMPOSITION_ROLE_COLUMN] = "foreground"
 
     fallback = None
     if roads is not None and len(roads) and "highway" not in roads.columns:
@@ -718,6 +950,19 @@ def select_road_roles(
             "class_floor_factors": dict(_WIDTH_FACTORS),
         },
         "ink_budget": ink_budget,
+        "composition_roles": ink_budget.get("composition_roles", {
+            "schema_version": "1.0",
+            "method": "unbudgeted_foreground_v1",
+            "foreground": {
+                "role": "foreground",
+                "features": len(visible),
+                "identities": [],
+            },
+            "background": {
+                "role": "block_base_only",
+                "features": max(0, len(structural) - len(visible)),
+            },
+        }),
         "fallback": fallback,
     }
     return RoadRoleSelection(

@@ -509,6 +509,36 @@ mask，并把它作为只读构图证据接入现有 OSM 选择器：
 3MF 水密、材料、喷嘴与验证器验收。对应完整非慢速回归为
 `484 passed, 2 skipped, 11 deselected`。
 
+P2 构图角色落地（2026-08-24）：同预算重排能够改善“选哪条 OSM 路”，但仍把所有
+已选道路交给一个扁平渲染层，无法表达主轴、辅助走廊与短连接段的差异。当前新增
+确定性的 `CompositionSpec` 与角色消费链：
+
+- 道路等级预算/保护环阶段得到 `primary`，空间补足阶段得到 `secondary`，仅修断口
+  的短段为 `connector`；未进前景的 structural 网络继续切 Block base；
+- 大水面优先成为水体主元素；无大水面时才从完整 OSM 走廊中确定一个主水体，命名
+  护城河保留独立身份例外；
+- `aesthetic/review_render.py` 与正式 `roads.py` 使用同一个角色化宽度解析函数；次级
+  线只能在源宽有余量时变细，绝不突破打印 profile 的最小色条；
+- `generate_city_legacy.py` 在评审-only 和正式流程都保存
+  `composition_spec.json`。它只记录 identity、角色、墨量与来源契约，不保存几何，
+  不控制 mesh、Z 或布尔运算。
+
+完整契约见 `doc/composition_spec.md`。北京、上海真实 25 km 图与角色 JSON 已在
+本切片单元/回归通过后重跑；当前仍不升级生产默认值。
+
+该验收已完成：北京 25 km 的 29 个可见语义候选中有 17 个满足跨画幅/连续性门槛，
+自适应选出 5 个主 identity（二、三、四、五环与首都机场高速）；上海 27 个候选中
+14 个满足门槛，选出 4 个（内环、延安西路、中山北路、华夏西路）。黄浦江 3.33%
+可见面占比被明确归为主水体，已有完整河廊只作次级支持。北京/上海评审图分别在
+`output/composition_beijing_25km_v3/` 与
+`output/composition_shanghai_25km_v1/`。
+
+北京中心 5 km 使用真实 SRTM 与真实 PBF 生成 10.45 MiB 3MF，正式道路 1,068 条、
+31,756 faces；V1–V13 全通过，验证器 `0 errors / 0 warnings`。一份全平 DEM 试跑曾
+因实际地形 Z range 只有 2 mm 得到 V3 警告，未修改验证器掩盖，改用真实 DEM 后
+重新生成通过。详细 artifact、命令边界与平坦 DEM 限制见
+`doc/composition_spec.md`。
+
 ### P3：视觉中心与语义 Z
 
 - 实现 `FocusSpec` 候选与确定性打分；

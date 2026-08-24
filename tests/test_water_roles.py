@@ -118,6 +118,9 @@ def test_large_area_caps_visible_water_corridors_for_visual_hierarchy():
 
     assert selected.evidence["selected_groups"] == 3
     assert selected.evidence["max_visible_corridors"] == 3
+    composition = selected.evidence["composition_roles"]
+    assert composition["primary"]["groups"] == 1
+    assert composition["secondary"]["groups"] == 2
 
 
 def test_surface_water_suppresses_widthless_centrelines_at_city_scale():
@@ -136,6 +139,24 @@ def test_surface_water_suppresses_widthless_centrelines_at_city_scale():
 
     assert selected.lines == []
     assert selected.evidence["selected_groups"] == 0
+
+
+def test_large_water_surface_is_primary_and_corridors_are_supporting_roles():
+    candidates = [
+        WaterLineCandidate(
+            LineString([(0, 5000), (10000, 5000)]),
+            "river", "name:surface river", 30, True),
+    ]
+
+    selected = select_visible_water_lines(
+        candidates, bbox_local=(0, 0, 10000, 10000),
+        nozzle_real_m=50.0, visible_surface_ratio=0.08)
+
+    composition = selected.evidence["composition_roles"]
+    assert composition["surface"]["role"] == "primary"
+    assert composition["primary"]["groups"] == 0
+    assert composition["secondary"]["identities"] == [
+        "river:name:surface river"]
 
 
 def test_amap_salience_can_confirm_existing_widthless_osm_river():

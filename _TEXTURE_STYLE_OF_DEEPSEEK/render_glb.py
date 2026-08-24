@@ -18,7 +18,7 @@ import numpy as np
 import trimesh
 
 from _TEXTURE_STYLE_OF_DEEPSEEK.road_roles import (
-    resolve_printable_road_width_m,
+    resolve_composed_road_width_m,
     road_width_multiplier_from_layers,
 )
 
@@ -783,10 +783,12 @@ def render_glb_preview(layers, ctx: dict, output_path: str,
             layers, ROAD_WIDTH_MULTIPLIER)
         for item in layers.roads_lines:
             line, highway = item[0], item[1]
+            composition_role = item[3] if len(item) > 3 else "foreground"
             if line is None or line.is_empty:
                 continue
-            w_m = resolve_printable_road_width_m(
+            w_m = resolve_composed_road_width_m(
                 highway,
+                composition_role=composition_role,
                 scale_mm_per_m=scale,
                 road_width_multiplier=effective_multiplier,
                 min_colored_strip_mm=min_strip_mm,

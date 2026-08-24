@@ -23,7 +23,7 @@ from shapely.errors import GEOSException
 from shapely.ops import linemerge, unary_union
 
 
-POLICY_VERSION = "print-water-roles-v5"
+POLICY_VERSION = "print-water-roles-v6"
 
 _LINE_INK_QUOTAS = {
     "river": 0.0060,
@@ -517,9 +517,51 @@ def select_visible_water_lines(
         output.extend((line, key[0], half_width) for line in merged)
         bridge_count += added
 
+    selected_corridor_keys = selected_keys - landmark_enclosure_keys
+    primary_keys = set(landmark_enclosure_keys)
+    surface_is_primary = visible_surface_ratio >= 0.002
+    if selected_corridor_keys and not surface_is_primary:
+        primary_keys.add(max(
+            selected_corridor_keys,
+            key=lambda key: (
+                group_metrics[key]["score"]
+                * (1.0 + group_visual_salience[key]),
+                key[1],
+            ),
+        ))
+    secondary_keys = selected_keys - primary_keys
+
+    def _water_role_evidence(role: str, keys) -> dict[str, Any]:
+        return {
+            "role": role,
+            "groups": len(keys),
+            "identities": [f"{key[0]}:{key[1]}" for key in sorted(keys)],
+            "estimated_ink_ratio": round(
+                sum(group_ink[key] for key in keys), 6),
+        }
+
+    composition_roles = {
+        "schema_version": "1.0",
+        "method": "surface_first_complete_corridor_v1",
+        "surface": {
+            "role": "primary" if surface_is_primary else "background",
+            "visible_surface_ratio": round(visible_surface_ratio, 6),
+        },
+        "primary": _water_role_evidence("primary", primary_keys),
+        "secondary": _water_role_evidence("secondary", secondary_keys),
+        "background": {
+            "role": "structural_only",
+            "groups": max(0, len(groups) - len(selected_keys)),
+        },
+        "rejected_fragments": {
+            "groups": max(0, len(groups) - len(selected_keys)),
+            "reason": "not a printable city-defining surface or corridor",
+        },
+    }
+
     return VisibleWaterSelection(output, {
         "policy_version": POLICY_VERSION,
-        "method": "surface_and_optional_salience_water_budget_v5",
+        "method": "surface_and_optional_salience_water_budget_v6",
         "source_line_segments": len(candidates),
         "candidate_groups": len(groups),
         "selected_groups": len(selected_keys),
@@ -557,4 +599,5 @@ def select_visible_water_lines(
             ],
         },
         "class_budgets": class_evidence,
+        "composition_roles": composition_roles,
     })

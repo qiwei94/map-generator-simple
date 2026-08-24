@@ -86,7 +86,10 @@ from _TEXTURE_STYLE_OF_DEEPSEEK.print_profile import (
     DEFAULT_PRINTER_PROFILE,
     PrinterProfile,
 )
-from _TEXTURE_STYLE_OF_DEEPSEEK.road_roles import select_road_roles
+from _TEXTURE_STYLE_OF_DEEPSEEK.road_roles import (
+    COMPOSITION_ROLE_COLUMN,
+    select_road_roles,
+)
 from _TEXTURE_STYLE_OF_DEEPSEEK.water_roles import (
     WaterLineCandidate,
     has_printable_water_mass,
@@ -114,7 +117,7 @@ class LayerPolygons:
     WO: List[Polygon] = field(default_factory=list)
     block_base: List[Polygon] = field(default_factory=list)  # PNG layer 1.5 暖米色城市底
     block_base_classes: List[str] = field(default_factory=list)  # semantic class per block_base polygon
-    roads_lines: List[Tuple[LineString, str, bool]] = field(default_factory=list)
+    roads_lines: List[Tuple] = field(default_factory=list)
     road_roles: Dict = field(default_factory=dict)
     water_roles: Dict = field(default_factory=dict)
     nozzle_real_m: float = 0.0
@@ -999,8 +1002,9 @@ def _extract_roads(
     area_km2: float = 0,
     *,
     apply_area_filter: bool = True,
-) -> List[Tuple[LineString, str, bool]]:
-    """返回 [(line, highway_type, is_bridge)]。
+    include_composition_role: bool = False,
+) -> List[Tuple]:
+    """返回道路线；可选第 4 项 ``composition_role``。
 
     - 应用 ROAD_FILTER（如 large 城市仅取 motorway/trunk/primary/secondary）
     - 减去 BL footprint（路从大楼底下不画）
@@ -1040,7 +1044,7 @@ def _extract_roads(
         except Exception:
             pass
 
-    result: List[Tuple[LineString, str, bool]] = []
+    result: List[Tuple] = []
     n_skip_short = 0
     n_subtracted = 0
 
@@ -1055,6 +1059,14 @@ def _extract_roads(
     bridges = _column("bridge")
     wikidata_values = _column("wikidata")
     wikipedia_values = _column("wikipedia")
+    composition_roles = _column(COMPOSITION_ROLE_COLUMN, "foreground")
+
+    def _append(line, highway, is_bridge, composition_role):
+        if include_composition_role:
+            result.append((line, highway, is_bridge,
+                           str(composition_role or "foreground")))
+        else:
+            result.append((line, highway, is_bridge))
 
     def _is_bridge_landmark(name, highway, bridge, wikidata, wikipedia) -> bool:
         # Equivalent to is_road_landmark(), kept scalar and allocation-free for
@@ -1071,8 +1083,9 @@ def _extract_roads(
         return any(token in str(name) for token in
                    ("大桥", "Bridge", "Viaduct", "高架", "立交"))
 
-    for geom, highway, name, bridge, wikidata, wikipedia in zip(
+    for geom, highway, name, bridge, wikidata, wikipedia, composition_role in zip(
         geometries, highways, names, bridges, wikidata_values, wikipedia_values,
+        composition_roles,
     ):
         if geom is None or geom.is_empty:
             continue
@@ -1099,22 +1112,23 @@ def _extract_roads(
                         n_subtracted += 1
                         continue
                     if isinstance(diff, LineString):
-                        result.append((diff, highway, is_bridge))
+                        _append(diff, highway, is_bridge, composition_role)
                     elif isinstance(diff, MultiLineString):
                         for seg in diff.geoms:
                             if isinstance(seg, LineString) and seg.length >= 10.0:
-                                result.append((seg, highway, is_bridge))
+                                _append(seg, highway, is_bridge, composition_role)
                     elif hasattr(diff, "geoms"):
                         for g in diff.geoms:
                             if isinstance(g, LineString) and g.length >= 10.0:
-                                result.append((g, highway, is_bridge))
+                                _append(g, highway, is_bridge,
+                                        composition_role)
                 except Exception:
                     # Fallback: keep original line
-                    result.append((line, highway, is_bridge))
+                    _append(line, highway, is_bridge, composition_role)
             else:
-                result.append((line, highway, is_bridge))
+                _append(line, highway, is_bridge, composition_role)
 
-    n_bridges = sum(1 for _, _, b in result if b)
+    n_bridges = sum(1 for item in result if item[2])
     print(f"  _extract_roads: {len(result)} lines ({n_bridges} bridges), "
           f"filter skipped {n_skip_filter}, short {n_skip_short}, "
           f"BL subtracted {n_subtracted}")
@@ -1679,6 +1693,7 @@ def preprocess_layers(
         [p for p, _ in filtered["BL"]],
         area_km2,
         apply_area_filter=False,
+        include_composition_role=True,
     )
     road_role_evidence = dict(road_roles.evidence)
     road_role_evidence.update({

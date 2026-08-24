@@ -3,6 +3,8 @@ import pytest
 from shapely.geometry import LineString, Point
 
 from _TEXTURE_STYLE_OF_DEEPSEEK.road_roles import (
+    COMPOSITION_ROLE_COLUMN,
+    resolve_composed_road_width_m,
     resolve_printable_road_width_m,
     ring_corridor_identity,
     road_width_multiplier_from_layers,
@@ -93,6 +95,24 @@ def test_printable_width_uses_color_floor_and_preserves_hierarchy():
     assert secondary * 0.008 == pytest.approx(0.63)
     assert motorway * 0.008 == pytest.approx(0.63 * 1.35)
     assert motorway > secondary
+
+
+def test_composition_width_quiets_secondary_without_breaking_print_floor():
+    primary = resolve_composed_road_width_m(
+        "primary", composition_role="primary",
+        scale_mm_per_m=0.008, road_width_multiplier=4.0,
+        min_colored_strip_mm=0.63)
+    secondary = resolve_composed_road_width_m(
+        "primary", composition_role="secondary",
+        scale_mm_per_m=0.008, road_width_multiplier=4.0,
+        min_colored_strip_mm=0.63)
+    floor_limited = resolve_composed_road_width_m(
+        "secondary", composition_role="connector",
+        scale_mm_per_m=0.008, road_width_multiplier=0.5,
+        min_colored_strip_mm=0.63)
+
+    assert primary > secondary
+    assert floor_limited * 0.008 == pytest.approx(0.63)
 
 
 def test_layer_width_policy_overrides_render_time_fallback():
@@ -220,6 +240,13 @@ def test_city_scale_budget_adds_distributed_supporting_secondary_axes():
     assert budget["context_selected_groups"] == 2
     assert budget["context_satisfied_after"] > budget["context_satisfied_before"]
     assert budget["selected_estimated_ink_ratio"] <= 0.0558
+    assert set(roles.visible[COMPOSITION_ROLE_COLUMN]) == {
+        "primary", "secondary"}
+    composition = budget["composition_roles"]
+    assert composition["primary"]["features"] == 3
+    assert composition["secondary"]["features"] == 1
+    assert composition["primary_identity_target"] == 3
+    assert composition["background"]["role"] == "block_base_only"
 
 
 def test_directional_ring_names_are_protected_as_one_city_identity():

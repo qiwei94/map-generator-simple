@@ -15,7 +15,7 @@ from PIL import Image, ImageDraw
 
 from _TEXTURE_STYLE_OF_DEEPSEEK import config as _cfg
 from _TEXTURE_STYLE_OF_DEEPSEEK.road_roles import (
-    resolve_printable_road_width_m,
+    resolve_composed_road_width_m,
     road_width_multiplier_from_layers,
 )
 
@@ -182,11 +182,13 @@ def render_review_bundle(layers, ctx: dict, road_width_multiplier: float,
             layers, road_width_multiplier)
         for item in layers.roads_lines:
             line, highway = item[0], item[1]
+            composition_role = item[3] if len(item) > 3 else "foreground"
             if line is None or line.is_empty:
                 continue
             if min_strip_mm and scale_mm_per_m > 0:
-                w_m = resolve_printable_road_width_m(
+                w_m = resolve_composed_road_width_m(
                     highway,
+                    composition_role=composition_role,
                     scale_mm_per_m=scale_mm_per_m,
                     road_width_multiplier=effective_multiplier,
                     min_colored_strip_mm=float(min_strip_mm),
@@ -202,7 +204,11 @@ def render_review_bundle(layers, ctx: dict, road_width_multiplier: float,
                 except Exception:
                     continue
                 if len(pts) >= 2:
-                    draw.line(pts, fill=road_color, width=w_px)
+                    role_color = (road_color if composition_role in
+                                  ("primary", "foreground") else
+                                  tuple(min(222, channel + 18)
+                                        for channel in road_color))
+                    draw.line(pts, fill=role_color, width=w_px)
                     road_draw.line(pts, fill=1, width=w_px)
     road_mask = _downscale_mask(np.array(road_canvas), G)
 
