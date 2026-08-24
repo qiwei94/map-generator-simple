@@ -442,7 +442,7 @@ def test_spatial_template_assigns_three_roles_without_copying_geometry():
         assert geometry.wkb == source_wkb[name]
 
     budget = roles.evidence["ink_budget"]
-    assert budget["method"] == "amap_spatial_template_existing_osm_v2"
+    assert budget["method"] == "amap_spatial_template_existing_osm_v3"
     assert "hard_ink_limit_ratio" not in budget
     assert budget["composition_roles"]["context"]["features"] == 1
 
@@ -485,3 +485,127 @@ def test_spatial_template_rejects_short_intersection_spur_but_keeps_corridor():
 
     assert set(roles.visible["name"]) == {"Main Axis"}
     assert len(roles.visible) == 5
+
+
+def test_spatial_template_prunes_multi_segment_dangling_thread():
+    class Guide:
+        version = "synthetic-salience-v1"
+        template_policy_version = "synthetic-template-v1"
+
+        @staticmethod
+        def road_support(geometry):
+            return {
+                "covered_fraction": 0.95,
+                "any_template_fraction": 0.95,
+                "weighted_salience": 0.90,
+                "major_mask_fraction": 0.80,
+                "arterial_or_major_fraction": 0.90,
+                "context_mask_fraction": 0.0,
+            }
+
+    roads = gpd.GeoDataFrame({
+        "highway": ["primary", "primary", "primary"],
+        "name": ["Main Axis", "Side Thread", "Side Thread"],
+        "geometry": [
+            LineString([(1000, 5000), (9000, 5000)]),
+            LineString([(5000, 5000), (5000, 5100)]),
+            LineString([(5000, 5100), (5000, 5220)]),
+        ],
+    }, geometry="geometry", crs="EPSG:3857")
+
+    roles = select_road_roles(
+        roads,
+        topology_tier=4,
+        nozzle_real_m=50.0,
+        bbox_local=(0, 0, 10000, 10000),
+        scale_mm_per_m=0.02,
+        visual_salience_guide=Guide(),
+    )
+
+    assert list(roles.visible["name"]) == ["Main Axis"]
+    pruning = roles.evidence["ink_budget"]["dangling_chain_pruning"]
+    assert pruning["removed_features"] == 2
+    assert pruning["removed_length_m"] == 220.0
+
+
+def test_spatial_template_keeps_short_road_connected_at_both_ends():
+    class Guide:
+        version = "synthetic-salience-v1"
+        template_policy_version = "synthetic-template-v1"
+
+        @staticmethod
+        def road_support(geometry):
+            return {
+                "covered_fraction": 0.95,
+                "any_template_fraction": 0.95,
+                "weighted_salience": 0.90,
+                "major_mask_fraction": 0.80,
+                "arterial_or_major_fraction": 0.90,
+                "context_mask_fraction": 0.0,
+            }
+
+    roads = gpd.GeoDataFrame({
+        "highway": ["primary", "primary", "primary"],
+        "name": ["North Axis", "South Axis", "True Connector"],
+        "geometry": [
+            LineString([(1000, 5110), (9000, 5110)]),
+            LineString([(1000, 4890), (9000, 4890)]),
+            LineString([(5000, 4890), (5000, 5110)]),
+        ],
+    }, geometry="geometry", crs="EPSG:3857")
+
+    roles = select_road_roles(
+        roads,
+        topology_tier=4,
+        nozzle_real_m=50.0,
+        bbox_local=(0, 0, 10000, 10000),
+        scale_mm_per_m=0.02,
+        visual_salience_guide=Guide(),
+    )
+
+    assert set(roles.visible["name"]) == {
+        "North Axis", "South Axis", "True Connector",
+    }
+    pruning = roles.evidence["ink_budget"]["dangling_chain_pruning"]
+    assert pruning["removed_features"] == 0
+
+
+def test_spatial_template_protects_bridge_and_frame_edge_leaf():
+    class Guide:
+        version = "synthetic-salience-v1"
+        template_policy_version = "synthetic-template-v1"
+
+        @staticmethod
+        def road_support(geometry):
+            return {
+                "covered_fraction": 0.95,
+                "any_template_fraction": 0.95,
+                "weighted_salience": 0.90,
+                "major_mask_fraction": 0.80,
+                "arterial_or_major_fraction": 0.90,
+                "context_mask_fraction": 0.0,
+            }
+
+    roads = gpd.GeoDataFrame({
+        "highway": ["primary", "primary", "primary"],
+        "name": ["Main Axis", "Bridge Leaf", "Boundary Leaf"],
+        "bridge": [None, "yes", None],
+        "geometry": [
+            LineString([(1000, 5000), (9000, 5000)]),
+            LineString([(5000, 5000), (5000, 5200)]),
+            LineString([(0, 2000), (200, 2000)]),
+        ],
+    }, geometry="geometry", crs="EPSG:3857")
+
+    roles = select_road_roles(
+        roads,
+        topology_tier=4,
+        nozzle_real_m=50.0,
+        bbox_local=(0, 0, 10000, 10000),
+        scale_mm_per_m=0.02,
+        visual_salience_guide=Guide(),
+    )
+
+    assert set(roles.visible["name"]) == {
+        "Main Axis", "Bridge Leaf", "Boundary Leaf",
+    }

@@ -11,7 +11,7 @@ def _layers():
     return LayerPolygons(
         roads_lines=[("not-serialized-geometry", "primary", False, "primary")],
         road_roles={
-            "policy_version": "print-road-roles-v8",
+            "policy_version": "print-road-roles-v9",
             "source_line_features": 12,
             "width_policy": {
                 "road_width_multiplier": 2.0,
@@ -24,6 +24,13 @@ def _layers():
                     "identities": ["primary:name:central avenue"],
                 },
                 "background": {"role": "block_base_only", "features": 9},
+            },
+            "ink_budget": {
+                "dangling_chain_pruning": {
+                    "method": "selected_osm_graph_leaf_chain_v1",
+                    "removed_features": 2,
+                    "removed_length_m": 180.0,
+                },
             },
         },
         water_roles={
@@ -69,6 +76,11 @@ def test_composition_spec_records_contract_and_identities_not_geometry():
         "amap-template-v1")
     assert "spatially matching" in (
         spec["decision_contract"]["salience_reference"])
+    assert spec["evidence"]["road_dangling_chain_pruning"] == {
+        "method": "selected_osm_graph_leaf_chain_v1",
+        "removed_features": 2,
+        "removed_length_m": 180.0,
+    }
     assert spec["warnings"] == []
 
 

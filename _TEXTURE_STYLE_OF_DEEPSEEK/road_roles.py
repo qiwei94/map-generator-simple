@@ -26,7 +26,7 @@ from .buildings import ROAD_TIERS
 from .config import ROAD_DEFAULT_WIDTH_M, ROAD_FILTER, ROAD_WIDTHS
 
 
-POLICY_VERSION = "print-road-roles-v8"
+POLICY_VERSION = "print-road-roles-v9"
 COMPOSITION_ROLE_COLUMN = "_composition_role"
 
 # A role changes visual hierarchy, never source geometry.  The secondary and
@@ -57,6 +57,8 @@ _TEMPLATE_SECONDARY_ARTERIAL_FRACTION = 0.30
 _TEMPLATE_SECONDARY_WEIGHT = 0.50
 _TEMPLATE_CONTEXT_FRACTION = 0.58
 _TEMPLATE_CONTEXT_WEIGHT = 0.28
+_TEMPLATE_MAX_DANGLING_CHAIN_FRAME_FRACTION = 0.024
+_TEMPLATE_CONTINUATION_COSINE = 0.70
 
 _WIDTH_FACTORS = {
     "motorway": 1.35,
@@ -266,6 +268,238 @@ def _sampled_grid_cells(geometry, bbox_local, grid_size: int) -> set[int]:
     return cells
 
 
+def _line_terminals(geometry) -> tuple[Point, Point] | None:
+    """Return endpoints for one simple source feature, if available."""
+
+    if geometry is None or geometry.is_empty \
+            or geometry.geom_type != "LineString":
+        return None
+    try:
+        coordinates = list(geometry.coords)
+    except (AttributeError, NotImplementedError):
+        return None
+    if len(coordinates) < 2:
+        return None
+    return Point(coordinates[0]), Point(coordinates[-1])
+
+
+def _terminal_direction(geometry, terminal_index: int) \
+        -> tuple[float, float] | None:
+    """Return a unit vector pointing from an endpoint into the feature."""
+
+    try:
+        coordinates = list(geometry.coords)
+    except (AttributeError, NotImplementedError):
+        return None
+    if len(coordinates) < 2:
+        return None
+    if terminal_index == 0:
+        start, end = coordinates[0], coordinates[1]
+    else:
+        start, end = coordinates[-1], coordinates[-2]
+    dx = float(end[0]) - float(start[0])
+    dy = float(end[1]) - float(start[1])
+    magnitude = math.hypot(dx, dy)
+    if magnitude <= 1e-9:
+        return None
+    return dx / magnitude, dy / magnitude
+
+
+def _truthy_osm_tag(value: Any) -> bool:
+    if value is None:
+        return False
+    return str(value).strip().casefold() not in {
+        "", "0", "false", "nan", "no", "none",
+    }
+
+
+def _prune_template_dangling_chains(
+    work: gpd.GeoDataFrame,
+    role_by_position: dict[int, str],
+    *,
+    bbox_local,
+) -> tuple[dict[int, str], dict[str, Any]]:
+    """Hide short selected leaf chains while preserving source geometry.
+
+    A dilated reference road mask can overlap the first few metres of an OSM
+    side street.  Per-feature selection then renders only those source
+    segments and creates a thread-like spur.  This pass traces the selected
+    OSM graph from free endpoints and removes short leaf chains that terminate
+    at the retained network.  Removed roads remain in structural/Block base.
+    """
+
+    selected_positions = sorted(role_by_position)
+    xmin, ymin, xmax, ymax = (float(value) for value in bbox_local)
+    frame_span = max(xmax - xmin, ymax - ymin, 1.0)
+    max_chain_length_m = (
+        frame_span * _TEMPLATE_MAX_DANGLING_CHAIN_FRAME_FRACTION)
+    endpoint_snap_m = max(0.5, min(2.0, frame_span * 0.00004))
+    frame_margin_m = max(endpoint_snap_m * 2.0, frame_span * 0.0025)
+    base_evidence = {
+        "method": "selected_osm_graph_leaf_chain_v1",
+        "max_chain_length_m": round(max_chain_length_m, 3),
+        "endpoint_snap_m": round(endpoint_snap_m, 3),
+        "frame_margin_m": round(frame_margin_m, 3),
+        "candidate_features": len(selected_positions),
+    }
+    if len(selected_positions) < 2:
+        return role_by_position, {
+            **base_evidence,
+            "traced_leaf_chains": 0,
+            "removed_features": 0,
+            "removed_length_m": 0.0,
+            "removed_roles": {},
+        }
+
+    selected = work.iloc[selected_positions].copy().reset_index(drop=True)
+    terminals = {
+        local_pos: _line_terminals(row.geometry)
+        for local_pos, row in selected.iterrows()
+    }
+    spatial_index = selected.sindex
+    connection_cache: dict[tuple[int, int], list[tuple[int, int | None]]] = {}
+
+    def _at_frame_edge(point: Point) -> bool:
+        return (point.x - xmin <= frame_margin_m
+                or xmax - point.x <= frame_margin_m
+                or point.y - ymin <= frame_margin_m
+                or ymax - point.y <= frame_margin_m)
+
+    def _connections(local_pos: int, terminal_index: int) \
+            -> list[tuple[int, int | None]]:
+        cache_key = (local_pos, terminal_index)
+        if cache_key in connection_cache:
+            return connection_cache[cache_key]
+        feature_terminals = terminals.get(local_pos)
+        if feature_terminals is None:
+            connection_cache[cache_key] = []
+            return []
+        point = feature_terminals[terminal_index]
+        matches = spatial_index.query(
+            point.buffer(endpoint_snap_m), predicate="intersects")
+        connections = []
+        for other_local in sorted(int(value) for value in matches):
+            if other_local == local_pos:
+                continue
+            other_geometry = selected.iloc[other_local].geometry
+            if point.distance(other_geometry) > endpoint_snap_m:
+                continue
+            other_terminal_index = None
+            other_terminals = terminals.get(other_local)
+            if other_terminals is not None:
+                distances = [point.distance(candidate)
+                             for candidate in other_terminals]
+                closest = min(range(2), key=lambda index: distances[index])
+                if distances[closest] <= endpoint_snap_m:
+                    other_terminal_index = int(closest)
+            connections.append((other_local, other_terminal_index))
+        connection_cache[cache_key] = connections
+        return connections
+
+    def _protected(local_pos: int) -> bool:
+        row = selected.iloc[local_pos]
+        return (_truthy_osm_tag(row.get("bridge"))
+                or _truthy_osm_tag(row.get("tunnel")))
+
+    def _trace_leaf(start_local: int, free_terminal: int) \
+            -> tuple[list[int], float] | None:
+        chain: list[int] = []
+        chain_length_m = 0.0
+        current = start_local
+        entry_terminal = free_terminal
+        seen: set[int] = set()
+        while True:
+            if current in seen or terminals.get(current) is None:
+                return None
+            if _protected(current):
+                return None
+            seen.add(current)
+            chain.append(current)
+            geometry = selected.iloc[current].geometry
+            chain_length_m += float(geometry.length)
+            if chain_length_m > max_chain_length_m:
+                return None
+
+            exit_terminal = 1 - entry_terminal
+            exit_point = terminals[current][exit_terminal]
+            if _at_frame_edge(exit_point):
+                return None
+            connections = _connections(current, exit_terminal)
+            unique_others = sorted({other for other, _ in connections})
+            if not unique_others:
+                return chain, chain_length_m
+            if len(unique_others) > 1:
+                return chain, chain_length_m
+
+            other = unique_others[0]
+            other_terminal_values = {
+                terminal for candidate, terminal in connections
+                if candidate == other
+            }
+            if None in other_terminal_values or not other_terminal_values:
+                # A free branch meeting the interior of another selected OSM
+                # feature is the canonical line-thread failure.
+                return chain, chain_length_m
+            other_terminal = min(int(value)
+                                 for value in other_terminal_values)
+            if other in seen:
+                return None
+
+            current_direction = _terminal_direction(
+                geometry, exit_terminal)
+            other_geometry = selected.iloc[other].geometry
+            other_direction = _terminal_direction(
+                other_geometry, other_terminal)
+            if current_direction is None or other_direction is None:
+                return chain, chain_length_m
+            alignment = abs(
+                current_direction[0] * other_direction[0]
+                + current_direction[1] * other_direction[1])
+            if alignment < _TEMPLATE_CONTINUATION_COSINE:
+                return chain, chain_length_m
+            current = other
+            entry_terminal = other_terminal
+
+    removed_local: set[int] = set()
+    traced_chains: set[tuple[int, ...]] = set()
+    for local_pos, feature_terminals in terminals.items():
+        if feature_terminals is None:
+            continue
+        for terminal_index, point in enumerate(feature_terminals):
+            if _connections(local_pos, terminal_index) or _at_frame_edge(point):
+                continue
+            traced = _trace_leaf(local_pos, terminal_index)
+            if traced is None:
+                continue
+            chain, _ = traced
+            key = tuple(sorted(chain))
+            if key in traced_chains:
+                continue
+            traced_chains.add(key)
+            removed_local.update(chain)
+
+    removed_positions = {
+        selected_positions[local] for local in removed_local
+    }
+    kept_roles = {
+        position: role for position, role in role_by_position.items()
+        if position not in removed_positions
+    }
+    removed_roles: dict[str, int] = {}
+    for position in removed_positions:
+        role = role_by_position[position]
+        removed_roles[role] = removed_roles.get(role, 0) + 1
+    return kept_roles, {
+        **base_evidence,
+        "traced_leaf_chains": len(traced_chains),
+        "removed_features": len(removed_positions),
+        "removed_length_m": round(sum(
+            float(work.iloc[position].geometry.length)
+            for position in removed_positions), 3),
+        "removed_roles": removed_roles,
+    }
+
+
 def _apply_amap_spatial_template(
     visible: gpd.GeoDataFrame,
     *,
@@ -405,6 +639,14 @@ def _apply_amap_spatial_template(
     # scale, so there is no generic connector restoration pass.
     connector_positions: set[int] = set()
 
+    role_by_position, dangling_chain_evidence = (
+        _prune_template_dangling_chains(
+            work,
+            role_by_position,
+            bbox_local=bbox_local,
+        )
+    )
+
     selected_positions = set(role_by_position)
     selected = work.iloc[sorted(selected_positions)].copy()
     selected[COMPOSITION_ROLE_COLUMN] = [
@@ -469,7 +711,7 @@ def _apply_amap_spatial_template(
         getattr(visual_salience_guide, "reference", None), "evidence", {}) or {}
     composition_roles = {
         "schema_version": "1.0",
-        "method": "amap_spatial_template_to_osm_roles_v2",
+        "method": "amap_spatial_template_to_osm_roles_v3",
         "primary": _role_evidence("primary"),
         "secondary": _role_evidence("secondary"),
         "context": _role_evidence("context"),
@@ -488,7 +730,7 @@ def _apply_amap_spatial_template(
     })
     return selected, {
         "applied": True,
-        "method": "amap_spatial_template_existing_osm_v2",
+        "method": "amap_spatial_template_existing_osm_v3",
         "candidate_features": len(work),
         "selected_features": len(selected),
         "selected_estimated_ink_ratio": round(selected_ink, 6),
@@ -512,6 +754,7 @@ def _apply_amap_spatial_template(
             "short_supported_length_factor": 4.0,
             "short_fragment_coverage": 0.52,
         },
+        "dangling_chain_pruning": dangling_chain_evidence,
         "visual_salience": {
             "enabled": True,
             "mode": "spatial_template_match_existing_osm_segments",

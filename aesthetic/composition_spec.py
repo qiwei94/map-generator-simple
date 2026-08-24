@@ -17,7 +17,7 @@ from typing import Any, Mapping, Sequence
 
 
 SCHEMA_VERSION = "1.0"
-POLICY_VERSION = "city-composition-v2"
+POLICY_VERSION = "city-composition-v3"
 
 
 def _json_value(value: Any) -> Any:
@@ -147,6 +147,9 @@ def build_composition_spec(
                 water_evidence.get("source_line_segments", 0)),
             "water_visible_segments": int(
                 water_evidence.get("visible_line_segments", 0)),
+            "road_dangling_chain_pruning": _json_value(
+                road_evidence.get("ink_budget", {}).get(
+                    "dangling_chain_pruning", {})),
         },
         "warnings": warnings,
     }
