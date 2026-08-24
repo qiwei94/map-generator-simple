@@ -22,11 +22,13 @@ from aesthetic.scene_character import (
     analyze_scene_character,
     render_scene_character,
 )
+from aesthetic.cross_source_water import compare_water_sources
 from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.osmium_cli_fetcher import (
     fetch_from_cli,
     fetch_tiled_from_cli,
 )
 from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.processors.coords import bbox_to_utm
+from _TEXTURE_STYLE_OF_DEEPSEEK._water_supplement import _fetch_amap_water
 
 
 def _parse_bbox(value: str) -> tuple[float, float, float, float]:
@@ -53,6 +55,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--tiled", action="store_true",
         help="reuse the project's 5 km feature tile cache")
+    parser.add_argument(
+        "--amap-crosscheck", action="store_true",
+        help=("compare OSM water with vectorized AMap no-label tiles; "
+              "evidence only, never supplements model geometry"))
     return parser.parse_args()
 
 
@@ -144,6 +150,38 @@ def main() -> int:
         "pipeline_cache": (args.pipeline_cache.name
                            if args.pipeline_cache else None),
     }
+    report["cross_source_water"] = {
+        "status": "not_requested",
+        "source": "amap_nolabel_tiles",
+        "candidate_cells": [],
+    }
+    if args.amap_crosscheck:
+        cross_started = time.perf_counter()
+        try:
+            amap_wgs84 = _fetch_amap_water(args.bbox)
+            if amap_wgs84:
+                amap_projected = gpd.GeoSeries(
+                    amap_wgs84, crs="EPSG:4326").to_crs(
+                        projection["utm_crs"])
+                amap_reference = list(amap_projected)
+            else:
+                amap_reference = []
+            report["cross_source_water"] = compare_water_sources(
+                projected["water"], amap_reference,
+                projection["utm_bbox"], grid_size=args.grid_size)
+        except Exception as exc:
+            # This optional evidence source must never make an otherwise valid
+            # OSM diagnostic fail.  Preserve a bounded, non-secret reason so
+            # offline and dependency failures remain auditable.
+            report["cross_source_water"] = {
+                "status": "error",
+                "source": "amap_nolabel_tiles",
+                "reason": f"{type(exc).__name__}: {exc}",
+                "candidate_cells": [],
+            }
+        print("[scene] AMap water cross-check: "
+              f"{report['cross_source_water']['status']} in "
+              f"{time.perf_counter() - cross_started:.1f}s")
     report["elapsed_seconds"] = round(time.perf_counter() - started, 3)
 
     args.output_dir.mkdir(parents=True, exist_ok=True)

@@ -586,6 +586,28 @@ def render_scene_character(report: dict, output_path) -> str:
         if cell["dominant_role"] == "possible_data_gap":
             gaps.append((column, row))
 
+    cross_source = report.get("cross_source_water") or {}
+    compact_water_gaps = []
+    linear_water_gaps = []
+    if cross_source.get("status") == "evidence_only":
+        candidate_cells = cross_source.get("candidate_cells", [])
+        compact_cells = sorted(
+            candidate_cells,
+            key=lambda cell: -float(cell.get("compact_gap_area_m2", 0.0)),
+        )[:8]
+        linear_cells = sorted(
+            candidate_cells,
+            key=lambda cell: -float(cell.get("linear_gap_area_m2", 0.0)),
+        )[:6]
+        for cell in compact_cells:
+            point = (int(cell["column"]), int(cell["row"]))
+            if float(cell.get("compact_gap_area_m2", 0.0)) > 0:
+                compact_water_gaps.append(point)
+        for cell in linear_cells:
+            point = (int(cell["column"]), int(cell["row"]))
+            if float(cell.get("linear_gap_area_m2", 0.0)) > 0:
+                linear_water_gaps.append(point)
+
     fig, axes = plt.subplots(2, 2, figsize=(15, 13), constrained_layout=True)
     role_image = axes[0, 0].imshow(
         dominant, origin="lower", cmap=ListedColormap(colors),
@@ -611,11 +633,34 @@ def render_scene_character(report: dict, output_path) -> str:
 
     water_image = axes[1, 1].imshow(
         water, origin="lower", cmap="Blues", vmin=0, vmax=100)
-    axes[1, 1].set_title("Water coverage (%) and suspected OSM holes")
+    water_title = "OSM water coverage (%) and gap evidence"
+    if cross_source.get("status") == "evidence_only":
+        water_title += (
+            "\nAMap-only candidates: "
+            f"{cross_source.get('compact_gap_count', 0)} compact / "
+            f"{cross_source.get('linear_or_noise_gap_count', 0)} linear")
+    elif cross_source.get("status") in {"unavailable", "error"}:
+        water_title += f"\nAMap cross-check: {cross_source['status']}"
+    axes[1, 1].set_title(water_title)
     if gaps:
         axes[1, 1].scatter(
             [x for x, _ in gaps], [y for _, y in gaps],
-            marker="x", s=90, linewidths=2.0, color="#cc2f45")
+            marker="x", s=90, linewidths=2.0, color="#cc2f45",
+            label="OSM internal urban hole")
+    if compact_water_gaps:
+        axes[1, 1].scatter(
+            [x for x, _ in compact_water_gaps],
+            [y for _, y in compact_water_gaps],
+            marker="o", facecolors="none", edgecolors="#e58b2a",
+            s=125, linewidths=2.2, label="largest AMap-only compact water")
+    if linear_water_gaps:
+        axes[1, 1].scatter(
+            [x for x, _ in linear_water_gaps],
+            [y for _, y in linear_water_gaps],
+            marker="+", s=125, linewidths=2.2, color="#8d3f8f",
+            label="largest AMap-only linear / noise")
+    if gaps or compact_water_gaps or linear_water_gaps:
+        axes[1, 1].legend(loc="upper left", fontsize=8, framealpha=0.9)
     fig.colorbar(water_image, ax=axes[1, 1], fraction=0.046)
 
     for axis in axes.flat:
