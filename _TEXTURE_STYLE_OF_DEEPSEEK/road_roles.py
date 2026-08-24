@@ -27,7 +27,7 @@ from .buildings import ROAD_TIERS
 from .config import ROAD_DEFAULT_WIDTH_M, ROAD_FILTER, ROAD_WIDTHS
 
 
-POLICY_VERSION = "print-road-roles-v10"
+POLICY_VERSION = "print-road-roles-v11"
 COMPOSITION_ROLE_COLUMN = "_composition_role"
 
 # A role changes visual hierarchy, never source geometry.  The secondary and
@@ -69,9 +69,21 @@ _TEMPLATE_SECONDARY_GAP_FRAME_FRACTION = 0.025
 _TEMPLATE_CONTEXT_GAP_FRAME_FRACTION = 0.015
 _TEMPLATE_MAX_GAP_DETOUR_RATIO = 2.0
 _TEMPLATE_MIN_MASK_GAP_SUPPORT = 0.42
+_TEMPLATE_SEMANTIC_PRIMARY_GAP_FRAME_FRACTION = 0.080
+_TEMPLATE_SEMANTIC_SECONDARY_GAP_FRAME_FRACTION = 0.070
+_TEMPLATE_SEMANTIC_CONTEXT_GAP_FRAME_FRACTION = 0.050
 _TEMPLATE_MAX_LINK_GAP_M = 250.0
 _TEMPLATE_MAX_LINK_GAP_DETOUR_RATIO = 1.35
 _TEMPLATE_MAX_LINK_EDGES_PER_GAP = 1
+_TEMPLATE_INFERRED_LINK_CONTINUATION_COSINE = 0.90
+_TEMPLATE_INFERRED_LINK_MIN_COVERAGE = 0.25
+_TEMPLATE_INFERRED_LINK_MIN_WEIGHT = 0.10
+_TEMPLATE_MAX_CORRIDOR_PATHS_PER_ANCHOR = 3
+_TEMPLATE_MAX_MASK_PATHS_PER_ANCHOR = 1
+_TEMPLATE_CORRIDOR_SNAP_FRAME_FRACTION = 0.0015
+_TEMPLATE_CORRIDOR_SNAP_MIN_M = 8.0
+_TEMPLATE_CORRIDOR_SNAP_MAX_M = 60.0
+_TEMPLATE_PROXIMITY_CONTINUATION_COSINE = 0.85
 
 _WIDTH_FACTORS = {
     "motorway": 1.35,
@@ -318,6 +330,75 @@ def _terminal_direction(geometry, terminal_index: int) \
     return dx / magnitude, dy / magnitude
 
 
+def _road_class_rank(value: Any) -> int | None:
+    """Return a coarse through-road rank, treating links as their parent."""
+
+    highway = str(value or "")
+    if highway.endswith("_link"):
+        highway = highway[:-5]
+    return {
+        "motorway": 0,
+        "trunk": 1,
+        "primary": 2,
+        "secondary": 3,
+        "tertiary": 4,
+    }.get(highway)
+
+
+def _road_classes_compatible(left: Any, right: Any) -> bool:
+    """Allow one OSM class step across a physical road corridor."""
+
+    left_rank = _road_class_rank(left)
+    right_rank = _road_class_rank(right)
+    return (left_rank is not None and right_rank is not None
+            and abs(left_rank - right_rank) <= 1)
+
+
+def _directions_from_line_at_point(
+    geometry,
+    point: Point,
+    *,
+    endpoint_tolerance_m: float,
+) -> list[tuple[float, float]]:
+    """Return unit vectors pointing away from a point along a source line."""
+
+    if geometry is None or geometry.is_empty \
+            or geometry.geom_type != "LineString":
+        return []
+    terminals = _line_terminals(geometry)
+    if terminals is None:
+        return []
+    terminal_distances = [point.distance(candidate) for candidate in terminals]
+    closest_terminal = min(range(2), key=lambda index: terminal_distances[index])
+    if terminal_distances[closest_terminal] <= endpoint_tolerance_m:
+        direction = _terminal_direction(geometry, closest_terminal)
+        return [direction] if direction is not None else []
+
+    length_m = float(geometry.length)
+    if length_m <= 1e-9 or point.distance(geometry) > endpoint_tolerance_m:
+        return []
+    projected = float(geometry.project(point))
+    sample_m = max(
+        endpoint_tolerance_m * 4.0,
+        min(25.0, length_m * 0.08),
+    )
+    origin = geometry.interpolate(projected)
+    directions = []
+    for distance_m in (
+        max(0.0, projected - sample_m),
+        min(length_m, projected + sample_m),
+    ):
+        if abs(distance_m - projected) <= 1e-9:
+            continue
+        sample = geometry.interpolate(distance_m)
+        dx = float(sample.x) - float(origin.x)
+        dy = float(sample.y) - float(origin.y)
+        magnitude = math.hypot(dx, dy)
+        if magnitude > 1e-9:
+            directions.append((dx / magnitude, dy / magnitude))
+    return directions
+
+
 def _truthy_osm_tag(value: Any) -> bool:
     if value is None:
         return False
@@ -345,34 +426,63 @@ def _restore_template_continuity(
     *,
     bbox_local,
 ) -> tuple[dict[int, str], dict[str, Any]]:
-    """Restore bounded, two-ended paths from the original OSM graph.
+    """Restore bounded road-corridor paths from the original OSM graph.
 
     Raster palette gaps and per-feature thresholding can leave two confirmed
     pieces of one corridor disconnected.  Missing source features are allowed
     back only when an OSM path connects two selected anchors, stays short and
-    direct, and has either semantic continuity or reference-mask support.
-    No coordinates are generated or modified.
+    direct, and has semantic, geometric-corridor or reference-mask support.
+    A small semantic proximity tolerance handles split carriageways and OSM
+    endpoint offsets.  No coordinates are generated or modified.
     """
 
     xmin, ymin, xmax, ymax = (float(value) for value in bbox_local)
     frame_span = max(xmax - xmin, ymax - ymin, 1.0)
     endpoint_snap_m = max(0.5, min(2.0, frame_span * 0.00004))
+    corridor_snap_m = min(
+        _TEMPLATE_CORRIDOR_SNAP_MAX_M,
+        max(_TEMPLATE_CORRIDOR_SNAP_MIN_M,
+            frame_span * _TEMPLATE_CORRIDOR_SNAP_FRAME_FRACTION),
+    )
     role_limits = {
         "primary": frame_span * _TEMPLATE_PRIMARY_GAP_FRAME_FRACTION,
         "secondary": frame_span * _TEMPLATE_SECONDARY_GAP_FRAME_FRACTION,
         "context": frame_span * _TEMPLATE_CONTEXT_GAP_FRAME_FRACTION,
     }
+    semantic_role_limits = {
+        "primary": frame_span
+        * _TEMPLATE_SEMANTIC_PRIMARY_GAP_FRAME_FRACTION,
+        "secondary": frame_span
+        * _TEMPLATE_SEMANTIC_SECONDARY_GAP_FRAME_FRACTION,
+        "context": frame_span
+        * _TEMPLATE_SEMANTIC_CONTEXT_GAP_FRAME_FRACTION,
+    }
     base_evidence = {
-        "method": "two_ended_original_osm_path_v1",
+        "method": "corridor_aware_original_osm_path_v2",
         "endpoint_snap_m": round(endpoint_snap_m, 3),
+        "corridor_snap_m": round(corridor_snap_m, 3),
         "role_gap_limits_m": {
             role: round(value, 3) for role, value in role_limits.items()
+        },
+        "semantic_role_gap_limits_m": {
+            role: round(value, 3)
+            for role, value in semantic_role_limits.items()
         },
         "max_detour_ratio": _TEMPLATE_MAX_GAP_DETOUR_RATIO,
         "minimum_mask_support": _TEMPLATE_MIN_MASK_GAP_SUPPORT,
         "max_link_gap_m": _TEMPLATE_MAX_LINK_GAP_M,
         "max_link_detour_ratio": _TEMPLATE_MAX_LINK_GAP_DETOUR_RATIO,
         "max_link_edges_per_gap": _TEMPLATE_MAX_LINK_EDGES_PER_GAP,
+        "inferred_link_continuation_cosine": (
+            _TEMPLATE_INFERRED_LINK_CONTINUATION_COSINE),
+        "inferred_link_minimum_coverage": (
+            _TEMPLATE_INFERRED_LINK_MIN_COVERAGE),
+        "inferred_link_minimum_weight": _TEMPLATE_INFERRED_LINK_MIN_WEIGHT,
+        "max_corridor_paths_per_anchor": (
+            _TEMPLATE_MAX_CORRIDOR_PATHS_PER_ANCHOR),
+        "max_mask_paths_per_anchor": _TEMPLATE_MAX_MASK_PATHS_PER_ANCHOR,
+        "proximity_continuation_cosine": (
+            _TEMPLATE_PROXIMITY_CONTINUATION_COSINE),
     }
     selected_positions = sorted(role_by_position)
     if len(selected_positions) < 2:
@@ -383,6 +493,8 @@ def _restore_template_continuity(
             "component_bridge_paths": 0,
             "same_component_corridor_paths": 0,
             "semantic_paths": 0,
+            "proximity_corridor_paths": 0,
+            "inferred_corridor_paths": 0,
             "mask_supported_paths": 0,
             "restored_features": 0,
             "restored_length_m": 0.0,
@@ -398,6 +510,7 @@ def _restore_template_continuity(
     selected_index = selected.sindex
 
     parents = list(range(len(selected)))
+    corridor_parents = list(range(len(selected)))
 
     def _find(value: int) -> int:
         while parents[value] != value:
@@ -410,6 +523,19 @@ def _restore_template_continuity(
         right_root = _find(right)
         if left_root != right_root:
             parents[right_root] = left_root
+
+    def _corridor_find(value: int) -> int:
+        while corridor_parents[value] != value:
+            corridor_parents[value] = corridor_parents[
+                corridor_parents[value]]
+            value = corridor_parents[value]
+        return value
+
+    def _corridor_union(left: int, right: int) -> None:
+        left_root = _corridor_find(left)
+        right_root = _corridor_find(right)
+        if left_root != right_root:
+            corridor_parents[right_root] = left_root
 
     for local_pos, feature_terminals in selected_terminals.items():
         if feature_terminals is None:
@@ -424,6 +550,12 @@ def _restore_template_continuity(
                 if point.distance(selected.iloc[other_local].geometry) \
                         <= endpoint_snap_m:
                     _union(local_pos, other_local)
+                    identity = _template_identity_for_row(
+                        selected.iloc[local_pos])
+                    if (identity
+                            and identity == _template_identity_for_row(
+                                selected.iloc[other_local])):
+                        _corridor_union(local_pos, other_local)
 
     root_identities: dict[int, set[str]] = {}
     for local_pos, row in selected.iterrows():
@@ -434,7 +566,11 @@ def _restore_template_continuity(
 
     selected_identity_set = set().union(*root_identities.values()) \
         if root_identities else set()
-    maximum_gap_m = role_limits["primary"]
+    selected_local_by_position = {
+        position: local_pos
+        for local_pos, position in enumerate(selected_positions)
+    }
+    maximum_gap_m = max(semantic_role_limits.values())
 
     def _node_key(point: Point) -> tuple[int, int]:
         return (int(round(point.x / endpoint_snap_m)),
@@ -493,6 +629,25 @@ def _restore_template_continuity(
                 continue
             roots.add(_find(local_pos))
             positions.add(selected_positions[local_pos])
+        corridor_positions = set(positions)
+        corridor_roots = set(roots)
+        node_identities = {
+            identity for _, position in graph.get(key, [])
+            if (identity := _template_identity_for_row(work.iloc[position]))
+        }
+        if node_identities:
+            corridor_matches = selected_index.query(
+                point.buffer(corridor_snap_m), predicate="intersects")
+            for local_pos in corridor_matches:
+                local_pos = int(local_pos)
+                selected_row = selected.iloc[local_pos]
+                if (_template_identity_for_row(selected_row)
+                        not in node_identities):
+                    continue
+                if point.distance(selected_row.geometry) > corridor_snap_m:
+                    continue
+                corridor_roots.add(_find(local_pos))
+                corridor_positions.add(selected_positions[local_pos])
         # Anchor semantics must be local to the touching source features.  A
         # connected downtown graph may contain hundreds of unrelated names;
         # inheriting all of them from the component would make almost any
@@ -502,27 +657,63 @@ def _restore_template_continuity(
             identity for position in positions
             if (identity := _template_identity_for_row(work.iloc[position]))
         }
+        corridor_roles = {
+            role_by_position[position] for position in corridor_positions
+        }
+        corridor_identities = {
+            identity for position in corridor_positions
+            if (identity := _template_identity_for_row(work.iloc[position]))
+        }
+
+        def _identity_roots(source_positions: set[int]) \
+                -> dict[str, set[int]]:
+            result: dict[str, set[int]] = {}
+            for position in source_positions:
+                identity = _template_identity_for_row(work.iloc[position])
+                local_pos = selected_local_by_position[position]
+                if identity:
+                    result.setdefault(identity, set()).add(
+                        _corridor_find(local_pos))
+            return result
+
         anchor_cache[key] = {
             "roots": roots,
             "positions": positions,
             "roles": roles,
             "identities": identities,
+            "corridor_roots": corridor_roots,
+            "corridor_positions": corridor_positions,
+            "corridor_roles": corridor_roles,
+            "corridor_identities": corridor_identities,
+            "identity_roots": _identity_roots(positions),
+            "corridor_identity_roots": _identity_roots(
+                corridor_positions),
         }
         return anchor_cache[key]
 
-    anchor_nodes = sorted(key for key in graph if _anchor(key)["roots"])
+    anchor_nodes = sorted(
+        key for key in graph if _anchor(key)["corridor_roots"])
     restored_paths: list[tuple[int, ...]] = []
     restored_positions: set[int] = set()
     accepted_path_keys: set[tuple[int, ...]] = set()
     component_bridge_paths = 0
     same_component_corridor_paths = 0
     semantic_paths = 0
+    proximity_corridor_paths = 0
     mask_supported_paths = 0
+    inferred_corridor_paths = 0
     role_rank = {"primary": 0, "secondary": 1, "context": 2}
 
-    def _path_role(start_info, target_info, path: tuple[int, ...]) -> str:
-        start_roles = start_info["roles"]
-        target_roles = target_info["roles"]
+    def _path_role(
+        start_info,
+        target_info,
+        path: tuple[int, ...],
+        *,
+        use_corridor_anchors: bool = False,
+    ) -> str:
+        role_key = "corridor_roles" if use_corridor_anchors else "roles"
+        start_roles = start_info[role_key]
+        target_roles = target_info[role_key]
         if "primary" in start_roles and "primary" in target_roles:
             return "primary"
         if ({"primary", "secondary"} & start_roles
@@ -530,32 +721,147 @@ def _restore_template_continuity(
             return "secondary"
         return "context"
 
+    def _anchor_path_alignment(
+        anchor_info,
+        path_position: int,
+        node_key: tuple[int, int],
+        *,
+        allowed_identities: set[str],
+        use_corridor_anchors: bool = False,
+    ) -> float:
+        """Measure whether a missing edge continues a selected corridor."""
+
+        point = _node_point(node_key)
+        path_row = work.iloc[path_position]
+        path_directions = _directions_from_line_at_point(
+            path_row.geometry,
+            point,
+            endpoint_tolerance_m=endpoint_snap_m * 1.5,
+        )
+        if not path_directions:
+            return -1.0
+        best = -1.0
+        positions_key = (
+            "corridor_positions" if use_corridor_anchors else "positions")
+        selected_tolerance_m = (
+            corridor_snap_m if use_corridor_anchors else endpoint_snap_m * 1.5)
+        for selected_position in anchor_info[positions_key]:
+            selected_row = work.iloc[selected_position]
+            identity = _template_identity_for_row(selected_row)
+            if identity not in allowed_identities:
+                continue
+            if not _road_classes_compatible(
+                    path_row.get("highway"), selected_row.get("highway")):
+                continue
+            selected_directions = _directions_from_line_at_point(
+                selected_row.geometry,
+                point,
+                endpoint_tolerance_m=selected_tolerance_m,
+            )
+            for path_direction in path_directions:
+                for selected_direction in selected_directions:
+                    continuation = -(
+                        path_direction[0] * selected_direction[0]
+                        + path_direction[1] * selected_direction[1]
+                    )
+                    best = max(best, continuation)
+        return best
+
     for start in anchor_nodes:
         start_info = _anchor(start)
         queue = [(0.0, 0.0, 0, start, tuple())]
         best_cost = {start: 0.0}
-        accepted_for_start = False
-        while queue and not accepted_for_start:
+        accepted_corridor_paths = 0
+        accepted_mask_paths = 0
+        while queue:
             cost, length_m, link_count, node, path = heapq.heappop(queue)
             if cost > best_cost.get(node, float("inf")) + 1e-9:
                 continue
-            if node != start and _anchor(node)["roots"] and path:
+            if node != start and _anchor(node)["corridor_roots"] and path:
                 target_info = _anchor(node)
                 different_roots = bool(
-                    target_info["roots"] - start_info["roots"])
+                    start_info["roots"]
+                    and target_info["roots"]
+                    and target_info["roots"] - start_info["roots"])
                 shared_identities = (
                     start_info["identities"] & target_info["identities"])
                 path_identities = {
                     identity for pos in path
                     if (identity := _template_identity_for_row(work.iloc[pos]))
                 }
+
+                def _different_identity_roots(
+                    identities: set[str],
+                    *,
+                    use_corridor_anchors: bool = False,
+                ) -> bool:
+                    roots_key = (
+                        "corridor_identity_roots"
+                        if use_corridor_anchors else "identity_roots")
+                    for identity in identities:
+                        start_roots = start_info[roots_key].get(identity, set())
+                        target_roots = target_info[roots_key].get(
+                            identity, set())
+                        if (start_roots and target_roots
+                                and target_roots - start_roots):
+                            return True
+                    return False
+
+                different_shared_corridor_roots = (
+                    _different_identity_roots(shared_identities))
+                closes_ring_corridor = any(
+                    identity.startswith(("numbered-ring:", "named-ring:"))
+                    for identity in shared_identities)
+                possible_unnamed_ring_link = bool(
+                    closes_ring_corridor
+                    and not path_identities
+                    and all(str(work.iloc[pos].get("highway") or "")
+                            .endswith("_link") for pos in path)
+                )
                 semantic_match = bool(
                     shared_identities
                     and path_identities
                     and path_identities <= shared_identities
                 )
-                if different_roots or semantic_match:
-                    role = _path_role(start_info, target_info, path)
+                corridor_shared_identities = (
+                    start_info["corridor_identities"]
+                    & target_info["corridor_identities"])
+                proximity_start_alignment = -1.0
+                proximity_target_alignment = -1.0
+                proximity_corridor_match = False
+                if (path_identities
+                        and corridor_shared_identities
+                        and path_identities <= corridor_shared_identities):
+                    proximity_start_alignment = _anchor_path_alignment(
+                        start_info,
+                        path[0],
+                        start,
+                        allowed_identities=corridor_shared_identities,
+                        use_corridor_anchors=True,
+                    )
+                    proximity_target_alignment = _anchor_path_alignment(
+                        target_info,
+                        path[-1],
+                        node,
+                        allowed_identities=corridor_shared_identities,
+                        use_corridor_anchors=True,
+                    )
+                    proximity_corridor_match = bool(
+                        proximity_start_alignment
+                        >= _TEMPLATE_PROXIMITY_CONTINUATION_COSINE
+                        and proximity_target_alignment
+                        >= _TEMPLATE_PROXIMITY_CONTINUATION_COSINE
+                        and not semantic_match
+                    )
+                if (different_roots or semantic_match
+                        or proximity_corridor_match
+                        or possible_unnamed_ring_link):
+                    role = _path_role(
+                        start_info,
+                        target_info,
+                        path,
+                        use_corridor_anchors=proximity_corridor_match,
+                    )
                     straight_m = _node_point(start).distance(_node_point(node))
                     detour = length_m / max(straight_m, endpoint_snap_m)
                     weighted_length = sum(
@@ -563,43 +869,122 @@ def _restore_template_continuity(
                         * float(support_by_position.get(pos, {}).get(
                             "weighted_salience", 0.0)) for pos in path)
                     average_support = weighted_length / max(length_m, 1.0)
+                    covered_length = sum(
+                        float(work.iloc[pos].geometry.length)
+                        * float(support_by_position.get(pos, {}).get(
+                            "any_template_fraction",
+                            support_by_position.get(pos, {}).get(
+                                "covered_fraction", 0.0),
+                        ))
+                        for pos in path
+                    )
+                    average_coverage = covered_length / max(length_m, 1.0)
                     has_link = link_count > 0
+                    unnamed_link_path = bool(
+                        path
+                        and not path_identities
+                        and all(str(work.iloc[pos].get("highway") or "")
+                                .endswith("_link") for pos in path)
+                    )
+                    start_alignment = -1.0
+                    target_alignment = -1.0
+                    inferred_shared_identities = shared_identities
+                    if ((different_shared_corridor_roots
+                            or closes_ring_corridor)
+                            and inferred_shared_identities
+                            and unnamed_link_path):
+                        start_alignment = _anchor_path_alignment(
+                            start_info,
+                            path[0],
+                            start,
+                            allowed_identities=inferred_shared_identities,
+                        )
+                        target_alignment = _anchor_path_alignment(
+                            target_info,
+                            path[-1],
+                            node,
+                            allowed_identities=inferred_shared_identities,
+                        )
+                    inferred_corridor_match = bool(
+                        (different_shared_corridor_roots
+                         or closes_ring_corridor)
+                        and inferred_shared_identities
+                        and unnamed_link_path
+                        and start_alignment
+                        >= _TEMPLATE_INFERRED_LINK_CONTINUATION_COSINE
+                        and target_alignment
+                        >= _TEMPLATE_INFERRED_LINK_CONTINUATION_COSINE
+                        and average_coverage
+                        >= _TEMPLATE_INFERRED_LINK_MIN_COVERAGE
+                        and average_support
+                        >= _TEMPLATE_INFERRED_LINK_MIN_WEIGHT
+                    )
                     link_path_valid = (
                         not has_link
-                        or (different_roots
-                            and semantic_match
+                        or ((different_roots or inferred_corridor_match)
+                            and (semantic_match
+                                 or proximity_corridor_match
+                                 or inferred_corridor_match)
                             and length_m <= _TEMPLATE_MAX_LINK_GAP_M
                             and detour
                             <= _TEMPLATE_MAX_LINK_GAP_DETOUR_RATIO)
                     )
                     path_key = tuple(sorted(path))
-                    if (length_m <= role_limits[role]
+                    path_limit_m = (
+                        semantic_role_limits[role]
+                        if (semantic_match or proximity_corridor_match)
+                        else role_limits[role]
+                    )
+                    if (length_m <= path_limit_m
                             and detour <= _TEMPLATE_MAX_GAP_DETOUR_RATIO
                             and link_count
                             <= _TEMPLATE_MAX_LINK_EDGES_PER_GAP
                             and link_path_valid
                             and (semantic_match
+                                 or proximity_corridor_match
+                                 or inferred_corridor_match
                                  or (different_roots and average_support
                                      >= _TEMPLATE_MIN_MASK_GAP_SUPPORT))
                             and path_key not in accepted_path_keys):
+                        is_corridor_path = bool(
+                            semantic_match or proximity_corridor_match
+                            or inferred_corridor_match)
+                        if (is_corridor_path
+                                and accepted_corridor_paths
+                                >= _TEMPLATE_MAX_CORRIDOR_PATHS_PER_ANCHOR):
+                            continue
+                        if (not is_corridor_path
+                                and accepted_mask_paths
+                                >= _TEMPLATE_MAX_MASK_PATHS_PER_ANCHOR):
+                            continue
                         accepted_path_keys.add(path_key)
                         restored_paths.append(path)
                         component_bridge_paths += int(different_roots)
                         same_component_corridor_paths += int(
                             not different_roots)
                         semantic_paths += int(semantic_match)
+                        proximity_corridor_paths += int(
+                            proximity_corridor_match)
+                        inferred_corridor_paths += int(
+                            inferred_corridor_match)
                         mask_supported_paths += int(
                             not semantic_match
+                            and not proximity_corridor_match
+                            and not inferred_corridor_match
                             and average_support
                             >= _TEMPLATE_MIN_MASK_GAP_SUPPORT)
+                        accepted_corridor_paths += int(is_corridor_path)
+                        accepted_mask_paths += int(not is_corridor_path)
                         for pos in path:
                             previous = role_by_position.get(pos)
                             if (previous is None
                                     or role_rank[role] < role_rank[previous]):
                                 role_by_position[pos] = role
                             restored_positions.add(pos)
-                        accepted_for_start = True
-                        break
+                        # Do not walk through an accepted anchor into a second
+                        # corridor.  Other queued branches may still repair
+                        # parallel carriageways at this same junction.
+                        continue
 
             if len(path) >= 12 or length_m >= maximum_gap_m:
                 continue
@@ -651,6 +1036,8 @@ def _restore_template_continuity(
         "component_bridge_paths": component_bridge_paths,
         "same_component_corridor_paths": same_component_corridor_paths,
         "semantic_paths": semantic_paths,
+        "proximity_corridor_paths": proximity_corridor_paths,
+        "inferred_corridor_paths": inferred_corridor_paths,
         "mask_supported_paths": mask_supported_paths,
         "restored_features": len(restored_positions),
         "restored_length_m": round(sum(
