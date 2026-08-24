@@ -90,3 +90,61 @@ def test_offline_preview_does_not_attempt_download(monkeypatch, tmp_path):
 
     assert heights is None
     assert names is None
+
+
+def test_overture_download_is_opt_in_by_default(monkeypatch, tmp_path):
+    import geopandas as gpd
+    from shapely.geometry import Point
+
+    osm = gpd.GeoDataFrame(
+        {"geometry": [Point(120.15, 30.25)]},
+        geometry="geometry", crs="EPSG:4326",
+    )
+    monkeypatch.delenv("OVERTURE_AUTO_DOWNLOAD", raising=False)
+    monkeypatch.setattr(
+        height_enrichment,
+        "_download_overture",
+        lambda *_args, **_kwargs: pytest.fail(
+            "default generation must not consume overseas bandwidth"),
+    )
+
+    heights, names = height_enrichment.load_overture_heights(
+        osm,
+        bbox_wgs84=(30.1, 120.0, 30.4, 120.3),
+        cache_dir=str(tmp_path),
+    )
+
+    assert heights is None
+    assert names is None
+
+
+def test_overture_download_can_be_explicitly_enabled(monkeypatch, tmp_path):
+    import geopandas as gpd
+    from shapely.geometry import Point
+
+    osm = gpd.GeoDataFrame(
+        {"geometry": [Point(120.15, 30.25)]},
+        geometry="geometry", crs="EPSG:4326",
+    )
+    sentinel = tmp_path / "downloaded.parquet"
+    monkeypatch.setenv("OVERTURE_AUTO_DOWNLOAD", "1")
+    monkeypatch.setattr(
+        height_enrichment,
+        "_download_overture",
+        lambda *_args, **_kwargs: sentinel,
+    )
+    monkeypatch.setattr(
+        gpd,
+        "read_parquet",
+        lambda *_args, **_kwargs: gpd.GeoDataFrame(
+            geometry=[], crs="EPSG:4326"),
+    )
+
+    heights, names = height_enrichment.load_overture_heights(
+        osm,
+        bbox_wgs84=(30.1, 120.0, 30.4, 120.3),
+        cache_dir=str(tmp_path),
+    )
+
+    assert heights is None
+    assert names is None

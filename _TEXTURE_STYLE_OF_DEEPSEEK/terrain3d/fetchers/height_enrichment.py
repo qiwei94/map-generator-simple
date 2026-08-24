@@ -184,7 +184,7 @@ def load_overture_heights(
     osm_gdf,
     bbox_wgs84: Tuple[float, float, float, float],
     cache_dir: str = _DEFAULT_CACHE_DIR,
-    auto_download: bool = True,
+    auto_download: bool = False,
 ) -> Tuple[Optional[pd.Series], Optional[pd.Series]]:
     """Load Overture building heights and spatially join onto OSM buildings.
 
@@ -204,8 +204,8 @@ def load_overture_heights(
         return None, None
 
     env_auto_download = os.environ.get("OVERTURE_AUTO_DOWNLOAD", "").strip()
-    if env_auto_download.lower() in {"0", "false", "no", "off"}:
-        auto_download = False
+    if env_auto_download:
+        auto_download = env_auto_download.lower() in {"1", "true", "yes", "on"}
 
     # Step 1: Find or download cache
     parquet_path = _find_overture_cache(bbox_wgs84, cache_dir)

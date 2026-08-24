@@ -548,7 +548,11 @@ class OsmiumCLIFetcher:
             ndsm_heights = sample_building_heights_from_ndsm(
                 gdf, grid, s, w, n, e)
         overture_heights = None
-        from _TEXTURE_STYLE_OF_DEEPSEEK.config import OVERTURE_ENABLED, OVERTURE_CACHE_DIR
+        from _TEXTURE_STYLE_OF_DEEPSEEK.config import (
+            OVERTURE_AUTO_DOWNLOAD,
+            OVERTURE_CACHE_DIR,
+            OVERTURE_ENABLED,
+        )
         if OVERTURE_ENABLED:
             try:
                 from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.height_enrichment import (
@@ -561,7 +565,8 @@ class OsmiumCLIFetcher:
                     _ov_cache = os.path.join(_project_root, _ov_cache)
                 overture_heights, _ = load_overture_heights(
                     gdf, bbox_wgs84=(south, west, north, east),
-                    cache_dir=_ov_cache)
+                    cache_dir=_ov_cache,
+                    auto_download=OVERTURE_AUTO_DOWNLOAD)
             except Exception:
                 pass
         gdf["est_height"] = _estimate_building_heights(

@@ -607,7 +607,11 @@ def fetch_buildings(
 
         # Overture Maps height enrichment (priority 4, between nDSM and default)
         overture_heights = None
-        from _TEXTURE_STYLE_OF_DEEPSEEK.config import OVERTURE_ENABLED, OVERTURE_CACHE_DIR
+        from _TEXTURE_STYLE_OF_DEEPSEEK.config import (
+            OVERTURE_AUTO_DOWNLOAD,
+            OVERTURE_CACHE_DIR,
+            OVERTURE_ENABLED,
+        )
         if OVERTURE_ENABLED:
             try:
                 from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.height_enrichment import (
@@ -620,7 +624,8 @@ def fetch_buildings(
                     _ov_cache = os.path.join(_project_root, _ov_cache)
                 overture_heights, overture_names = load_overture_heights(
                     result, bbox_wgs84=bbox_wgs84,
-                    cache_dir=_ov_cache)
+                    cache_dir=_ov_cache,
+                    auto_download=OVERTURE_AUTO_DOWNLOAD)
                 if overture_heights is not None:
                     # Also enrich OSM names with Overture names (for landmark detection)
                     if overture_names is not None and "name" in result.columns:
