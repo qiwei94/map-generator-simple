@@ -146,6 +146,10 @@ def parse_args(argv=None):
         help='同时渲染画廊级俯视图（无文字、超采样，风格画廊同源）'
     )
     parser.add_argument(
+        '--review-only', action='store_true', default=False,
+        help='生成 --review-png 后立即退出；需与 --draft 同用，避免构建 3MF/GLB'
+    )
+    parser.add_argument(
         '--draft', action='store_true', default=False,
         help='Draft 模式：跳过 brick/boolean，快速导出 GLB 预览后退出'
     )
@@ -399,6 +403,8 @@ def main():
         raise SystemExit("--base-thickness-mm must be between 0.4 and 3.0")
     if cli_args.preview_fast and not cli_args.draft:
         raise SystemExit("--preview-fast requires --draft")
+    if cli_args.review_only and not (cli_args.draft and cli_args.review_png):
+        raise SystemExit("--review-only requires --draft --review-png")
 
     LAT1, LON1, LAT2, LON2 = cli_args.bbox_tuple
     CITY_NAME = cli_args.city
@@ -1050,6 +1056,12 @@ def main():
             print(f"  Time: {time.time() - t465:.1f}s")
         except Exception as e:
             print(f"  WARNING: gallery preview failed: {type(e).__name__}: {e}")
+
+    if getattr(cli_args, "review_only", False):
+        total_time = time.time() - t_start
+        print(f"  Review-only complete in {total_time:.1f}s; "
+              "GLB and 3MF skipped")
+        return
 
     # =====================================================================
     # Stage 4.8: Draft GLB 快速预览（--draft：导出后提前退出）

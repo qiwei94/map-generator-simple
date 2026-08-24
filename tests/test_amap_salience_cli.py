@@ -15,6 +15,9 @@ def test_amap_salience_cli_is_opt_in():
     assert parse_args(base).amap_salience == "off"
     assert parse_args([*base, "--amap-salience", "cache"]).amap_salience == (
         "cache")
+    review = parse_args([
+        *base, "--draft", "--review-png", "--review-only"])
+    assert review.review_only is True
 
 
 def test_disabled_salience_never_loads_or_fetches_reference():
