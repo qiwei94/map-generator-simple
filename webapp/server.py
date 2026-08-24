@@ -1282,16 +1282,25 @@ def api_showcase():
             path = GALLERY_DIR / slug / str(filename or "")
             if not filename or not path.is_file():
                 continue
-            label = style_labels.get(style, str(style).upper())
+            label = str(city.get("review_label_25km") or
+                        style_labels.get(style, str(style).upper()))
+            release = "".join(
+                char for char in str(city.get("review_release_25km", ""))
+                if char.isalnum() or char in "-_"
+            )
+            asset_url = f"/files/style_gallery/{slug}/{filename}"
+            if release:
+                asset_url = f"{asset_url}?release={release}"
             title = _showcase_display_title(city, slug)
             review_samples.append({
                 "title": title,
                 "location": f"{key.replace('_', ' ').upper()} / {label} / 25 KM",
-                "kind": "最新 25 × 25 KM 待审样品",
+                "kind": city.get(
+                    "review_kind_25km", "最新 25 × 25 KM 待审样品"),
                 "alt": (f"最新生成的{city.get('title', title)} "
                         f"25 公里乘 25 公里{label}风格待审图"),
                 "size_km": review_size_km,
-                "url": f"/files/style_gallery/{slug}/{filename}",
+                "url": asset_url,
                 "review_batch": True,
             })
     return {"samples": review_samples + samples}

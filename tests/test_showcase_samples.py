@@ -190,6 +190,9 @@ def test_showcase_api_prepends_complete_25km_review_batch(
         "cities": [{
             "key": "rome", "title": "Rome", "caption": "Rome review",
             "hero_style": "baseline", "review_style_25km": "dense_detail",
+            "review_label_25km": "CITY STRUCTURE",
+            "review_release_25km": "domestic-v11",
+            "review_kind_25km": "最新 25 × 25 KM 城市骨架样品",
         }],
     }), encoding="utf-8")
     gallery_dir = tmp_path / "gallery"
@@ -216,9 +219,10 @@ def test_showcase_api_prepends_complete_25km_review_batch(
     sample = result["samples"][0]
     assert sample["size_km"] == 25
     assert sample["review_batch"] is True
-    assert sample["kind"] == "最新 25 × 25 KM 待审样品"
+    assert sample["kind"] == "最新 25 × 25 KM 城市骨架样品"
+    assert sample["location"] == "ROME / CITY STRUCTURE / 25 KM"
     assert sample["url"].endswith(
-        "/showcase_rome_25km/dense_detail_topdown.png")
+        "/showcase_rome_25km/dense_detail_topdown.png?release=domestic-v11")
 
 
 def test_showcase_title_prefixes_the_concise_city_name():

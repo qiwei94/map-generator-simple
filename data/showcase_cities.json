@@ -26,6 +26,10 @@
       "pbf": "zhejiang-latest.osm.pbf",
       "prototype": "landscape",
       "hero_style": "dense_detail",
+      "review_style_25km": "dense_detail",
+      "review_label_25km": "CITY STRUCTURE",
+      "review_release_25km": "domestic-v11",
+      "review_kind_25km": "最新 25 × 25 KM 城市骨架样品",
       "featured": true
     },
     {
@@ -37,6 +41,10 @@
       "pbf": "jiangsu-latest.osm.pbf",
       "prototype": "landscape",
       "hero_style": "block_fill",
+      "review_style_25km": "block_fill",
+      "review_label_25km": "CITY STRUCTURE",
+      "review_release_25km": "domestic-v11",
+      "review_kind_25km": "最新 25 × 25 KM 城市骨架样品",
       "featured": false
     },
     {
@@ -150,6 +158,10 @@
       "pbf": "guangdong-latest.osm.pbf",
       "prototype": "skyline",
       "hero_style": "block_fill",
+      "review_style_25km": "block_fill",
+      "review_label_25km": "CITY STRUCTURE",
+      "review_release_25km": "domestic-v11",
+      "review_kind_25km": "最新 25 × 25 KM 城市骨架样品",
       "featured": true
     },
     {
