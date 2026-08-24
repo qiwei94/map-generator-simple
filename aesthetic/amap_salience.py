@@ -26,7 +26,7 @@ from _TEXTURE_STYLE_OF_DEEPSEEK._water_supplement import (
 
 
 PALETTE_VERSION = "amap-style7-salience-v1"
-TEMPLATE_POLICY_VERSION = "amap-spatial-template-v2"
+TEMPLATE_POLICY_VERSION = "amap-spatial-template-v3"
 COMPARISON_VERSION = "amap-salience-comparison-v1"
 
 # Exact style-7 anchors observed in real Beijing tiles.  A small RGB distance

@@ -11,7 +11,7 @@ def _layers():
     return LayerPolygons(
         roads_lines=[("not-serialized-geometry", "primary", False, "primary")],
         road_roles={
-            "policy_version": "print-road-roles-v9",
+            "policy_version": "print-road-roles-v10",
             "source_line_features": 12,
             "width_policy": {
                 "road_width_multiplier": 2.0,
@@ -26,8 +26,13 @@ def _layers():
                 "background": {"role": "block_base_only", "features": 9},
             },
             "ink_budget": {
+                "continuity_restoration": {
+                    "method": "two_ended_original_osm_path_v1",
+                    "restored_features": 3,
+                    "restored_length_m": 120.0,
+                },
                 "dangling_chain_pruning": {
-                    "method": "selected_osm_graph_leaf_chain_v1",
+                    "method": "selected_osm_graph_leaf_chain_v2",
                     "removed_features": 2,
                     "removed_length_m": 180.0,
                 },
@@ -76,8 +81,13 @@ def test_composition_spec_records_contract_and_identities_not_geometry():
         "amap-template-v1")
     assert "spatially matching" in (
         spec["decision_contract"]["salience_reference"])
+    assert spec["evidence"]["road_continuity_restoration"] == {
+        "method": "two_ended_original_osm_path_v1",
+        "restored_features": 3,
+        "restored_length_m": 120.0,
+    }
     assert spec["evidence"]["road_dangling_chain_pruning"] == {
-        "method": "selected_osm_graph_leaf_chain_v1",
+        "method": "selected_osm_graph_leaf_chain_v2",
         "removed_features": 2,
         "removed_length_m": 180.0,
     }

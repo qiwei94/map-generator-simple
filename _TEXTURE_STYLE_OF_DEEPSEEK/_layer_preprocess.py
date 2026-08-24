@@ -1596,6 +1596,14 @@ def preprocess_layers(
           f"structural={road_roles.evidence['structural_candidates']}, "
           f"visible={road_roles.evidence['visible_selected']}/"
           f"{road_roles.evidence['visible_candidates']}")
+    continuity = road_roles.evidence.get("ink_budget", {}).get(
+        "continuity_restoration", {})
+    if continuity:
+        print("[preprocess] road_continuity: "
+              f"paths={continuity.get('restored_paths', 0)}, "
+              f"features={continuity.get('restored_features', 0)}, "
+              f"length={continuity.get('restored_length_m', 0.0):.1f}m, "
+              f"links={continuity.get('restored_link_features', 0)}")
     dangling_pruning = road_roles.evidence.get("ink_budget", {}).get(
         "dangling_chain_pruning", {})
     if dangling_pruning:
