@@ -26,7 +26,7 @@ from .buildings import ROAD_TIERS
 from .config import ROAD_DEFAULT_WIDTH_M, ROAD_FILTER, ROAD_WIDTHS
 
 
-POLICY_VERSION = "print-road-roles-v7"
+POLICY_VERSION = "print-road-roles-v8"
 COMPOSITION_ROLE_COLUMN = "_composition_role"
 
 # A role changes visual hierarchy, never source geometry.  The secondary and
@@ -36,8 +36,27 @@ _COMPOSITION_WIDTH_FACTORS = {
     "primary": 1.0,
     "secondary": 0.90,
     "connector": 0.85,
+    "context": 0.72,
     "foreground": 1.0,
 }
+_COMPOSITION_FLOOR_FACTORS = {
+    "primary": 1.35,
+    "foreground": 1.0,
+    "secondary": 1.0,
+    "connector": 1.0,
+    "context": 1.0,
+}
+
+# AMap's no-label cartography is used as a spatial composition template when
+# explicitly enabled.  These are overlap confidences, not global ink budgets:
+# the reference map decides how much skeleton exists in each city, while the
+# printer profile still decides whether the matched OSM line can be produced.
+_TEMPLATE_PRIMARY_MAJOR_FRACTION = 0.24
+_TEMPLATE_PRIMARY_WEIGHT = 0.76
+_TEMPLATE_SECONDARY_ARTERIAL_FRACTION = 0.30
+_TEMPLATE_SECONDARY_WEIGHT = 0.50
+_TEMPLATE_CONTEXT_FRACTION = 0.58
+_TEMPLATE_CONTEXT_WEIGHT = 0.28
 
 _WIDTH_FACTORS = {
     "motorway": 1.35,
@@ -182,7 +201,10 @@ def resolve_composed_road_width_m(
         * role_factor
     )
     hierarchy_factor = max(
-        1.0, _WIDTH_FACTORS.get(highway, 1.0) * role_factor)
+        _COMPOSITION_FLOOR_FACTORS.get(
+            str(composition_role or "foreground"), 1.0),
+        _WIDTH_FACTORS.get(highway, 1.0) * role_factor,
+    )
     floor_m = min_colored_strip_mm * hierarchy_factor / scale_mm_per_m
     return max(source_width_m, floor_m)
 
@@ -242,6 +264,266 @@ def _sampled_grid_cells(geometry, bbox_local, grid_size: int) -> set[int]:
             gy = min(grid_size - 1, max(0, gy))
             cells.add(gy * grid_size + gx)
     return cells
+
+
+def _apply_amap_spatial_template(
+    visible: gpd.GeoDataFrame,
+    *,
+    bbox_local,
+    scale_mm_per_m: float,
+    road_width_multiplier: float,
+    min_colored_strip_mm: float,
+    nozzle_real_m: float,
+    visual_salience_guide,
+) -> tuple[gpd.GeoDataFrame, dict[str, Any]]:
+    """Map AMap's spatial hierarchy onto existing OSM linework.
+
+    The previous guide only changed the rank of whole OSM name groups after
+    class and ink budgets had already shaped the result.  It therefore could
+    not reproduce the reference map's continuous skeleton.  This selector
+    instead evaluates every eligible OSM feature against the aligned major,
+    arterial and context masks.  The masks assign a role; coordinates always
+    remain the original OSM coordinates.
+
+    No city-independent target ink percentage is used here.  A sparse or dense
+    city inherits the amount of hierarchy present in its reference template.
+    Physical widths still pass through the printer floor below.
+    """
+
+    xmin, ymin, xmax, ymax = (float(value) for value in bbox_local)
+    frame_area = max((xmax - xmin) * (ymax - ymin), 1.0)
+    frame_span = max(xmax - xmin, ymax - ymin, 1.0)
+    work = visible.copy().reset_index(drop=True)
+    if work.empty:
+        return work, {
+            "applied": False,
+            "reason": "no_template_candidates",
+        }
+
+    minimum_length_m = max(nozzle_real_m * 1.25, frame_span * 0.0025)
+    role_by_position: dict[int, str] = {}
+    provisional_roles: dict[int, str] = {}
+    support_by_position: dict[int, dict[str, float]] = {}
+    identity_stats: dict[str, dict[str, float]] = {}
+
+    def _template_identity(row) -> str:
+        ring = (ring_corridor_identity(row.get("name"))
+                or ring_corridor_identity(row.get("name:en")))
+        if ring:
+            return ring
+        for column in ("name", "ref"):
+            value = row.get(column)
+            if isinstance(value, str) and value.strip():
+                return f"{column}:{value.strip().casefold()}"
+        return ""
+
+    for pos, row in work.iterrows():
+        geometry = row.geometry
+        if geometry is None or geometry.is_empty:
+            continue
+        highway = str(row.get("highway") or "")
+        support = visual_salience_guide.road_support(geometry)
+        support_by_position[pos] = support
+        covered = float(support.get(
+            "any_template_fraction", support.get("covered_fraction", 0.0)))
+        weighted = float(support.get("weighted_salience", 0.0))
+        major = max(
+            float(support.get("major_mask_fraction", 0.0)),
+            float(support.get("major_fraction", 0.0)),
+        )
+        arterial = float(support.get(
+            "arterial_or_major_fraction", 0.0))
+        context = float(support.get("context_mask_fraction", covered))
+        identity = _template_identity(row)
+        if identity:
+            stats = identity_stats.setdefault(identity, {
+                "length_m": 0.0,
+                "covered_length_m": 0.0,
+                "supported_length_m": 0.0,
+            })
+            length_m = float(geometry.length)
+            stats["length_m"] += length_m
+            stats["covered_length_m"] += length_m * covered
+
+        # At 15/25 km interchange ramps become dark knots even when the
+        # template identifies them correctly, so they remain
+        # topology/block-base structure only.
+        is_link = highway.endswith("_link")
+        if is_link:
+            continue
+        if ((major >= _TEMPLATE_PRIMARY_MAJOR_FRACTION
+             and covered >= 0.34)
+                or (weighted >= _TEMPLATE_PRIMARY_WEIGHT
+                    and covered >= 0.44)):
+            role = "primary"
+        elif ((arterial >= _TEMPLATE_SECONDARY_ARTERIAL_FRACTION
+               and covered >= 0.40)
+              or (weighted >= _TEMPLATE_SECONDARY_WEIGHT
+                  and covered >= 0.48)):
+            role = "secondary"
+        elif (not is_link
+              and float(geometry.length) >= minimum_length_m
+              and context >= _TEMPLATE_CONTEXT_FRACTION
+              and covered >= 0.56
+              and weighted >= _TEMPLATE_CONTEXT_WEIGHT):
+            role = "context"
+        else:
+            continue
+        provisional_roles[pos] = role
+        if identity:
+            identity_stats[identity]["supported_length_m"] += float(
+                geometry.length)
+
+    # A short OSM way lying perpendicular to a thick reference road can have
+    # 100% pixel overlap even though it is only an intersection spur.  Keep a
+    # short fragment only when its full named/ref corridor has sustained
+    # template coverage; long fragments are strong enough on their own.
+    for pos, role in provisional_roles.items():
+        row = work.iloc[pos]
+        geometry = row.geometry
+        length_m = float(geometry.length)
+        if length_m >= minimum_length_m:
+            role_by_position[pos] = role
+            continue
+        identity = _template_identity(row)
+        stats = identity_stats.get(identity, {}) if identity else {}
+        total_length = max(float(stats.get("length_m", 0.0)), 1.0)
+        corridor_coverage = float(
+            stats.get("covered_length_m", 0.0)) / total_length
+        supported_length = float(stats.get("supported_length_m", 0.0))
+        support = support_by_position.get(pos, {})
+        fragment_coverage = float(support.get(
+            "any_template_fraction", support.get("covered_fraction", 0.0)))
+        if (identity
+                and corridor_coverage >= 0.34
+                and supported_length >= minimum_length_m * 4.0
+                and fragment_coverage >= 0.52):
+            role_by_position[pos] = role
+
+    # Ordinary OSM segmentation gaps are handled by the sustained-corridor
+    # pass above.  Interchange ramps deliberately stay structural-only at this
+    # scale, so there is no generic connector restoration pass.
+    connector_positions: set[int] = set()
+
+    selected_positions = set(role_by_position)
+    selected = work.iloc[sorted(selected_positions)].copy()
+    selected[COMPOSITION_ROLE_COLUMN] = [
+        role_by_position[pos] for pos in sorted(selected_positions)
+    ]
+
+    def _row_identity(pos: int) -> str | None:
+        row = work.iloc[pos]
+        highway = str(row.get("highway") or "unknown")
+        ring = (ring_corridor_identity(row.get("name"))
+                or ring_corridor_identity(row.get("name:en")))
+        if ring:
+            return f"{highway}:{ring}"
+        for column in ("name", "ref"):
+            value = row.get(column)
+            if isinstance(value, str) and value.strip():
+                return f"{highway}:{column}:{value.strip().casefold()}"
+        return None
+
+    def _role_evidence(role: str) -> dict[str, Any]:
+        positions = {pos for pos, assigned in role_by_position.items()
+                     if assigned == role}
+        weighted_values = [
+            float(support_by_position.get(pos, {}).get(
+                "weighted_salience", 0.0)) for pos in positions
+        ]
+        return {
+            "role": role,
+            "features": len(positions),
+            "identities": sorted({identity for pos in positions
+                                  if (identity := _row_identity(pos))}),
+            "anonymous_features": sum(
+                _row_identity(pos) is None for pos in positions),
+            "mean_template_salience": round(
+                sum(weighted_values) / len(weighted_values), 6)
+                if weighted_values else 0.0,
+            "estimated_ink_ratio": round(sum(
+                float(work.iloc[pos].geometry.length)
+                * resolve_composed_road_width_m(
+                    str(work.iloc[pos].get("highway") or ""),
+                    composition_role=role,
+                    scale_mm_per_m=scale_mm_per_m,
+                    road_width_multiplier=road_width_multiplier,
+                    min_colored_strip_mm=min_colored_strip_mm,
+                ) / frame_area
+                for pos in positions
+            ), 6),
+        }
+
+    selected_ink = sum(
+        float(work.iloc[pos].geometry.length)
+        * resolve_composed_road_width_m(
+            str(work.iloc[pos].get("highway") or ""),
+            composition_role=role_by_position[pos],
+            scale_mm_per_m=scale_mm_per_m,
+            road_width_multiplier=road_width_multiplier,
+            min_colored_strip_mm=min_colored_strip_mm,
+        ) / frame_area
+        for pos in selected_positions
+    )
+    reference_evidence = getattr(
+        getattr(visual_salience_guide, "reference", None), "evidence", {}) or {}
+    composition_roles = {
+        "schema_version": "1.0",
+        "method": "amap_spatial_template_to_osm_roles_v2",
+        "primary": _role_evidence("primary"),
+        "secondary": _role_evidence("secondary"),
+        "context": _role_evidence("context"),
+        "connector": _role_evidence("connector"),
+        "background": {
+            "role": "block_base_only",
+            "features": max(0, len(work) - len(selected_positions)),
+            "reason": (
+                "retained for topology and structural seams; absent from "
+                "the reference skeleton or below matching confidence"),
+        },
+    }
+    selected_identities = sorted({
+        identity for pos in selected_positions
+        if (identity := _row_identity(pos))
+    })
+    return selected, {
+        "applied": True,
+        "method": "amap_spatial_template_existing_osm_v2",
+        "candidate_features": len(work),
+        "selected_features": len(selected),
+        "selected_estimated_ink_ratio": round(selected_ink, 6),
+        "connector_features": len(connector_positions),
+        "reference_mask_ratios": {
+            key: reference_evidence.get(key)
+            for key in (
+                "road_major_ratio", "road_arterial_ratio",
+                "road_context_ratio")
+        },
+        "thresholds": {
+            "primary_major_fraction": _TEMPLATE_PRIMARY_MAJOR_FRACTION,
+            "primary_weight": _TEMPLATE_PRIMARY_WEIGHT,
+            "secondary_arterial_fraction": (
+                _TEMPLATE_SECONDARY_ARTERIAL_FRACTION),
+            "secondary_weight": _TEMPLATE_SECONDARY_WEIGHT,
+            "context_fraction": _TEMPLATE_CONTEXT_FRACTION,
+            "context_weight": _TEMPLATE_CONTEXT_WEIGHT,
+            "minimum_length_m": round(minimum_length_m, 3),
+            "short_corridor_coverage": 0.34,
+            "short_supported_length_factor": 4.0,
+            "short_fragment_coverage": 0.52,
+        },
+        "visual_salience": {
+            "enabled": True,
+            "mode": "spatial_template_match_existing_osm_segments",
+            "reference_version": getattr(
+                visual_salience_guide, "version", None),
+            "template_policy_version": getattr(
+                visual_salience_guide, "template_policy_version", None),
+            "selected_features": len(selected),
+            "selected_identities": selected_identities,
+        },
+        "composition_roles": composition_roles,
+    }
 
 
 def ring_corridor_identity(value: Any) -> str:
@@ -911,20 +1193,36 @@ def select_road_roles(
     topology = _highway_subset(lines, set(ROAD_TIERS[topology_tier]))
     structural = _highway_subset(lines, set(ROAD_TIERS[structural_tier]))
     visible_highways = resolve_visible_highways(nozzle_real_m)
+    if visual_salience_guide is not None and nozzle_real_m >= 25.0:
+        # AMap can identify a locally important tertiary road that a global
+        # OSM class filter would discard before spatial matching.  Residential
+        # and service streets remain structural-only at this print scale.
+        visible_highways = set(ROAD_TIERS[2])
     visible_candidates = _highway_subset(lines, visible_highways)
     visible = visible_candidates
     ink_budget = {"applied": False, "reason": "small_or_medium_print_footprint"}
     if (nozzle_real_m >= 25.0 and bbox_local is not None
             and scale_mm_per_m is not None):
-        visible, ink_budget = _apply_large_area_ink_budget(
-            visible_candidates,
-            bbox_local=bbox_local,
-            scale_mm_per_m=scale_mm_per_m,
-            road_width_multiplier=road_width_multiplier,
-            min_colored_strip_mm=min_colored_strip_mm,
-            nozzle_real_m=nozzle_real_m,
-            visual_salience_guide=visual_salience_guide,
-        )
+        if visual_salience_guide is not None:
+            visible, ink_budget = _apply_amap_spatial_template(
+                visible_candidates,
+                bbox_local=bbox_local,
+                scale_mm_per_m=scale_mm_per_m,
+                road_width_multiplier=road_width_multiplier,
+                min_colored_strip_mm=min_colored_strip_mm,
+                nozzle_real_m=nozzle_real_m,
+                visual_salience_guide=visual_salience_guide,
+            )
+        else:
+            visible, ink_budget = _apply_large_area_ink_budget(
+                visible_candidates,
+                bbox_local=bbox_local,
+                scale_mm_per_m=scale_mm_per_m,
+                road_width_multiplier=road_width_multiplier,
+                min_colored_strip_mm=min_colored_strip_mm,
+                nozzle_real_m=nozzle_real_m,
+                visual_salience_guide=None,
+            )
     elif len(visible) > 0:
         visible = visible.copy()
         visible[COMPOSITION_ROLE_COLUMN] = "foreground"

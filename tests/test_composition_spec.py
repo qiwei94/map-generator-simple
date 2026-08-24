@@ -11,7 +11,7 @@ def _layers():
     return LayerPolygons(
         roads_lines=[("not-serialized-geometry", "primary", False, "primary")],
         road_roles={
-            "policy_version": "print-road-roles-v7",
+            "policy_version": "print-road-roles-v8",
             "source_line_features": 12,
             "width_policy": {
                 "road_width_multiplier": 2.0,
@@ -50,6 +50,7 @@ def test_composition_spec_records_contract_and_identities_not_geometry():
         amap_evidence={
             "status": "ready",
             "palette_version": "amap-mask-v1",
+            "template_policy_version": "amap-template-v1",
             "cache_path": "/private/controller/cache/reference.png",
             "secret": "must-not-leak",
         },
@@ -64,6 +65,10 @@ def test_composition_spec_records_contract_and_identities_not_geometry():
     assert "must-not-leak" not in payload
     assert "/private/controller" not in payload
     assert spec["reference"]["evidence"]["cache_file"] == "reference.png"
+    assert spec["reference"]["evidence"]["template_policy_version"] == (
+        "amap-template-v1")
+    assert "spatially matching" in (
+        spec["decision_contract"]["salience_reference"])
     assert spec["warnings"] == []
 
 

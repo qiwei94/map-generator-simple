@@ -1,6 +1,7 @@
 """Auditable composition decisions for city-scale printable maps.
 
-The spec records *which source identities* receive visual emphasis and why.
+The spec records *which source identities and spatially matched segments*
+receive visual emphasis and why.
 It deliberately contains no geometry, mesh vertices, global Z values, boolean
 instructions, or generative-model output.  OSM remains the geometry source;
 AMap is an optional read-only salience reference.
@@ -16,7 +17,7 @@ from typing import Any, Mapping, Sequence
 
 
 SCHEMA_VERSION = "1.0"
-POLICY_VERSION = "city-composition-v1"
+POLICY_VERSION = "city-composition-v2"
 
 
 def _json_value(value: Any) -> Any:
@@ -40,8 +41,8 @@ def _safe_reference_evidence(evidence: Mapping | None) -> dict:
 
     source = evidence or {}
     allowed = (
-        "status", "reason", "palette_version", "bbox_wgs84",
-        "image_size", "coverage", "source",
+        "status", "reason", "palette_version", "template_policy_version",
+        "bbox_wgs84", "image_size", "coverage", "source", "mask_evidence",
     )
     result = {key: _json_value(source[key])
               for key in allowed if key in source}
@@ -101,7 +102,8 @@ def build_composition_spec(
         "pipeline": pipeline,
         "decision_contract": {
             "salience_reference": (
-                "AMap class masks may rank complete OSM identities only"),
+                "AMap class masks may assign hierarchy to spatially matching "
+                "OSM linework only"),
             "geometry_authority": "OSM source geometry",
             "print_authority": "printer profile and resolved physical floors",
             "render_authority": "deterministic role-aware renderer",
@@ -116,7 +118,7 @@ def build_composition_spec(
         ],
         "reference": {
             "provider": "AMap",
-            "use": "read-only salience mask",
+            "use": "read-only spatial composition template",
             "evidence": reference,
         },
         "roads": roads,

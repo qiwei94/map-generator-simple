@@ -365,3 +365,123 @@ def test_visual_salience_promotes_complete_osm_identity_not_fragments():
     assert evidence["enabled"] is True
     assert evidence["selected_identities"] == [
         "secondary:name:corridor d"]
+
+
+def test_spatial_template_assigns_three_roles_without_copying_geometry():
+    class Guide:
+        version = "synthetic-salience-v1"
+        template_policy_version = "synthetic-template-v1"
+
+        @staticmethod
+        def road_support(geometry):
+            y = geometry.centroid.y
+            if y > 700:
+                return {
+                    "covered_fraction": 0.95,
+                    "any_template_fraction": 0.95,
+                    "weighted_salience": 0.92,
+                    "major_mask_fraction": 0.85,
+                    "arterial_or_major_fraction": 0.90,
+                    "context_mask_fraction": 0.0,
+                }
+            if y > 500:
+                return {
+                    "covered_fraction": 0.90,
+                    "any_template_fraction": 0.90,
+                    "weighted_salience": 0.66,
+                    "major_mask_fraction": 0.0,
+                    "arterial_or_major_fraction": 0.82,
+                    "context_mask_fraction": 0.0,
+                }
+            if y > 300:
+                return {
+                    "covered_fraction": 0.88,
+                    "any_template_fraction": 0.88,
+                    "weighted_salience": 0.36,
+                    "major_mask_fraction": 0.0,
+                    "arterial_or_major_fraction": 0.0,
+                    "context_mask_fraction": 0.80,
+                }
+            return {
+                "covered_fraction": 0.0,
+                "any_template_fraction": 0.0,
+                "weighted_salience": 0.0,
+                "major_mask_fraction": 0.0,
+                "arterial_or_major_fraction": 0.0,
+                "context_mask_fraction": 0.0,
+            }
+
+    roads = gpd.GeoDataFrame({
+        "highway": ["primary", "secondary", "tertiary", "primary"],
+        "name": ["Major", "Arterial", "Context", "Unsupported"],
+        "geometry": [
+            LineString([(100, 800), (900, 800)]),
+            LineString([(100, 600), (900, 600)]),
+            LineString([(100, 400), (900, 400)]),
+            LineString([(100, 200), (900, 200)]),
+        ],
+    }, geometry="geometry", crs="EPSG:3857")
+    source_wkb = dict(zip(roads["name"], roads.geometry.to_wkb()))
+
+    roles = select_road_roles(
+        roads,
+        topology_tier=4,
+        nozzle_real_m=50.0,
+        bbox_local=(0, 0, 1000, 1000),
+        scale_mm_per_m=0.2,
+        visual_salience_guide=Guide(),
+    )
+
+    selected = roles.visible.set_index("name")
+    assert set(selected.index) == {"Major", "Arterial", "Context"}
+    assert selected.loc["Major", "_composition_role"] == "primary"
+    assert selected.loc["Arterial", "_composition_role"] == "secondary"
+    assert selected.loc["Context", "_composition_role"] == "context"
+    assert "tertiary" in roles.evidence["visible_highways"]
+    for name, geometry in selected.geometry.items():
+        assert geometry.wkb == source_wkb[name]
+
+    budget = roles.evidence["ink_budget"]
+    assert budget["method"] == "amap_spatial_template_existing_osm_v2"
+    assert "hard_ink_limit_ratio" not in budget
+    assert budget["composition_roles"]["context"]["features"] == 1
+
+
+def test_spatial_template_rejects_short_intersection_spur_but_keeps_corridor():
+    class Guide:
+        version = "synthetic-salience-v1"
+        template_policy_version = "synthetic-template-v1"
+
+        @staticmethod
+        def road_support(geometry):
+            return {
+                "covered_fraction": 0.95,
+                "any_template_fraction": 0.95,
+                "weighted_salience": 0.90,
+                "major_mask_fraction": 0.80,
+                "arterial_or_major_fraction": 0.90,
+                "context_mask_fraction": 0.0,
+            }
+
+    corridor = [
+        LineString([(100 + index * 100, 500),
+                    (200 + index * 100, 500)])
+        for index in range(5)
+    ]
+    roads = gpd.GeoDataFrame({
+        "highway": ["primary"] * 6,
+        "name": ["Main Axis"] * 5 + ["Cross Spur"],
+        "geometry": corridor + [LineString([(350, 475), (350, 525)])],
+    }, geometry="geometry", crs="EPSG:3857")
+
+    roles = select_road_roles(
+        roads,
+        topology_tier=4,
+        nozzle_real_m=100.0,
+        bbox_local=(0, 0, 1000, 1000),
+        scale_mm_per_m=0.2,
+        visual_salience_guide=Guide(),
+    )
+
+    assert set(roles.visible["name"]) == {"Main Axis"}
+    assert len(roles.visible) == 5
