@@ -38,7 +38,10 @@ from _TEXTURE_STYLE_OF_DEEPSEEK import config as _cfg
 from _TEXTURE_STYLE_OF_DEEPSEEK.config import (
     TERRAIN_GRID, get_area_class,
 )
-from _TEXTURE_STYLE_OF_DEEPSEEK._layer_preprocess import preprocess_layers
+from _TEXTURE_STYLE_OF_DEEPSEEK._layer_preprocess import (
+    PREPROCESS_POLICY_VERSION,
+    preprocess_layers,
+)
 from _TEXTURE_STYLE_OF_DEEPSEEK._pipeline_cache import PipelineCache
 from _TEXTURE_STYLE_OF_DEEPSEEK.auto_params.city_profile import detect_city_profile
 from _TEXTURE_STYLE_OF_DEEPSEEK.auto_params.param_resolver import resolve_params
@@ -316,6 +319,7 @@ class CityHarness:
         cache_key["height_min_mm"] = float(_cfg.BUILDING_HEIGHT_MIN_MM)
         cache_key["simplify_tol_m"] = float(_cfg.BUILDING_SIMPLIFY_TOL_M)
         cache_key["printer_profile"] = self.printer_profile.to_dict()
+        cache_key["preprocess_policy"] = PREPROCESS_POLICY_VERSION
 
         def _compute():
             return preprocess_layers(

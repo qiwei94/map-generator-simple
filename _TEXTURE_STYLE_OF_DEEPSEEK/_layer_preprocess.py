@@ -88,9 +88,11 @@ from _TEXTURE_STYLE_OF_DEEPSEEK.print_profile import (
 )
 from _TEXTURE_STYLE_OF_DEEPSEEK.road_roles import (
     COMPOSITION_ROLE_COLUMN,
+    POLICY_VERSION as ROAD_ROLE_POLICY_VERSION,
     select_road_roles,
 )
 from _TEXTURE_STYLE_OF_DEEPSEEK.water_roles import (
+    POLICY_VERSION as WATER_ROLE_POLICY_VERSION,
     WaterLineCandidate,
     has_printable_water_mass,
     is_identity_water_enclosure,
@@ -98,6 +100,15 @@ from _TEXTURE_STYLE_OF_DEEPSEEK.water_roles import (
     select_visible_water_lines,
     water_identity,
     waterway_kind,
+)
+
+
+# Any materialized layer cache must be invalidated when the road or water
+# selection policy changes.  Without this fingerprint a new corridor policy
+# can silently reuse an older per-segment result and appear to have no visual
+# effect at all.
+PREPROCESS_POLICY_VERSION = (
+    f"roads={ROAD_ROLE_POLICY_VERSION}|water={WATER_ROLE_POLICY_VERSION}"
 )
 
 

@@ -108,21 +108,53 @@ class AmapSalienceGuide:
         height, width = self.reference.water.shape
         pixel_m = min((xmax - xmin) / width, (ymax - ymin) / height)
         sample_step = max(pixel_m * 0.8, 10.0)
-        columns = []
-        rows = []
+        column_chunks = []
+        row_chunks = []
         for line in self._iter_lines(geometry):
+            coordinates = np.asarray(line.coords, dtype=np.float64)
+            if len(coordinates) < 2:
+                continue
+            deltas = np.diff(coordinates[:, :2], axis=0)
+            segment_lengths = np.hypot(deltas[:, 0], deltas[:, 1])
+            cumulative = np.concatenate((
+                np.zeros(1, dtype=np.float64),
+                np.cumsum(segment_lengths),
+            ))
+            total_length = float(cumulative[-1])
+            if total_length <= 0:
+                continue
             samples = min(768, max(2, int(math.ceil(
-                float(line.length) / sample_step))))
-            for position in np.linspace(0.0, 1.0, samples):
-                point = line.interpolate(float(position), normalized=True)
-                column = int(round(
-                    (point.x - xmin) / (xmax - xmin) * (width - 1)))
-                row = int(round(
-                    (ymax - point.y) / (ymax - ymin) * (height - 1)))
-                if 0 <= row < height and 0 <= column < width:
-                    columns.append(column)
-                    rows.append(row)
-        return np.asarray(rows, dtype=int), np.asarray(columns, dtype=int)
+                total_length / sample_step))))
+            distances = np.linspace(0.0, total_length, samples)
+            segment_indexes = np.searchsorted(
+                cumulative, distances, side="right") - 1
+            segment_indexes = np.clip(
+                segment_indexes, 0, len(segment_lengths) - 1)
+            denominators = segment_lengths[segment_indexes]
+            fractions = np.divide(
+                distances - cumulative[segment_indexes],
+                denominators,
+                out=np.zeros_like(distances),
+                where=denominators > 0,
+            )
+            points = (
+                coordinates[segment_indexes, :2]
+                + deltas[segment_indexes] * fractions[:, None]
+            )
+            columns = np.rint(
+                (points[:, 0] - xmin) / (xmax - xmin) * (width - 1)
+            ).astype(int)
+            rows = np.rint(
+                (ymax - points[:, 1]) / (ymax - ymin) * (height - 1)
+            ).astype(int)
+            inside = ((rows >= 0) & (rows < height)
+                      & (columns >= 0) & (columns < width))
+            if inside.any():
+                column_chunks.append(columns[inside])
+                row_chunks.append(rows[inside])
+        if not row_chunks:
+            return np.asarray([], dtype=int), np.asarray([], dtype=int)
+        return np.concatenate(row_chunks), np.concatenate(column_chunks)
 
     def road_support(self, geometry) -> dict:
         rows, columns = self._sample_pixels(geometry)
