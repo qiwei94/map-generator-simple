@@ -44,10 +44,28 @@ formal generator silently fall back to the non-AMap road policy even though a
 valid exact-frame cache existed.
 
 The formal CLI now tries the snapped cache first and then the exact cache.  An
-exact raster is always paired with its translated exact local bounds inside the
-snap coordinate system; it is never stretched over the larger snapped frame.
-The selected frame and fallback are persisted in composition evidence and in
-the preprocess cache fingerprint.
+exact raster is always paired with its own exact local bounds; it is never
+stretched over the larger snapped frame.  Raw OSM extraction still reuses the
+snapped fetch cache, but exact-frame sources are clipped before topology,
+salience and water-group ranking.  Frame-dependent composition decisions are
+therefore made only from content that can appear in the finished map.  The
+selected frame and fallback are persisted in composition evidence and in the
+preprocess cache fingerprint.
+
+This second boundary is important for water as well as roads.  A Shanghai
+regression ranked water groups over the larger snap frame with an exact-frame
+guide.  It selected an off-frame source group instead of Dianpu River and left
+a long white gap in the Huangpu River after final clipping.  With exact-frame
+composition restored, the rendered water-surface ratio recovered from
+`0.020047` to `0.033498`; the independent exact-frame control was `0.033345`.
+The Huangpu River is continuous in the fixed formal-path output:
+
+- failing snap composition:
+  `output/domestic_shanghai_25km_v13/domestic_shanghai_25km_v13_topdown.png`
+- fixed formal snap-fetch / exact-composition path:
+  `output/domestic_shanghai_25km_v13_fixed/domestic_shanghai_25km_v13_fixed_topdown.png`
+- independent exact-frame control:
+  `output/domestic_shanghai_25km_v13_exact/domestic_shanghai_25km_v13_exact_topdown.png`
 
 ## Cross-city road diagnostics
 
@@ -96,13 +114,14 @@ The unit suite covers three critical boundaries:
 - a one-ended branch is rejected;
 - a near-parallel alternative is rejected.
 
-The snap/exact cache test proves that an exact reference is requested with its
-own paired projected bounds after a snapped-cache miss.
+The snap/exact cache tests prove that an exact reference is requested with its
+own paired projected bounds after a snapped-cache miss and that reusable raw
+sources are clipped to the finished frame before composition ranking.
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 \
   .venv/bin/python -m pytest -q -m 'not slow'
-# 512 passed, 2 skipped, 11 deselected
+# 513 passed, 2 skipped, 11 deselected
 ```
 
 ## Known limitations
