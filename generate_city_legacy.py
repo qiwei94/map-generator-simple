@@ -266,6 +266,46 @@ def _load_amap_salience_guide(mode, bbox_wgs84, bbox_local):
     )
 
 
+def _load_snap_amap_salience_guide(
+    mode,
+    snap_bbox_wgs84,
+    snap_bbox_local,
+    exact_bbox_wgs84,
+    exact_bbox_local,
+):
+    """Load snap-frame evidence, then reuse an exact-frame cache if needed.
+
+    Historical diagnostics and gallery batches cached AMap salience against
+    the finished exact frame.  The reusable preprocessing path later started
+    asking only for the larger snapped fetch frame, which made an otherwise
+    valid exact cache look unavailable.  Keep the snapped cache as the first
+    choice, but pair an exact raster with its exact bounds when falling back.
+    """
+
+    guide, evidence = _load_amap_salience_guide(
+        mode, snap_bbox_wgs84, snap_bbox_local)
+    if guide is not None or mode != "cache":
+        return guide, {**evidence, "preprocess_frame": "snap"}
+
+    exact_guide, exact_evidence = _load_amap_salience_guide(
+        mode, exact_bbox_wgs84, exact_bbox_local)
+    if exact_guide is None:
+        return None, {
+            **evidence,
+            "preprocess_frame": "snap",
+            "exact_cache_fallback": {
+                "status": exact_evidence.get("status", "unavailable"),
+                "reason": exact_evidence.get("reason"),
+            },
+        }
+    return exact_guide, {
+        **exact_evidence,
+        "preprocess_frame": "exact_within_snap",
+        "snap_cache_fallback": True,
+        "snap_cache_reason": evidence.get("reason"),
+    }
+
+
 def _amap_salience_cache_fingerprint(mode, evidence):
     """Keep baseline/guided preprocess objects in distinct cache entries."""
     return {
@@ -920,10 +960,16 @@ def main():
         _hotspot_relax = (auto_resolved.building_v2_hotspot_relax
                           if auto_resolved is not None
                           else BUILDING_V2_HOTSPOT_RELAX)
-        _amap_guide, _amap_evidence = _load_amap_salience_guide(
+        _exact_bbox_local_in_snap = tuple(
+            value + offset
+            for value, offset in zip(
+                bbox_local, (_sxoff, _syoff, _sxoff, _syoff)))
+        _amap_guide, _amap_evidence = _load_snap_amap_salience_guide(
             cli_args.amap_salience,
             (fs, fw, fn, fe),
             _snap_bbox_local,
+            (south, west, north, east),
+            _exact_bbox_local_in_snap,
         )
         print("[preprocess] amap_salience: "
               f"{_amap_evidence.get('status')} "
