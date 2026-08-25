@@ -90,3 +90,18 @@ pytest -m "not slow"
 Before restarting `studio` or a worker, confirm that no job is in `starting`,
 `pending`, or `running`.  After a remote change, read back the service state,
 worker registration, job lease, progress, artifact checksum, and final status.
+
+## Rollout status — 2026-08-26
+
+- `cloud-api` runs the SQLite/event-capable API.  Ninety-four historical jobs
+  migrated from JSON and `journal_mode=wal` was verified.
+- `local-primary` was restarted only after confirming zero active jobs and now
+  registers its capability manifest (80 PBF files).
+- A controller-only dry run completed the real API protocol end to end:
+  submission, lease, progress event, two checksum uploads, and final status.
+- Windows WSL is on `agent/durable-worker-progress-v16`; protocol tests pass and
+  16 PBF files are visible.  Its permanent worker remains intentionally stopped
+  until the worker-only TLS listener is explicitly approved and verified.
+- [`../deploy/nginx-worker-tls.conf`](../deploy/nginx-worker-tls.conf) is staged
+  but not activated.  The current public endpoint is HTTP and must not carry a
+  remote worker token.
