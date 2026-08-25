@@ -204,10 +204,16 @@ def render_review_bundle(layers, ctx: dict, road_width_multiplier: float,
                 except Exception:
                     continue
                 if len(pts) >= 2:
-                    role_color = (road_color if composition_role in
-                                  ("primary", "foreground") else
-                                  tuple(min(222, channel + 18)
-                                        for channel in road_color))
+                    role_offset = {
+                        "primary": 0,
+                        "foreground": 0,
+                        "secondary": 36,
+                        "connector": 56,
+                        "context": 80,
+                    }.get(composition_role, 20)
+                    role_color = tuple(
+                        min(222, channel + role_offset)
+                        for channel in road_color)
                     draw.line(pts, fill=role_color, width=w_px)
                     road_draw.line(pts, fill=1, width=w_px)
     road_mask = _downscale_mask(np.array(road_canvas), G)

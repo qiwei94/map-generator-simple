@@ -1596,6 +1596,21 @@ def preprocess_layers(
           f"structural={road_roles.evidence['structural_candidates']}, "
           f"visible={road_roles.evidence['visible_selected']}/"
           f"{road_roles.evidence['visible_candidates']}")
+    continuity = road_roles.evidence.get("ink_budget", {}).get(
+        "continuity_restoration", {})
+    if continuity:
+        print("[preprocess] road_continuity: "
+              f"paths={continuity.get('restored_paths', 0)}, "
+              f"features={continuity.get('restored_features', 0)}, "
+              f"length={continuity.get('restored_length_m', 0.0):.1f}m, "
+              f"links={continuity.get('restored_link_features', 0)}")
+    dangling_pruning = road_roles.evidence.get("ink_budget", {}).get(
+        "dangling_chain_pruning", {})
+    if dangling_pruning:
+        print("[preprocess] road_dangling_chains: "
+              f"removed={dangling_pruning.get('removed_features', 0)}, "
+              f"length={dangling_pruning.get('removed_length_m', 0.0):.1f}m, "
+              f"limit={dangling_pruning.get('max_chain_length_m', 0.0):.1f}m")
     wgdf = water_gdf if water_gdf is not None and len(water_gdf) > 0 else None
     if len(road_roles.topology) > 0:
         city_blocks = _build_city_blocks(

@@ -26,6 +26,7 @@ from _TEXTURE_STYLE_OF_DEEPSEEK._water_supplement import (
 
 
 PALETTE_VERSION = "amap-style7-salience-v1"
+TEMPLATE_POLICY_VERSION = "amap-spatial-template-v3"
 COMPARISON_VERSION = "amap-salience-comparison-v1"
 
 # Exact style-7 anchors observed in real Beijing tiles.  A small RGB distance
@@ -67,7 +68,14 @@ class AmapSalienceGuide:
         self.bbox_local = (xmin, ymin, xmax, ymax)
         self.tolerance_px = max(0, int(tolerance_px))
         self.version = PALETTE_VERSION
+        self.template_policy_version = TEMPLATE_POLICY_VERSION
         self._road_weights = np.zeros(reference.water.shape, dtype=np.float32)
+        self._road_major_support = ndimage.binary_dilation(
+            reference.road_major, iterations=self.tolerance_px)
+        self._road_arterial_support = ndimage.binary_dilation(
+            reference.road_arterial, iterations=self.tolerance_px)
+        self._road_context_support = ndimage.binary_dilation(
+            reference.road_context, iterations=self.tolerance_px)
         for mask, weight in (
             (reference.road_context, 0.40),
             (reference.road_arterial, 0.72),
@@ -125,6 +133,9 @@ class AmapSalienceGuide:
                 "weighted_salience": 0.0,
             }
         weights = self._road_weights[rows, columns]
+        major = self._road_major_support[rows, columns]
+        arterial = self._road_arterial_support[rows, columns]
+        context = self._road_context_support[rows, columns]
         return {
             "sample_count": int(len(rows)),
             "covered_fraction": round(float(np.mean(weights > 0)), 5),
@@ -132,6 +143,11 @@ class AmapSalienceGuide:
             "major_fraction": round(float(np.mean(weights >= 0.99)), 5),
             "arterial_or_major_fraction": round(
                 float(np.mean(weights >= 0.70)), 5),
+            "major_mask_fraction": round(float(np.mean(major)), 5),
+            "arterial_mask_fraction": round(float(np.mean(arterial)), 5),
+            "context_mask_fraction": round(float(np.mean(context)), 5),
+            "any_template_fraction": round(
+                float(np.mean(major | arterial | context)), 5),
         }
 
     def water_support(self, geometry) -> dict:
@@ -401,9 +417,10 @@ def build_amap_salience_guide(
         "status": "ready",
         "palette_version": PALETTE_VERSION,
         "mask_evidence": masks.evidence,
+        "template_policy_version": TEMPLATE_POLICY_VERSION,
         "constraint": (
-            "read-only salience evidence; ranks existing complete OSM "
-            "corridors within existing print budgets"
+            "read-only spatial composition template; assigns hierarchy to "
+            "matching OSM linework and never copies replacement geometry"
         ),
     }
 

@@ -14,6 +14,7 @@ mesh, Z, boolean, rendering, or LLM decisions.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import heapq
 import math
 import re
 from typing import Any
@@ -26,7 +27,7 @@ from .buildings import ROAD_TIERS
 from .config import ROAD_DEFAULT_WIDTH_M, ROAD_FILTER, ROAD_WIDTHS
 
 
-POLICY_VERSION = "print-road-roles-v7"
+POLICY_VERSION = "print-road-roles-v11"
 COMPOSITION_ROLE_COLUMN = "_composition_role"
 
 # A role changes visual hierarchy, never source geometry.  The secondary and
@@ -36,8 +37,53 @@ _COMPOSITION_WIDTH_FACTORS = {
     "primary": 1.0,
     "secondary": 0.90,
     "connector": 0.85,
+    "context": 0.72,
     "foreground": 1.0,
 }
+_COMPOSITION_FLOOR_FACTORS = {
+    "primary": 1.35,
+    "foreground": 1.0,
+    "secondary": 1.0,
+    "connector": 1.0,
+    "context": 1.0,
+}
+
+# AMap's no-label cartography is used as a spatial composition template when
+# explicitly enabled.  These are overlap confidences, not global ink budgets:
+# the reference map decides how much skeleton exists in each city, while the
+# printer profile still decides whether the matched OSM line can be produced.
+_TEMPLATE_PRIMARY_MAJOR_FRACTION = 0.24
+_TEMPLATE_PRIMARY_WEIGHT = 0.76
+_TEMPLATE_SECONDARY_ARTERIAL_FRACTION = 0.30
+_TEMPLATE_SECONDARY_WEIGHT = 0.50
+_TEMPLATE_CONTEXT_FRACTION = 0.58
+_TEMPLATE_CONTEXT_WEIGHT = 0.28
+_TEMPLATE_MAX_DANGLING_CHAIN_FRAME_FRACTION = 0.024
+_TEMPLATE_PRIMARY_DANGLING_CHAIN_FRAME_FRACTION = 0.012
+_TEMPLATE_SECONDARY_DANGLING_CHAIN_FRAME_FRACTION = 0.018
+_TEMPLATE_PRIMARY_DANGLING_CHAIN_TARGET_M = 300.0
+_TEMPLATE_SECONDARY_DANGLING_CHAIN_TARGET_M = 450.0
+_TEMPLATE_CONTINUATION_COSINE = 0.70
+_TEMPLATE_PRIMARY_GAP_FRAME_FRACTION = 0.040
+_TEMPLATE_SECONDARY_GAP_FRAME_FRACTION = 0.025
+_TEMPLATE_CONTEXT_GAP_FRAME_FRACTION = 0.015
+_TEMPLATE_MAX_GAP_DETOUR_RATIO = 2.0
+_TEMPLATE_MIN_MASK_GAP_SUPPORT = 0.42
+_TEMPLATE_SEMANTIC_PRIMARY_GAP_FRAME_FRACTION = 0.080
+_TEMPLATE_SEMANTIC_SECONDARY_GAP_FRAME_FRACTION = 0.070
+_TEMPLATE_SEMANTIC_CONTEXT_GAP_FRAME_FRACTION = 0.050
+_TEMPLATE_MAX_LINK_GAP_M = 250.0
+_TEMPLATE_MAX_LINK_GAP_DETOUR_RATIO = 1.35
+_TEMPLATE_MAX_LINK_EDGES_PER_GAP = 1
+_TEMPLATE_INFERRED_LINK_CONTINUATION_COSINE = 0.90
+_TEMPLATE_INFERRED_LINK_MIN_COVERAGE = 0.25
+_TEMPLATE_INFERRED_LINK_MIN_WEIGHT = 0.10
+_TEMPLATE_MAX_CORRIDOR_PATHS_PER_ANCHOR = 3
+_TEMPLATE_MAX_MASK_PATHS_PER_ANCHOR = 1
+_TEMPLATE_CORRIDOR_SNAP_FRAME_FRACTION = 0.0015
+_TEMPLATE_CORRIDOR_SNAP_MIN_M = 8.0
+_TEMPLATE_CORRIDOR_SNAP_MAX_M = 60.0
+_TEMPLATE_PROXIMITY_CONTINUATION_COSINE = 0.85
 
 _WIDTH_FACTORS = {
     "motorway": 1.35,
@@ -182,7 +228,10 @@ def resolve_composed_road_width_m(
         * role_factor
     )
     hierarchy_factor = max(
-        1.0, _WIDTH_FACTORS.get(highway, 1.0) * role_factor)
+        _COMPOSITION_FLOOR_FACTORS.get(
+            str(composition_role or "foreground"), 1.0),
+        _WIDTH_FACTORS.get(highway, 1.0) * role_factor,
+    )
     floor_m = min_colored_strip_mm * hierarchy_factor / scale_mm_per_m
     return max(source_width_m, floor_m)
 
@@ -242,6 +291,1242 @@ def _sampled_grid_cells(geometry, bbox_local, grid_size: int) -> set[int]:
             gy = min(grid_size - 1, max(0, gy))
             cells.add(gy * grid_size + gx)
     return cells
+
+
+def _line_terminals(geometry) -> tuple[Point, Point] | None:
+    """Return endpoints for one simple source feature, if available."""
+
+    if geometry is None or geometry.is_empty \
+            or geometry.geom_type != "LineString":
+        return None
+    try:
+        coordinates = list(geometry.coords)
+    except (AttributeError, NotImplementedError):
+        return None
+    if len(coordinates) < 2:
+        return None
+    return Point(coordinates[0]), Point(coordinates[-1])
+
+
+def _terminal_direction(geometry, terminal_index: int) \
+        -> tuple[float, float] | None:
+    """Return a unit vector pointing from an endpoint into the feature."""
+
+    try:
+        coordinates = list(geometry.coords)
+    except (AttributeError, NotImplementedError):
+        return None
+    if len(coordinates) < 2:
+        return None
+    if terminal_index == 0:
+        start, end = coordinates[0], coordinates[1]
+    else:
+        start, end = coordinates[-1], coordinates[-2]
+    dx = float(end[0]) - float(start[0])
+    dy = float(end[1]) - float(start[1])
+    magnitude = math.hypot(dx, dy)
+    if magnitude <= 1e-9:
+        return None
+    return dx / magnitude, dy / magnitude
+
+
+def _road_class_rank(value: Any) -> int | None:
+    """Return a coarse through-road rank, treating links as their parent."""
+
+    highway = str(value or "")
+    if highway.endswith("_link"):
+        highway = highway[:-5]
+    return {
+        "motorway": 0,
+        "trunk": 1,
+        "primary": 2,
+        "secondary": 3,
+        "tertiary": 4,
+    }.get(highway)
+
+
+def _road_classes_compatible(left: Any, right: Any) -> bool:
+    """Allow one OSM class step across a physical road corridor."""
+
+    left_rank = _road_class_rank(left)
+    right_rank = _road_class_rank(right)
+    return (left_rank is not None and right_rank is not None
+            and abs(left_rank - right_rank) <= 1)
+
+
+def _directions_from_line_at_point(
+    geometry,
+    point: Point,
+    *,
+    endpoint_tolerance_m: float,
+) -> list[tuple[float, float]]:
+    """Return unit vectors pointing away from a point along a source line."""
+
+    if geometry is None or geometry.is_empty \
+            or geometry.geom_type != "LineString":
+        return []
+    terminals = _line_terminals(geometry)
+    if terminals is None:
+        return []
+    terminal_distances = [point.distance(candidate) for candidate in terminals]
+    closest_terminal = min(range(2), key=lambda index: terminal_distances[index])
+    if terminal_distances[closest_terminal] <= endpoint_tolerance_m:
+        direction = _terminal_direction(geometry, closest_terminal)
+        return [direction] if direction is not None else []
+
+    length_m = float(geometry.length)
+    if length_m <= 1e-9 or point.distance(geometry) > endpoint_tolerance_m:
+        return []
+    projected = float(geometry.project(point))
+    sample_m = max(
+        endpoint_tolerance_m * 4.0,
+        min(25.0, length_m * 0.08),
+    )
+    origin = geometry.interpolate(projected)
+    directions = []
+    for distance_m in (
+        max(0.0, projected - sample_m),
+        min(length_m, projected + sample_m),
+    ):
+        if abs(distance_m - projected) <= 1e-9:
+            continue
+        sample = geometry.interpolate(distance_m)
+        dx = float(sample.x) - float(origin.x)
+        dy = float(sample.y) - float(origin.y)
+        magnitude = math.hypot(dx, dy)
+        if magnitude > 1e-9:
+            directions.append((dx / magnitude, dy / magnitude))
+    return directions
+
+
+def _truthy_osm_tag(value: Any) -> bool:
+    if value is None:
+        return False
+    return str(value).strip().casefold() not in {
+        "", "0", "false", "nan", "no", "none",
+    }
+
+
+def _template_identity_for_row(row) -> str:
+    ring = (ring_corridor_identity(row.get("name"))
+            or ring_corridor_identity(row.get("name:en")))
+    if ring:
+        return ring
+    for column in ("name", "ref"):
+        value = row.get(column)
+        if isinstance(value, str) and value.strip():
+            return f"{column}:{value.strip().casefold()}"
+    return ""
+
+
+def _restore_template_continuity(
+    work: gpd.GeoDataFrame,
+    role_by_position: dict[int, str],
+    support_by_position: dict[int, dict[str, float]],
+    *,
+    bbox_local,
+) -> tuple[dict[int, str], dict[str, Any]]:
+    """Restore bounded road-corridor paths from the original OSM graph.
+
+    Raster palette gaps and per-feature thresholding can leave two confirmed
+    pieces of one corridor disconnected.  Missing source features are allowed
+    back only when an OSM path connects two selected anchors, stays short and
+    direct, and has semantic, geometric-corridor or reference-mask support.
+    A small semantic proximity tolerance handles split carriageways and OSM
+    endpoint offsets.  No coordinates are generated or modified.
+    """
+
+    xmin, ymin, xmax, ymax = (float(value) for value in bbox_local)
+    frame_span = max(xmax - xmin, ymax - ymin, 1.0)
+    endpoint_snap_m = max(0.5, min(2.0, frame_span * 0.00004))
+    corridor_snap_m = min(
+        _TEMPLATE_CORRIDOR_SNAP_MAX_M,
+        max(_TEMPLATE_CORRIDOR_SNAP_MIN_M,
+            frame_span * _TEMPLATE_CORRIDOR_SNAP_FRAME_FRACTION),
+    )
+    role_limits = {
+        "primary": frame_span * _TEMPLATE_PRIMARY_GAP_FRAME_FRACTION,
+        "secondary": frame_span * _TEMPLATE_SECONDARY_GAP_FRAME_FRACTION,
+        "context": frame_span * _TEMPLATE_CONTEXT_GAP_FRAME_FRACTION,
+    }
+    semantic_role_limits = {
+        "primary": frame_span
+        * _TEMPLATE_SEMANTIC_PRIMARY_GAP_FRAME_FRACTION,
+        "secondary": frame_span
+        * _TEMPLATE_SEMANTIC_SECONDARY_GAP_FRAME_FRACTION,
+        "context": frame_span
+        * _TEMPLATE_SEMANTIC_CONTEXT_GAP_FRAME_FRACTION,
+    }
+    base_evidence = {
+        "method": "corridor_aware_original_osm_path_v2",
+        "endpoint_snap_m": round(endpoint_snap_m, 3),
+        "corridor_snap_m": round(corridor_snap_m, 3),
+        "role_gap_limits_m": {
+            role: round(value, 3) for role, value in role_limits.items()
+        },
+        "semantic_role_gap_limits_m": {
+            role: round(value, 3)
+            for role, value in semantic_role_limits.items()
+        },
+        "max_detour_ratio": _TEMPLATE_MAX_GAP_DETOUR_RATIO,
+        "minimum_mask_support": _TEMPLATE_MIN_MASK_GAP_SUPPORT,
+        "max_link_gap_m": _TEMPLATE_MAX_LINK_GAP_M,
+        "max_link_detour_ratio": _TEMPLATE_MAX_LINK_GAP_DETOUR_RATIO,
+        "max_link_edges_per_gap": _TEMPLATE_MAX_LINK_EDGES_PER_GAP,
+        "inferred_link_continuation_cosine": (
+            _TEMPLATE_INFERRED_LINK_CONTINUATION_COSINE),
+        "inferred_link_minimum_coverage": (
+            _TEMPLATE_INFERRED_LINK_MIN_COVERAGE),
+        "inferred_link_minimum_weight": _TEMPLATE_INFERRED_LINK_MIN_WEIGHT,
+        "max_corridor_paths_per_anchor": (
+            _TEMPLATE_MAX_CORRIDOR_PATHS_PER_ANCHOR),
+        "max_mask_paths_per_anchor": _TEMPLATE_MAX_MASK_PATHS_PER_ANCHOR,
+        "proximity_continuation_cosine": (
+            _TEMPLATE_PROXIMITY_CONTINUATION_COSINE),
+    }
+    selected_positions = sorted(role_by_position)
+    if len(selected_positions) < 2:
+        return role_by_position, {
+            **base_evidence,
+            "eligible_missing_features": 0,
+            "restored_paths": 0,
+            "component_bridge_paths": 0,
+            "same_component_corridor_paths": 0,
+            "semantic_paths": 0,
+            "proximity_corridor_paths": 0,
+            "inferred_corridor_paths": 0,
+            "mask_supported_paths": 0,
+            "restored_features": 0,
+            "restored_length_m": 0.0,
+            "restored_link_features": 0,
+            "restored_roles": {},
+        }
+
+    selected = work.iloc[selected_positions].copy().reset_index(drop=True)
+    selected_terminals = {
+        local_pos: _line_terminals(row.geometry)
+        for local_pos, row in selected.iterrows()
+    }
+    selected_index = selected.sindex
+
+    parents = list(range(len(selected)))
+    corridor_parents = list(range(len(selected)))
+
+    def _find(value: int) -> int:
+        while parents[value] != value:
+            parents[value] = parents[parents[value]]
+            value = parents[value]
+        return value
+
+    def _union(left: int, right: int) -> None:
+        left_root = _find(left)
+        right_root = _find(right)
+        if left_root != right_root:
+            parents[right_root] = left_root
+
+    def _corridor_find(value: int) -> int:
+        while corridor_parents[value] != value:
+            corridor_parents[value] = corridor_parents[
+                corridor_parents[value]]
+            value = corridor_parents[value]
+        return value
+
+    def _corridor_union(left: int, right: int) -> None:
+        left_root = _corridor_find(left)
+        right_root = _corridor_find(right)
+        if left_root != right_root:
+            corridor_parents[right_root] = left_root
+
+    for local_pos, feature_terminals in selected_terminals.items():
+        if feature_terminals is None:
+            continue
+        for point in feature_terminals:
+            matches = selected_index.query(
+                point.buffer(endpoint_snap_m), predicate="intersects")
+            for other_local in matches:
+                other_local = int(other_local)
+                if other_local == local_pos:
+                    continue
+                if point.distance(selected.iloc[other_local].geometry) \
+                        <= endpoint_snap_m:
+                    _union(local_pos, other_local)
+                    identity = _template_identity_for_row(
+                        selected.iloc[local_pos])
+                    if (identity
+                            and identity == _template_identity_for_row(
+                                selected.iloc[other_local])):
+                        _corridor_union(local_pos, other_local)
+
+    root_identities: dict[int, set[str]] = {}
+    for local_pos, row in selected.iterrows():
+        root = _find(local_pos)
+        identity = _template_identity_for_row(row)
+        if identity:
+            root_identities.setdefault(root, set()).add(identity)
+
+    selected_identity_set = set().union(*root_identities.values()) \
+        if root_identities else set()
+    selected_local_by_position = {
+        position: local_pos
+        for local_pos, position in enumerate(selected_positions)
+    }
+    maximum_gap_m = max(semantic_role_limits.values())
+
+    def _node_key(point: Point) -> tuple[int, int]:
+        return (int(round(point.x / endpoint_snap_m)),
+                int(round(point.y / endpoint_snap_m)))
+
+    def _node_point(key: tuple[int, int]) -> Point:
+        return Point(key[0] * endpoint_snap_m,
+                     key[1] * endpoint_snap_m)
+
+    graph: dict[tuple[int, int], list[tuple[tuple[int, int], int]]] = {}
+    missing_positions = []
+    for pos, row in work.iterrows():
+        if pos in role_by_position:
+            continue
+        geometry = row.geometry
+        feature_terminals = _line_terminals(geometry)
+        if feature_terminals is None or float(geometry.length) > maximum_gap_m:
+            continue
+        support = support_by_position.get(pos, {})
+        covered = float(support.get(
+            "any_template_fraction", support.get("covered_fraction", 0.0)))
+        weighted = float(support.get("weighted_salience", 0.0))
+        identity = _template_identity_for_row(row)
+        highway = str(row.get("highway") or "")
+        semantic_candidate = identity and identity in selected_identity_set
+        if (not semantic_candidate
+                and covered < 0.08
+                and weighted < 0.05
+                and not highway.endswith("_link")):
+            continue
+        if highway == "tertiary" and not semantic_candidate \
+                and covered < 0.15:
+            continue
+        start = _node_key(feature_terminals[0])
+        end = _node_key(feature_terminals[1])
+        if start == end:
+            continue
+        graph.setdefault(start, []).append((end, pos))
+        graph.setdefault(end, []).append((start, pos))
+        missing_positions.append(pos)
+
+    anchor_cache: dict[tuple[int, int], dict[str, Any]] = {}
+
+    def _anchor(key: tuple[int, int]) -> dict[str, Any]:
+        if key in anchor_cache:
+            return anchor_cache[key]
+        point = _node_point(key)
+        roots: set[int] = set()
+        positions: set[int] = set()
+        matches = selected_index.query(
+            point.buffer(endpoint_snap_m), predicate="intersects")
+        for local_pos in matches:
+            local_pos = int(local_pos)
+            if point.distance(selected.iloc[local_pos].geometry) \
+                    > endpoint_snap_m:
+                continue
+            roots.add(_find(local_pos))
+            positions.add(selected_positions[local_pos])
+        corridor_positions = set(positions)
+        corridor_roots = set(roots)
+        node_identities = {
+            identity for _, position in graph.get(key, [])
+            if (identity := _template_identity_for_row(work.iloc[position]))
+        }
+        if node_identities:
+            corridor_matches = selected_index.query(
+                point.buffer(corridor_snap_m), predicate="intersects")
+            for local_pos in corridor_matches:
+                local_pos = int(local_pos)
+                selected_row = selected.iloc[local_pos]
+                if (_template_identity_for_row(selected_row)
+                        not in node_identities):
+                    continue
+                if point.distance(selected_row.geometry) > corridor_snap_m:
+                    continue
+                corridor_roots.add(_find(local_pos))
+                corridor_positions.add(selected_positions[local_pos])
+        # Anchor semantics must be local to the touching source features.  A
+        # connected downtown graph may contain hundreds of unrelated names;
+        # inheriting all of them from the component would make almost any
+        # missing road look like a semantic continuation.
+        roles = {role_by_position[position] for position in positions}
+        identities = {
+            identity for position in positions
+            if (identity := _template_identity_for_row(work.iloc[position]))
+        }
+        corridor_roles = {
+            role_by_position[position] for position in corridor_positions
+        }
+        corridor_identities = {
+            identity for position in corridor_positions
+            if (identity := _template_identity_for_row(work.iloc[position]))
+        }
+
+        def _identity_roots(source_positions: set[int]) \
+                -> dict[str, set[int]]:
+            result: dict[str, set[int]] = {}
+            for position in source_positions:
+                identity = _template_identity_for_row(work.iloc[position])
+                local_pos = selected_local_by_position[position]
+                if identity:
+                    result.setdefault(identity, set()).add(
+                        _corridor_find(local_pos))
+            return result
+
+        anchor_cache[key] = {
+            "roots": roots,
+            "positions": positions,
+            "roles": roles,
+            "identities": identities,
+            "corridor_roots": corridor_roots,
+            "corridor_positions": corridor_positions,
+            "corridor_roles": corridor_roles,
+            "corridor_identities": corridor_identities,
+            "identity_roots": _identity_roots(positions),
+            "corridor_identity_roots": _identity_roots(
+                corridor_positions),
+        }
+        return anchor_cache[key]
+
+    anchor_nodes = sorted(
+        key for key in graph if _anchor(key)["corridor_roots"])
+    restored_paths: list[tuple[int, ...]] = []
+    restored_positions: set[int] = set()
+    accepted_path_keys: set[tuple[int, ...]] = set()
+    component_bridge_paths = 0
+    same_component_corridor_paths = 0
+    semantic_paths = 0
+    proximity_corridor_paths = 0
+    mask_supported_paths = 0
+    inferred_corridor_paths = 0
+    role_rank = {"primary": 0, "secondary": 1, "context": 2}
+
+    def _path_role(
+        start_info,
+        target_info,
+        path: tuple[int, ...],
+        *,
+        use_corridor_anchors: bool = False,
+    ) -> str:
+        role_key = "corridor_roles" if use_corridor_anchors else "roles"
+        start_roles = start_info[role_key]
+        target_roles = target_info[role_key]
+        if "primary" in start_roles and "primary" in target_roles:
+            return "primary"
+        if ({"primary", "secondary"} & start_roles
+                and {"primary", "secondary"} & target_roles):
+            return "secondary"
+        return "context"
+
+    def _anchor_path_alignment(
+        anchor_info,
+        path_position: int,
+        node_key: tuple[int, int],
+        *,
+        allowed_identities: set[str],
+        use_corridor_anchors: bool = False,
+    ) -> float:
+        """Measure whether a missing edge continues a selected corridor."""
+
+        point = _node_point(node_key)
+        path_row = work.iloc[path_position]
+        path_directions = _directions_from_line_at_point(
+            path_row.geometry,
+            point,
+            endpoint_tolerance_m=endpoint_snap_m * 1.5,
+        )
+        if not path_directions:
+            return -1.0
+        best = -1.0
+        positions_key = (
+            "corridor_positions" if use_corridor_anchors else "positions")
+        selected_tolerance_m = (
+            corridor_snap_m if use_corridor_anchors else endpoint_snap_m * 1.5)
+        for selected_position in anchor_info[positions_key]:
+            selected_row = work.iloc[selected_position]
+            identity = _template_identity_for_row(selected_row)
+            if identity not in allowed_identities:
+                continue
+            if not _road_classes_compatible(
+                    path_row.get("highway"), selected_row.get("highway")):
+                continue
+            selected_directions = _directions_from_line_at_point(
+                selected_row.geometry,
+                point,
+                endpoint_tolerance_m=selected_tolerance_m,
+            )
+            for path_direction in path_directions:
+                for selected_direction in selected_directions:
+                    continuation = -(
+                        path_direction[0] * selected_direction[0]
+                        + path_direction[1] * selected_direction[1]
+                    )
+                    best = max(best, continuation)
+        return best
+
+    for start in anchor_nodes:
+        start_info = _anchor(start)
+        queue = [(0.0, 0.0, 0, start, tuple())]
+        best_cost = {start: 0.0}
+        accepted_corridor_paths = 0
+        accepted_mask_paths = 0
+        while queue:
+            cost, length_m, link_count, node, path = heapq.heappop(queue)
+            if cost > best_cost.get(node, float("inf")) + 1e-9:
+                continue
+            if node != start and _anchor(node)["corridor_roots"] and path:
+                target_info = _anchor(node)
+                different_roots = bool(
+                    start_info["roots"]
+                    and target_info["roots"]
+                    and target_info["roots"] - start_info["roots"])
+                shared_identities = (
+                    start_info["identities"] & target_info["identities"])
+                path_identities = {
+                    identity for pos in path
+                    if (identity := _template_identity_for_row(work.iloc[pos]))
+                }
+
+                def _different_identity_roots(
+                    identities: set[str],
+                    *,
+                    use_corridor_anchors: bool = False,
+                ) -> bool:
+                    roots_key = (
+                        "corridor_identity_roots"
+                        if use_corridor_anchors else "identity_roots")
+                    for identity in identities:
+                        start_roots = start_info[roots_key].get(identity, set())
+                        target_roots = target_info[roots_key].get(
+                            identity, set())
+                        if (start_roots and target_roots
+                                and target_roots - start_roots):
+                            return True
+                    return False
+
+                different_shared_corridor_roots = (
+                    _different_identity_roots(shared_identities))
+                closes_ring_corridor = any(
+                    identity.startswith(("numbered-ring:", "named-ring:"))
+                    for identity in shared_identities)
+                possible_unnamed_ring_link = bool(
+                    closes_ring_corridor
+                    and not path_identities
+                    and all(str(work.iloc[pos].get("highway") or "")
+                            .endswith("_link") for pos in path)
+                )
+                semantic_match = bool(
+                    shared_identities
+                    and path_identities
+                    and path_identities <= shared_identities
+                )
+                corridor_shared_identities = (
+                    start_info["corridor_identities"]
+                    & target_info["corridor_identities"])
+                proximity_start_alignment = -1.0
+                proximity_target_alignment = -1.0
+                proximity_corridor_match = False
+                if (path_identities
+                        and corridor_shared_identities
+                        and path_identities <= corridor_shared_identities):
+                    proximity_start_alignment = _anchor_path_alignment(
+                        start_info,
+                        path[0],
+                        start,
+                        allowed_identities=corridor_shared_identities,
+                        use_corridor_anchors=True,
+                    )
+                    proximity_target_alignment = _anchor_path_alignment(
+                        target_info,
+                        path[-1],
+                        node,
+                        allowed_identities=corridor_shared_identities,
+                        use_corridor_anchors=True,
+                    )
+                    proximity_corridor_match = bool(
+                        proximity_start_alignment
+                        >= _TEMPLATE_PROXIMITY_CONTINUATION_COSINE
+                        and proximity_target_alignment
+                        >= _TEMPLATE_PROXIMITY_CONTINUATION_COSINE
+                        and not semantic_match
+                    )
+                if (different_roots or semantic_match
+                        or proximity_corridor_match
+                        or possible_unnamed_ring_link):
+                    role = _path_role(
+                        start_info,
+                        target_info,
+                        path,
+                        use_corridor_anchors=proximity_corridor_match,
+                    )
+                    straight_m = _node_point(start).distance(_node_point(node))
+                    detour = length_m / max(straight_m, endpoint_snap_m)
+                    weighted_length = sum(
+                        float(work.iloc[pos].geometry.length)
+                        * float(support_by_position.get(pos, {}).get(
+                            "weighted_salience", 0.0)) for pos in path)
+                    average_support = weighted_length / max(length_m, 1.0)
+                    covered_length = sum(
+                        float(work.iloc[pos].geometry.length)
+                        * float(support_by_position.get(pos, {}).get(
+                            "any_template_fraction",
+                            support_by_position.get(pos, {}).get(
+                                "covered_fraction", 0.0),
+                        ))
+                        for pos in path
+                    )
+                    average_coverage = covered_length / max(length_m, 1.0)
+                    has_link = link_count > 0
+                    unnamed_link_path = bool(
+                        path
+                        and not path_identities
+                        and all(str(work.iloc[pos].get("highway") or "")
+                                .endswith("_link") for pos in path)
+                    )
+                    start_alignment = -1.0
+                    target_alignment = -1.0
+                    inferred_shared_identities = shared_identities
+                    if ((different_shared_corridor_roots
+                            or closes_ring_corridor)
+                            and inferred_shared_identities
+                            and unnamed_link_path):
+                        start_alignment = _anchor_path_alignment(
+                            start_info,
+                            path[0],
+                            start,
+                            allowed_identities=inferred_shared_identities,
+                        )
+                        target_alignment = _anchor_path_alignment(
+                            target_info,
+                            path[-1],
+                            node,
+                            allowed_identities=inferred_shared_identities,
+                        )
+                    inferred_corridor_match = bool(
+                        (different_shared_corridor_roots
+                         or closes_ring_corridor)
+                        and inferred_shared_identities
+                        and unnamed_link_path
+                        and start_alignment
+                        >= _TEMPLATE_INFERRED_LINK_CONTINUATION_COSINE
+                        and target_alignment
+                        >= _TEMPLATE_INFERRED_LINK_CONTINUATION_COSINE
+                        and average_coverage
+                        >= _TEMPLATE_INFERRED_LINK_MIN_COVERAGE
+                        and average_support
+                        >= _TEMPLATE_INFERRED_LINK_MIN_WEIGHT
+                    )
+                    link_path_valid = (
+                        not has_link
+                        or ((different_roots or inferred_corridor_match)
+                            and (semantic_match
+                                 or proximity_corridor_match
+                                 or inferred_corridor_match)
+                            and length_m <= _TEMPLATE_MAX_LINK_GAP_M
+                            and detour
+                            <= _TEMPLATE_MAX_LINK_GAP_DETOUR_RATIO)
+                    )
+                    path_key = tuple(sorted(path))
+                    path_limit_m = (
+                        semantic_role_limits[role]
+                        if (semantic_match or proximity_corridor_match)
+                        else role_limits[role]
+                    )
+                    if (length_m <= path_limit_m
+                            and detour <= _TEMPLATE_MAX_GAP_DETOUR_RATIO
+                            and link_count
+                            <= _TEMPLATE_MAX_LINK_EDGES_PER_GAP
+                            and link_path_valid
+                            and (semantic_match
+                                 or proximity_corridor_match
+                                 or inferred_corridor_match
+                                 or (different_roots and average_support
+                                     >= _TEMPLATE_MIN_MASK_GAP_SUPPORT))
+                            and path_key not in accepted_path_keys):
+                        is_corridor_path = bool(
+                            semantic_match or proximity_corridor_match
+                            or inferred_corridor_match)
+                        if (is_corridor_path
+                                and accepted_corridor_paths
+                                >= _TEMPLATE_MAX_CORRIDOR_PATHS_PER_ANCHOR):
+                            continue
+                        if (not is_corridor_path
+                                and accepted_mask_paths
+                                >= _TEMPLATE_MAX_MASK_PATHS_PER_ANCHOR):
+                            continue
+                        accepted_path_keys.add(path_key)
+                        restored_paths.append(path)
+                        component_bridge_paths += int(different_roots)
+                        same_component_corridor_paths += int(
+                            not different_roots)
+                        semantic_paths += int(semantic_match)
+                        proximity_corridor_paths += int(
+                            proximity_corridor_match)
+                        inferred_corridor_paths += int(
+                            inferred_corridor_match)
+                        mask_supported_paths += int(
+                            not semantic_match
+                            and not proximity_corridor_match
+                            and not inferred_corridor_match
+                            and average_support
+                            >= _TEMPLATE_MIN_MASK_GAP_SUPPORT)
+                        accepted_corridor_paths += int(is_corridor_path)
+                        accepted_mask_paths += int(not is_corridor_path)
+                        for pos in path:
+                            previous = role_by_position.get(pos)
+                            if (previous is None
+                                    or role_rank[role] < role_rank[previous]):
+                                role_by_position[pos] = role
+                            restored_positions.add(pos)
+                        # Do not walk through an accepted anchor into a second
+                        # corridor.  Other queued branches may still repair
+                        # parallel carriageways at this same junction.
+                        continue
+
+            if len(path) >= 12 or length_m >= maximum_gap_m:
+                continue
+            for neighbor, pos in graph.get(node, []):
+                if pos in path:
+                    continue
+                row = work.iloc[pos]
+                edge_length = float(row.geometry.length)
+                new_length = length_m + edge_length
+                if new_length > maximum_gap_m:
+                    continue
+                support = support_by_position.get(pos, {})
+                weighted = min(1.0, float(
+                    support.get("weighted_salience", 0.0)))
+                covered = min(1.0, float(support.get(
+                    "any_template_fraction",
+                    support.get("covered_fraction", 0.0))))
+                identity = _template_identity_for_row(row)
+                semantic_bonus = (
+                    0.55 if identity in start_info["identities"] else 1.0)
+                highway = str(row.get("highway") or "")
+                link_penalty = 1.25 if highway.endswith("_link") else 1.0
+                class_penalty = 1.20 if highway == "tertiary" else 1.0
+                edge_cost = (edge_length
+                             * (1.0 + 2.2 * (1.0 - weighted)
+                                + 1.2 * (1.0 - covered))
+                             * semantic_bonus * link_penalty * class_penalty)
+                new_cost = cost + edge_cost
+                if new_cost + 1e-9 >= best_cost.get(neighbor, float("inf")):
+                    continue
+                best_cost[neighbor] = new_cost
+                heapq.heappush(queue, (
+                    new_cost,
+                    new_length,
+                    link_count + int(highway.endswith("_link")),
+                    neighbor,
+                    path + (pos,),
+                ))
+
+    restored_roles: dict[str, int] = {}
+    for position in restored_positions:
+        role = role_by_position[position]
+        restored_roles[role] = restored_roles.get(role, 0) + 1
+    return role_by_position, {
+        **base_evidence,
+        "eligible_missing_features": len(missing_positions),
+        "anchor_nodes": len(anchor_nodes),
+        "restored_paths": len(restored_paths),
+        "component_bridge_paths": component_bridge_paths,
+        "same_component_corridor_paths": same_component_corridor_paths,
+        "semantic_paths": semantic_paths,
+        "proximity_corridor_paths": proximity_corridor_paths,
+        "inferred_corridor_paths": inferred_corridor_paths,
+        "mask_supported_paths": mask_supported_paths,
+        "restored_features": len(restored_positions),
+        "restored_length_m": round(sum(
+            float(work.iloc[position].geometry.length)
+            for position in restored_positions), 3),
+        "restored_link_features": sum(
+            str(work.iloc[position].get("highway") or "").endswith("_link")
+            for position in restored_positions),
+        "restored_roles": restored_roles,
+    }
+
+
+def _prune_template_dangling_chains(
+    work: gpd.GeoDataFrame,
+    role_by_position: dict[int, str],
+    *,
+    bbox_local,
+) -> tuple[dict[int, str], dict[str, Any]]:
+    """Hide short selected leaf chains while preserving source geometry.
+
+    A dilated reference road mask can overlap the first few metres of an OSM
+    side street.  Per-feature selection then renders only those source
+    segments and creates a thread-like spur.  This pass traces the selected
+    OSM graph from free endpoints and removes short leaf chains that terminate
+    at the retained network.  Removed roads remain in structural/Block base.
+    """
+
+    selected_positions = sorted(role_by_position)
+    xmin, ymin, xmax, ymax = (float(value) for value in bbox_local)
+    frame_span = max(xmax - xmin, ymax - ymin, 1.0)
+    max_chain_length_m = (
+        frame_span * _TEMPLATE_MAX_DANGLING_CHAIN_FRAME_FRACTION)
+    role_chain_limits_m = {
+        "primary": min(max_chain_length_m, max(
+            frame_span * _TEMPLATE_PRIMARY_DANGLING_CHAIN_FRAME_FRACTION,
+            _TEMPLATE_PRIMARY_DANGLING_CHAIN_TARGET_M,
+        )),
+        "secondary": min(max_chain_length_m, max(
+            frame_span * _TEMPLATE_SECONDARY_DANGLING_CHAIN_FRAME_FRACTION,
+            _TEMPLATE_SECONDARY_DANGLING_CHAIN_TARGET_M,
+        )),
+        "context": max_chain_length_m,
+        "connector": max_chain_length_m,
+    }
+    endpoint_snap_m = max(0.5, min(2.0, frame_span * 0.00004))
+    frame_margin_m = max(endpoint_snap_m * 2.0, frame_span * 0.0025)
+    base_evidence = {
+        "method": "selected_osm_graph_leaf_chain_v2",
+        "max_chain_length_m": round(max_chain_length_m, 3),
+        "role_chain_limits_m": {
+            role: round(value, 3)
+            for role, value in role_chain_limits_m.items()
+        },
+        "endpoint_snap_m": round(endpoint_snap_m, 3),
+        "frame_margin_m": round(frame_margin_m, 3),
+        "candidate_features": len(selected_positions),
+    }
+    if len(selected_positions) < 2:
+        return role_by_position, {
+            **base_evidence,
+            "traced_leaf_chains": 0,
+            "removed_features": 0,
+            "removed_length_m": 0.0,
+            "removed_roles": {},
+        }
+
+    selected = work.iloc[selected_positions].copy().reset_index(drop=True)
+    terminals = {
+        local_pos: _line_terminals(row.geometry)
+        for local_pos, row in selected.iterrows()
+    }
+    spatial_index = selected.sindex
+    connection_cache: dict[tuple[int, int], list[tuple[int, int | None]]] = {}
+
+    def _at_frame_edge(point: Point) -> bool:
+        return (point.x - xmin <= frame_margin_m
+                or xmax - point.x <= frame_margin_m
+                or point.y - ymin <= frame_margin_m
+                or ymax - point.y <= frame_margin_m)
+
+    def _connections(local_pos: int, terminal_index: int) \
+            -> list[tuple[int, int | None]]:
+        cache_key = (local_pos, terminal_index)
+        if cache_key in connection_cache:
+            return connection_cache[cache_key]
+        feature_terminals = terminals.get(local_pos)
+        if feature_terminals is None:
+            connection_cache[cache_key] = []
+            return []
+        point = feature_terminals[terminal_index]
+        matches = spatial_index.query(
+            point.buffer(endpoint_snap_m), predicate="intersects")
+        connections = []
+        for other_local in sorted(int(value) for value in matches):
+            if other_local == local_pos:
+                continue
+            other_geometry = selected.iloc[other_local].geometry
+            if point.distance(other_geometry) > endpoint_snap_m:
+                continue
+            other_terminal_index = None
+            other_terminals = terminals.get(other_local)
+            if other_terminals is not None:
+                distances = [point.distance(candidate)
+                             for candidate in other_terminals]
+                closest = min(range(2), key=lambda index: distances[index])
+                if distances[closest] <= endpoint_snap_m:
+                    other_terminal_index = int(closest)
+            connections.append((other_local, other_terminal_index))
+        connection_cache[cache_key] = connections
+        return connections
+
+    def _protected(local_pos: int) -> bool:
+        row = selected.iloc[local_pos]
+        return (_truthy_osm_tag(row.get("bridge"))
+                or _truthy_osm_tag(row.get("tunnel")))
+
+    def _trace_leaf(start_local: int, free_terminal: int) \
+            -> tuple[list[int], float] | None:
+        chain: list[int] = []
+        chain_length_m = 0.0
+        chain_limit_m = max_chain_length_m
+        current = start_local
+        entry_terminal = free_terminal
+        seen: set[int] = set()
+        while True:
+            if current in seen or terminals.get(current) is None:
+                return None
+            if _protected(current):
+                return None
+            seen.add(current)
+            chain.append(current)
+            source_position = selected_positions[current]
+            role = role_by_position[source_position]
+            chain_limit_m = min(
+                chain_limit_m,
+                role_chain_limits_m.get(role, max_chain_length_m),
+            )
+            geometry = selected.iloc[current].geometry
+            chain_length_m += float(geometry.length)
+            if chain_length_m > chain_limit_m:
+                return None
+
+            exit_terminal = 1 - entry_terminal
+            exit_point = terminals[current][exit_terminal]
+            if _at_frame_edge(exit_point):
+                return None
+            connections = _connections(current, exit_terminal)
+            unique_others = sorted({other for other, _ in connections})
+            if not unique_others:
+                return chain, chain_length_m
+            if len(unique_others) > 1:
+                return chain, chain_length_m
+
+            other = unique_others[0]
+            other_terminal_values = {
+                terminal for candidate, terminal in connections
+                if candidate == other
+            }
+            if None in other_terminal_values or not other_terminal_values:
+                # A free branch meeting the interior of another selected OSM
+                # feature is the canonical line-thread failure.
+                return chain, chain_length_m
+            other_terminal = min(int(value)
+                                 for value in other_terminal_values)
+            if other in seen:
+                return None
+
+            current_direction = _terminal_direction(
+                geometry, exit_terminal)
+            other_geometry = selected.iloc[other].geometry
+            other_direction = _terminal_direction(
+                other_geometry, other_terminal)
+            if current_direction is None or other_direction is None:
+                return chain, chain_length_m
+            alignment = abs(
+                current_direction[0] * other_direction[0]
+                + current_direction[1] * other_direction[1])
+            if alignment < _TEMPLATE_CONTINUATION_COSINE:
+                return chain, chain_length_m
+            current = other
+            entry_terminal = other_terminal
+
+    removed_local: set[int] = set()
+    traced_chains: set[tuple[int, ...]] = set()
+    for local_pos, feature_terminals in terminals.items():
+        if feature_terminals is None:
+            continue
+        for terminal_index, point in enumerate(feature_terminals):
+            if _connections(local_pos, terminal_index) or _at_frame_edge(point):
+                continue
+            traced = _trace_leaf(local_pos, terminal_index)
+            if traced is None:
+                continue
+            chain, _ = traced
+            key = tuple(sorted(chain))
+            if key in traced_chains:
+                continue
+            traced_chains.add(key)
+            removed_local.update(chain)
+
+    removed_positions = {
+        selected_positions[local] for local in removed_local
+    }
+    kept_roles = {
+        position: role for position, role in role_by_position.items()
+        if position not in removed_positions
+    }
+    removed_roles: dict[str, int] = {}
+    for position in removed_positions:
+        role = role_by_position[position]
+        removed_roles[role] = removed_roles.get(role, 0) + 1
+    return kept_roles, {
+        **base_evidence,
+        "traced_leaf_chains": len(traced_chains),
+        "removed_features": len(removed_positions),
+        "removed_length_m": round(sum(
+            float(work.iloc[position].geometry.length)
+            for position in removed_positions), 3),
+        "removed_roles": removed_roles,
+    }
+
+
+def _apply_amap_spatial_template(
+    visible: gpd.GeoDataFrame,
+    *,
+    bbox_local,
+    scale_mm_per_m: float,
+    road_width_multiplier: float,
+    min_colored_strip_mm: float,
+    nozzle_real_m: float,
+    visual_salience_guide,
+) -> tuple[gpd.GeoDataFrame, dict[str, Any]]:
+    """Map AMap's spatial hierarchy onto existing OSM linework.
+
+    The previous guide only changed the rank of whole OSM name groups after
+    class and ink budgets had already shaped the result.  It therefore could
+    not reproduce the reference map's continuous skeleton.  This selector
+    instead evaluates every eligible OSM feature against the aligned major,
+    arterial and context masks.  The masks assign a role; coordinates always
+    remain the original OSM coordinates.
+
+    No city-independent target ink percentage is used here.  A sparse or dense
+    city inherits the amount of hierarchy present in its reference template.
+    Physical widths still pass through the printer floor below.
+    """
+
+    xmin, ymin, xmax, ymax = (float(value) for value in bbox_local)
+    frame_area = max((xmax - xmin) * (ymax - ymin), 1.0)
+    frame_span = max(xmax - xmin, ymax - ymin, 1.0)
+    work = visible.copy().reset_index(drop=True)
+    if work.empty:
+        return work, {
+            "applied": False,
+            "reason": "no_template_candidates",
+        }
+
+    minimum_length_m = max(nozzle_real_m * 1.25, frame_span * 0.0025)
+    role_by_position: dict[int, str] = {}
+    provisional_roles: dict[int, str] = {}
+    support_by_position: dict[int, dict[str, float]] = {}
+    identity_stats: dict[str, dict[str, float]] = {}
+
+    for pos, row in work.iterrows():
+        geometry = row.geometry
+        if geometry is None or geometry.is_empty:
+            continue
+        highway = str(row.get("highway") or "")
+        support = visual_salience_guide.road_support(geometry)
+        support_by_position[pos] = support
+        covered = float(support.get(
+            "any_template_fraction", support.get("covered_fraction", 0.0)))
+        weighted = float(support.get("weighted_salience", 0.0))
+        major = max(
+            float(support.get("major_mask_fraction", 0.0)),
+            float(support.get("major_fraction", 0.0)),
+        )
+        arterial = float(support.get(
+            "arterial_or_major_fraction", 0.0))
+        context = float(support.get("context_mask_fraction", covered))
+        identity = _template_identity_for_row(row)
+        if identity:
+            stats = identity_stats.setdefault(identity, {
+                "length_m": 0.0,
+                "covered_length_m": 0.0,
+                "supported_length_m": 0.0,
+            })
+            length_m = float(geometry.length)
+            stats["length_m"] += length_m
+            stats["covered_length_m"] += length_m * covered
+
+        # At 15/25 km interchange ramps become dark knots even when the
+        # template identifies them correctly, so they remain
+        # topology/block-base structure only.
+        is_link = highway.endswith("_link")
+        if is_link:
+            continue
+        if ((major >= _TEMPLATE_PRIMARY_MAJOR_FRACTION
+             and covered >= 0.34)
+                or (weighted >= _TEMPLATE_PRIMARY_WEIGHT
+                    and covered >= 0.44)):
+            role = "primary"
+        elif ((arterial >= _TEMPLATE_SECONDARY_ARTERIAL_FRACTION
+               and covered >= 0.40)
+              or (weighted >= _TEMPLATE_SECONDARY_WEIGHT
+                  and covered >= 0.48)):
+            role = "secondary"
+        elif (not is_link
+              and float(geometry.length) >= minimum_length_m
+              and context >= _TEMPLATE_CONTEXT_FRACTION
+              and covered >= 0.56
+              and weighted >= _TEMPLATE_CONTEXT_WEIGHT):
+            role = "context"
+        else:
+            continue
+        provisional_roles[pos] = role
+        if identity:
+            identity_stats[identity]["supported_length_m"] += float(
+                geometry.length)
+
+    # A short OSM way lying perpendicular to a thick reference road can have
+    # 100% pixel overlap even though it is only an intersection spur.  Keep a
+    # short fragment only when its full named/ref corridor has sustained
+    # template coverage; long fragments are strong enough on their own.
+    for pos, role in provisional_roles.items():
+        row = work.iloc[pos]
+        geometry = row.geometry
+        length_m = float(geometry.length)
+        if length_m >= minimum_length_m:
+            role_by_position[pos] = role
+            continue
+        identity = _template_identity_for_row(row)
+        stats = identity_stats.get(identity, {}) if identity else {}
+        total_length = max(float(stats.get("length_m", 0.0)), 1.0)
+        corridor_coverage = float(
+            stats.get("covered_length_m", 0.0)) / total_length
+        supported_length = float(stats.get("supported_length_m", 0.0))
+        support = support_by_position.get(pos, {})
+        fragment_coverage = float(support.get(
+            "any_template_fraction", support.get("covered_fraction", 0.0)))
+        if (identity
+                and corridor_coverage >= 0.34
+                and supported_length >= minimum_length_m * 4.0
+                and fragment_coverage >= 0.52):
+            role_by_position[pos] = role
+
+    # Repair only bounded paths made from original OSM features.  This catches
+    # palette/segmentation holes and the few link features needed to keep a
+    # confirmed corridor connected, without inventing replacement geometry.
+    before_continuity_positions = set(role_by_position)
+    role_by_position, continuity_evidence = _restore_template_continuity(
+        work,
+        role_by_position,
+        support_by_position,
+        bbox_local=bbox_local,
+    )
+    connector_positions: set[int] = set()
+
+    role_by_position, dangling_chain_evidence = (
+        _prune_template_dangling_chains(
+            work,
+            role_by_position,
+            bbox_local=bbox_local,
+        )
+    )
+    restored_positions = (
+        set(role_by_position) - before_continuity_positions)
+    continuity_evidence["retained_after_pruning"] = len(restored_positions)
+
+    selected_positions = set(role_by_position)
+    selected = work.iloc[sorted(selected_positions)].copy()
+    selected[COMPOSITION_ROLE_COLUMN] = [
+        role_by_position[pos] for pos in sorted(selected_positions)
+    ]
+
+    def _row_identity(pos: int) -> str | None:
+        row = work.iloc[pos]
+        highway = str(row.get("highway") or "unknown")
+        ring = (ring_corridor_identity(row.get("name"))
+                or ring_corridor_identity(row.get("name:en")))
+        if ring:
+            return f"{highway}:{ring}"
+        for column in ("name", "ref"):
+            value = row.get(column)
+            if isinstance(value, str) and value.strip():
+                return f"{highway}:{column}:{value.strip().casefold()}"
+        return None
+
+    def _role_evidence(role: str) -> dict[str, Any]:
+        positions = {pos for pos, assigned in role_by_position.items()
+                     if assigned == role}
+        weighted_values = [
+            float(support_by_position.get(pos, {}).get(
+                "weighted_salience", 0.0)) for pos in positions
+        ]
+        return {
+            "role": role,
+            "features": len(positions),
+            "identities": sorted({identity for pos in positions
+                                  if (identity := _row_identity(pos))}),
+            "anonymous_features": sum(
+                _row_identity(pos) is None for pos in positions),
+            "mean_template_salience": round(
+                sum(weighted_values) / len(weighted_values), 6)
+                if weighted_values else 0.0,
+            "estimated_ink_ratio": round(sum(
+                float(work.iloc[pos].geometry.length)
+                * resolve_composed_road_width_m(
+                    str(work.iloc[pos].get("highway") or ""),
+                    composition_role=role,
+                    scale_mm_per_m=scale_mm_per_m,
+                    road_width_multiplier=road_width_multiplier,
+                    min_colored_strip_mm=min_colored_strip_mm,
+                ) / frame_area
+                for pos in positions
+            ), 6),
+        }
+
+    selected_ink = sum(
+        float(work.iloc[pos].geometry.length)
+        * resolve_composed_road_width_m(
+            str(work.iloc[pos].get("highway") or ""),
+            composition_role=role_by_position[pos],
+            scale_mm_per_m=scale_mm_per_m,
+            road_width_multiplier=road_width_multiplier,
+            min_colored_strip_mm=min_colored_strip_mm,
+        ) / frame_area
+        for pos in selected_positions
+    )
+    reference_evidence = getattr(
+        getattr(visual_salience_guide, "reference", None), "evidence", {}) or {}
+    composition_roles = {
+        "schema_version": "1.0",
+        "method": "amap_spatial_template_to_osm_roles_v4",
+        "primary": _role_evidence("primary"),
+        "secondary": _role_evidence("secondary"),
+        "context": _role_evidence("context"),
+        "connector": _role_evidence("connector"),
+        "background": {
+            "role": "block_base_only",
+            "features": max(0, len(work) - len(selected_positions)),
+            "reason": (
+                "retained for topology and structural seams; absent from "
+                "the reference skeleton or below matching confidence"),
+        },
+    }
+    selected_identities = sorted({
+        identity for pos in selected_positions
+        if (identity := _row_identity(pos))
+    })
+    return selected, {
+        "applied": True,
+        "method": "amap_spatial_template_existing_osm_v4",
+        "candidate_features": len(work),
+        "selected_features": len(selected),
+        "selected_estimated_ink_ratio": round(selected_ink, 6),
+        "connector_features": len(connector_positions),
+        "reference_mask_ratios": {
+            key: reference_evidence.get(key)
+            for key in (
+                "road_major_ratio", "road_arterial_ratio",
+                "road_context_ratio")
+        },
+        "thresholds": {
+            "primary_major_fraction": _TEMPLATE_PRIMARY_MAJOR_FRACTION,
+            "primary_weight": _TEMPLATE_PRIMARY_WEIGHT,
+            "secondary_arterial_fraction": (
+                _TEMPLATE_SECONDARY_ARTERIAL_FRACTION),
+            "secondary_weight": _TEMPLATE_SECONDARY_WEIGHT,
+            "context_fraction": _TEMPLATE_CONTEXT_FRACTION,
+            "context_weight": _TEMPLATE_CONTEXT_WEIGHT,
+            "minimum_length_m": round(minimum_length_m, 3),
+            "short_corridor_coverage": 0.34,
+            "short_supported_length_factor": 4.0,
+            "short_fragment_coverage": 0.52,
+        },
+        "continuity_restoration": continuity_evidence,
+        "dangling_chain_pruning": dangling_chain_evidence,
+        "visual_salience": {
+            "enabled": True,
+            "mode": "spatial_template_match_existing_osm_segments",
+            "reference_version": getattr(
+                visual_salience_guide, "version", None),
+            "template_policy_version": getattr(
+                visual_salience_guide, "template_policy_version", None),
+            "selected_features": len(selected),
+            "selected_identities": selected_identities,
+        },
+        "composition_roles": composition_roles,
+    }
 
 
 def ring_corridor_identity(value: Any) -> str:
@@ -911,20 +2196,36 @@ def select_road_roles(
     topology = _highway_subset(lines, set(ROAD_TIERS[topology_tier]))
     structural = _highway_subset(lines, set(ROAD_TIERS[structural_tier]))
     visible_highways = resolve_visible_highways(nozzle_real_m)
+    if visual_salience_guide is not None and nozzle_real_m >= 25.0:
+        # AMap can identify a locally important tertiary road that a global
+        # OSM class filter would discard before spatial matching.  Residential
+        # and service streets remain structural-only at this print scale.
+        visible_highways = set(ROAD_TIERS[2])
     visible_candidates = _highway_subset(lines, visible_highways)
     visible = visible_candidates
     ink_budget = {"applied": False, "reason": "small_or_medium_print_footprint"}
     if (nozzle_real_m >= 25.0 and bbox_local is not None
             and scale_mm_per_m is not None):
-        visible, ink_budget = _apply_large_area_ink_budget(
-            visible_candidates,
-            bbox_local=bbox_local,
-            scale_mm_per_m=scale_mm_per_m,
-            road_width_multiplier=road_width_multiplier,
-            min_colored_strip_mm=min_colored_strip_mm,
-            nozzle_real_m=nozzle_real_m,
-            visual_salience_guide=visual_salience_guide,
-        )
+        if visual_salience_guide is not None:
+            visible, ink_budget = _apply_amap_spatial_template(
+                visible_candidates,
+                bbox_local=bbox_local,
+                scale_mm_per_m=scale_mm_per_m,
+                road_width_multiplier=road_width_multiplier,
+                min_colored_strip_mm=min_colored_strip_mm,
+                nozzle_real_m=nozzle_real_m,
+                visual_salience_guide=visual_salience_guide,
+            )
+        else:
+            visible, ink_budget = _apply_large_area_ink_budget(
+                visible_candidates,
+                bbox_local=bbox_local,
+                scale_mm_per_m=scale_mm_per_m,
+                road_width_multiplier=road_width_multiplier,
+                min_colored_strip_mm=min_colored_strip_mm,
+                nozzle_real_m=nozzle_real_m,
+                visual_salience_guide=None,
+            )
     elif len(visible) > 0:
         visible = visible.copy()
         visible[COMPOSITION_ROLE_COLUMN] = "foreground"

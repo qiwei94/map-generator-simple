@@ -102,7 +102,10 @@ def test_projected_line_guide_scores_only_supported_corridor():
         LineString([(500, 8000), (9500, 8000)]))
 
     assert supported["weighted_salience"] > 0.95
+    assert supported["major_mask_fraction"] > 0.95
+    assert supported["any_template_fraction"] > 0.95
     assert unsupported["weighted_salience"] == 0.0
+    assert unsupported["any_template_fraction"] == 0.0
 
 
 def test_guide_is_explicitly_not_applicable_outside_mainland_china():
