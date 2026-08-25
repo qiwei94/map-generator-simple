@@ -127,8 +127,9 @@ get_standard_map(bbox_wgs84, output_path, zoom=13) -> (path or None, source)
 1. **`amap_tiles`** — 高德无标注底图瓦片拼接（`scl=2&style=7`），最完整，需联网
 2. **`amap_water_cache`** — 渲染本地缓存水体矢量为蓝水白底图，离线可用
 
-> 注：高德瓦片为 GCJ-02，与 WGS84 浮雕图有 ~500m 整体偏移，但对「某水体是否存在」
-> 的视觉比对影响可忽略（相对 27km 边长 <2%）。
+> 注：只做人工判断“某水体是否存在”时，约 500m 的整体偏移尚可容忍；若把底图
+> 用作逐像素 mask、连续性或召回约束，则绝不能忽略。`aesthetic/amap_salience.py`
+> 会先将 WGS84 四角转为 GCJ-02，再按 WebMercator 精确裁切到请求画幅。
 
 ## 6. 能力边界（重要）
 

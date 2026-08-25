@@ -71,6 +71,17 @@ def layer_evidence(layers: Any) -> dict:
     ):
         if source_key in road_roles:
             evidence[output_key] = int(road_roles[source_key])
+    water_roles = getattr(layers, "water_roles", {}) or {}
+    for source_key, output_key in (
+        ("source_line_segments", "water_source_line_segments"),
+        ("candidate_groups", "water_candidate_groups"),
+        ("selected_groups", "water_selected_groups"),
+        ("visible_line_segments", "water_visible_line_segments"),
+        ("gap_bridges", "water_gap_bridges"),
+        ("ordinary_polygon_drops", "water_ordinary_polygon_drops"),
+    ):
+        if source_key in water_roles:
+            evidence[output_key] = int(water_roles[source_key])
     return evidence
 
 
@@ -87,6 +98,7 @@ def build_design_spec(
     block_base: Optional[Mapping] = None,
     printability: Optional[Mapping] = None,
     road_roles: Optional[Mapping] = None,
+    water_roles: Optional[Mapping] = None,
     pipeline: str = "generate_city_legacy",
 ) -> dict:
     """Build a validated DesignSpec dictionary without mutating generation."""
@@ -117,6 +129,7 @@ def build_design_spec(
         "block_base": _json_value(block_base or {}),
         "printability": _json_value(printability or {}),
         "road_roles": _json_value(road_roles or {}),
+        "water_roles": _json_value(water_roles or {}),
         "evidence": {
             "source_features": source,
             "printable_features": printable,

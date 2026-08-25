@@ -86,7 +86,19 @@ from _TEXTURE_STYLE_OF_DEEPSEEK.print_profile import (
     DEFAULT_PRINTER_PROFILE,
     PrinterProfile,
 )
-from _TEXTURE_STYLE_OF_DEEPSEEK.road_roles import select_road_roles
+from _TEXTURE_STYLE_OF_DEEPSEEK.road_roles import (
+    COMPOSITION_ROLE_COLUMN,
+    select_road_roles,
+)
+from _TEXTURE_STYLE_OF_DEEPSEEK.water_roles import (
+    WaterLineCandidate,
+    has_printable_water_mass,
+    is_identity_water_enclosure,
+    is_exposed_water_line,
+    select_visible_water_lines,
+    water_identity,
+    waterway_kind,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -105,8 +117,9 @@ class LayerPolygons:
     WO: List[Polygon] = field(default_factory=list)
     block_base: List[Polygon] = field(default_factory=list)  # PNG layer 1.5 暖米色城市底
     block_base_classes: List[str] = field(default_factory=list)  # semantic class per block_base polygon
-    roads_lines: List[Tuple[LineString, str, bool]] = field(default_factory=list)
+    roads_lines: List[Tuple] = field(default_factory=list)
     road_roles: Dict = field(default_factory=dict)
+    water_roles: Dict = field(default_factory=dict)
     nozzle_real_m: float = 0.0
     min_area_m2: float = 0.0
 
@@ -796,29 +809,49 @@ def _close_unprintable_water_gaps(
 def _extract_WL_WO(
     water_gdf: gpd.GeoDataFrame,
     nozzle_real_m: float,
-) -> Tuple[List[Polygon], List[Polygon], List[Tuple[LineString, str]]]:
+    bbox_local=None,
+    visual_salience_guide=None,
+) -> Tuple[
+    List[Polygon],
+    List[Polygon],
+    List[Tuple[LineString, str]],
+    Dict,
+]:
     """返回 (WL_polys, WO_polys, wl_lines_raw)。
 
-    - Polygon/MultiPolygon: is_water_landmark → WL，否则 → WO（仅当 area >= 1000m²）
+    - Polygon/MultiPolygon: is_water_landmark → WL；普通水面还需达到场景化面积阈值
     - LineString/MultiLineString: is_water_landmark → buffer 到
         max(保守默认半宽, nozzle_real_m * 0.5)
         → 加入 WL（已 buffer 后的 polygon）
-    - LineString 非地标 → 忽略
-    - wl_lines_raw: 原始 WL LineString + waterway type（buffer 前），供水体补全使用
+    - LineString 非地标 → 忽略；候选地标按完整语义走廊与墨量预算筛选
+    - wl_lines_raw: 已选 WL LineString + waterway type（buffer 前），供水体补全使用
     """
     if water_gdf is None or len(water_gdf) == 0:
-        return [], [], []
+        return [], [], [], {
+            "policy_version": "print-water-roles-v3",
+            "source_features": 0,
+            "visible_line_segments": 0,
+        }
 
     WL_polys: List[Polygon] = []
     WO_polys: List[Polygon] = []
     wl_lines_raw: List[Tuple[LineString, str]] = []
+    line_candidates: List[WaterLineCandidate] = []
     filled_hole_count = 0
     repaired_water_count = 0
+    ordinary_polygon_drops = 0
+    unprintable_surface_drops = 0
     # 可打印下限 = 1 喷嘴宽（0.5×nozzle_real 半宽）。历史 1.5× 把大框
     # （scale 小、nozzle_real 大）的城市河道全部撑到 ~200m 宽蓝带。
     min_buffer = nozzle_real_m * 0.5
+    # A printable dot is not automatically a useful city-scale water mark.
+    # Require a water patch to occupy enough visual mass to read as water, not
+    # merely survive as a printable black dot.  All source polygons still
+    # participate in structural block cutting before this visible-layer gate.
+    visual_polygon_min_area = max(1000.0, (nozzle_real_m * 4.5) ** 2)
+    ordinary_min_area = visual_polygon_min_area
 
-    for _, row in water_gdf.iterrows():
+    for source_index, row in water_gdf.iterrows():
         geom = row.geometry
         if geom is None or geom.is_empty:
             continue
@@ -835,25 +868,45 @@ def _extract_WL_WO(
                     repaired_water_count += 1
                 poly = cleaned
                 area = poly.area
-                if is_water_landmark(row, area_m2=area):
+                if not has_printable_water_mass(
+                        poly, nozzle_real_m=nozzle_real_m):
+                    unprintable_surface_drops += 1
+                    continue
+                if (area >= visual_polygon_min_area
+                        and is_water_landmark(row, area_m2=area)):
                     WL_polys.append(poly)
-                elif area >= 1000.0:
+                elif area >= ordinary_min_area:
                     WO_polys.append(poly)
+                else:
+                    ordinary_polygon_drops += 1
 
         # LineString / MultiLineString
         elif isinstance(geom, (LineString, MultiLineString)):
-            if not is_water_landmark(row):
+            visual_support = (
+                visual_salience_guide.water_support(geom)
+                if visual_salience_guide is not None else {
+                    "covered_fraction": 0.0})
+            externally_salient = (
+                float(visual_support.get("covered_fraction", 0.0)) >= 0.60)
+            if ((not is_water_landmark(row) and not externally_salient)
+                    or not is_exposed_water_line(row)):
                 continue
             lines = geom.geoms if isinstance(geom, MultiLineString) else [geom]
-            waterway_type = row.get("waterway", "river")
+            waterway_type = waterway_kind(row)
             # 宽度解析：OSM width 标签 > 自适应回退（不查硬编码表）
             osm_width = row.get("width", None)
+            width_evidence = False
             if osm_width is not None:
                 try:
                     if not (isinstance(osm_width, float) and math.isnan(osm_width)):
                         parsed_w = float(osm_width)
                         if 0 < parsed_w < 5000:
                             half_width = parsed_w / 2.0
+                            # A factual width tag is useful only when the
+                            # source water itself spans at least one printable
+                            # strip.  Otherwise the renderer would still be
+                            # inventing most of the visible black width.
+                            width_evidence = parsed_w >= nozzle_real_m
                         else:
                             half_width = 30.0  # 无效标签回退
                     else:
@@ -869,23 +922,74 @@ def _extract_WL_WO(
                 }
                 half_width = conservative_defaults.get(waterway_type, 15.0)
             buffer_width = max(half_width, min_buffer)
-            for line in lines:
+            identity = water_identity(row, f"source:{source_index}")
+            for part_index, line in enumerate(lines):
                 if line.length < 10.0:
                     continue
-                wl_lines_raw.append((line, waterway_type))
-                buf = line.buffer(buffer_width, cap_style=2, join_style=2)
-                if buf.is_empty:
-                    continue
-                if isinstance(buf, MultiPolygon):
-                    WL_polys.extend(buf.geoms)
-                elif isinstance(buf, Polygon):
-                    WL_polys.append(buf)
+                line_candidates.append(WaterLineCandidate(
+                    geometry=line,
+                    waterway=str(waterway_type or "river"),
+                    identity=(identity if not identity.startswith("source:")
+                              else f"{identity}:{part_index}"),
+                    half_width_m=float(buffer_width),
+                    width_evidence=width_evidence,
+                    identity_enclosure=is_identity_water_enclosure(row),
+                    visual_salience=float(
+                        visual_salience_guide.water_support(line).get(
+                            "covered_fraction", 0.0)
+                        if visual_salience_guide is not None else 0.0),
+                ))
+
+    if bbox_local is not None:
+        xmin, ymin, xmax, ymax = (float(value) for value in bbox_local)
+        frame_area = max((xmax - xmin) * (ymax - ymin), 1.0)
+        visible_surface_ratio = min(
+            1.0,
+            sum(float(poly.area) for poly in [*WL_polys, *WO_polys])
+            / frame_area,
+        )
+    else:
+        visible_surface_ratio = 0.0
+    visible_water = select_visible_water_lines(
+        line_candidates,
+        bbox_local=bbox_local,
+        nozzle_real_m=nozzle_real_m,
+        visible_surface_ratio=visible_surface_ratio,
+    )
+    selected_water_lines = list(visible_water.lines)
+    wl_lines_raw = [(line, waterway_type)
+                    for line, waterway_type, _ in selected_water_lines]
+    for line, waterway_type, selected_half_width in selected_water_lines:
+        buffer_width = max(selected_half_width, min_buffer)
+        buf = line.buffer(buffer_width, cap_style=2, join_style=2)
+        if buf.is_empty:
+            continue
+        if isinstance(buf, MultiPolygon):
+            WL_polys.extend(buf.geoms)
+        elif isinstance(buf, Polygon):
+            WL_polys.append(buf)
+
+    water_role_evidence = dict(visible_water.evidence)
+    water_role_evidence.update({
+        "source_features": len(water_gdf),
+        "ordinary_polygon_min_area_m2": ordinary_min_area,
+        "ordinary_polygon_drops": ordinary_polygon_drops,
+        "unprintable_surface_drops": unprintable_surface_drops,
+        "visible_landmark_polygons": len(WL_polys),
+        "visible_ordinary_polygons": len(WO_polys),
+    })
+
+    print(f"  water_roles: groups={water_role_evidence.get('selected_groups', 0)}/"
+          f"{water_role_evidence.get('candidate_groups', 0)}, "
+          f"lines={len(wl_lines_raw)}/{len(line_candidates)}, "
+          f"gap_bridges={water_role_evidence.get('gap_bridges', 0)}, "
+          f"ordinary_min_area={ordinary_min_area:.0f}m²")
 
     print(f"  _extract_WL_WO: {len(WL_polys)} WL, {len(WO_polys)} WO, "
           f"{len(wl_lines_raw)} raw lines, {filled_hole_count} unprintable holes filled "
           f"across {repaired_water_count} repaired polygons "
           f"(min_buffer={min_buffer:.1f}m)")
-    return WL_polys, WO_polys, wl_lines_raw
+    return WL_polys, WO_polys, wl_lines_raw, water_role_evidence
 
 
 # ---------------------------------------------------------------------------
@@ -898,8 +1002,9 @@ def _extract_roads(
     area_km2: float = 0,
     *,
     apply_area_filter: bool = True,
-) -> List[Tuple[LineString, str, bool]]:
-    """返回 [(line, highway_type, is_bridge)]。
+    include_composition_role: bool = False,
+) -> List[Tuple]:
+    """返回道路线；可选第 4 项 ``composition_role``。
 
     - 应用 ROAD_FILTER（如 large 城市仅取 motorway/trunk/primary/secondary）
     - 减去 BL footprint（路从大楼底下不画）
@@ -939,7 +1044,7 @@ def _extract_roads(
         except Exception:
             pass
 
-    result: List[Tuple[LineString, str, bool]] = []
+    result: List[Tuple] = []
     n_skip_short = 0
     n_subtracted = 0
 
@@ -954,6 +1059,14 @@ def _extract_roads(
     bridges = _column("bridge")
     wikidata_values = _column("wikidata")
     wikipedia_values = _column("wikipedia")
+    composition_roles = _column(COMPOSITION_ROLE_COLUMN, "foreground")
+
+    def _append(line, highway, is_bridge, composition_role):
+        if include_composition_role:
+            result.append((line, highway, is_bridge,
+                           str(composition_role or "foreground")))
+        else:
+            result.append((line, highway, is_bridge))
 
     def _is_bridge_landmark(name, highway, bridge, wikidata, wikipedia) -> bool:
         # Equivalent to is_road_landmark(), kept scalar and allocation-free for
@@ -970,8 +1083,9 @@ def _extract_roads(
         return any(token in str(name) for token in
                    ("大桥", "Bridge", "Viaduct", "高架", "立交"))
 
-    for geom, highway, name, bridge, wikidata, wikipedia in zip(
+    for geom, highway, name, bridge, wikidata, wikipedia, composition_role in zip(
         geometries, highways, names, bridges, wikidata_values, wikipedia_values,
+        composition_roles,
     ):
         if geom is None or geom.is_empty:
             continue
@@ -998,22 +1112,23 @@ def _extract_roads(
                         n_subtracted += 1
                         continue
                     if isinstance(diff, LineString):
-                        result.append((diff, highway, is_bridge))
+                        _append(diff, highway, is_bridge, composition_role)
                     elif isinstance(diff, MultiLineString):
                         for seg in diff.geoms:
                             if isinstance(seg, LineString) and seg.length >= 10.0:
-                                result.append((seg, highway, is_bridge))
+                                _append(seg, highway, is_bridge, composition_role)
                     elif hasattr(diff, "geoms"):
                         for g in diff.geoms:
                             if isinstance(g, LineString) and g.length >= 10.0:
-                                result.append((g, highway, is_bridge))
+                                _append(g, highway, is_bridge,
+                                        composition_role)
                 except Exception:
                     # Fallback: keep original line
-                    result.append((line, highway, is_bridge))
+                    _append(line, highway, is_bridge, composition_role)
             else:
-                result.append((line, highway, is_bridge))
+                _append(line, highway, is_bridge, composition_role)
 
-    n_bridges = sum(1 for _, _, b in result if b)
+    n_bridges = sum(1 for item in result if item[2])
     print(f"  _extract_roads: {len(result)} lines ({n_bridges} bridges), "
           f"filter skipped {n_skip_filter}, short {n_skip_short}, "
           f"BL subtracted {n_subtracted}")
@@ -1412,6 +1527,7 @@ def preprocess_layers(
     bo_mode_override: Optional[str] = None,
     road_width_multiplier_override: Optional[float] = None,
     printer_profile: Optional[PrinterProfile] = None,
+    amap_salience_guide=None,
 ) -> LayerPolygons:
     """主入口。把 raw OSM gdf 转成 6 类 polygon + roads_lines。
 
@@ -1472,6 +1588,7 @@ def preprocess_layers(
         scale_mm_per_m=scale,
         road_width_multiplier=effective_road_width_multiplier,
         min_colored_strip_mm=effective_printer.min_colored_strip_mm,
+        visual_salience_guide=amap_salience_guide,
     )
     print("[preprocess] road_roles: "
           f"source_lines={road_roles.evidence['source_line_features']}, "
@@ -1522,7 +1639,9 @@ def preprocess_layers(
 
     # ---- Step 6: WL / WO ----
     t6 = time.time()
-    WL_polys, WO_polys, wl_lines_raw = _extract_WL_WO(water_gdf, nozzle_real_m)
+    WL_polys, WO_polys, wl_lines_raw, water_role_evidence = _extract_WL_WO(
+        water_gdf, nozzle_real_m, bbox_local=bbox_local,
+        visual_salience_guide=amap_salience_guide)
     print(f"[preprocess] _extract_WL_WO: {time.time() - t6:.1f}s")
 
     # ---- Step 6b: 水体补全 (高德 + 自适应 buffer) ----
@@ -1574,6 +1693,7 @@ def preprocess_layers(
         [p for p, _ in filtered["BL"]],
         area_km2,
         apply_area_filter=False,
+        include_composition_role=True,
     )
     road_role_evidence = dict(road_roles.evidence)
     road_role_evidence.update({
@@ -1598,6 +1718,7 @@ def preprocess_layers(
         block_base_classes=block_base_classes,
         roads_lines=roads_lines,
         road_roles=road_role_evidence,
+        water_roles=water_role_evidence,
         nozzle_real_m=nozzle_real_m,
         min_area_m2=min_area_m2,
     )

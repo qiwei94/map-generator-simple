@@ -208,9 +208,36 @@ P1 实现进度（2026-08-23）：
 P1 当前测试：
 
 ```bash
-.venv/bin/python -m pytest tests -m 'not slow' -q
-# 413 passed, 2 skipped, 11 deselected
+.venv/bin/python -m pytest -m 'not slow' -q
+# 439 passed, 2 skipped, 11 deselected
 ```
+
+P1 正式 25 km 阶段证据（2026-08-23）：
+
+| 城市 | 节点 | 总耗时 | 3MF 大小 | 道路 `source → topology → visible` | 严格验证 | 视觉结论 |
+|---|---|---:|---:|---:|---|---|
+| 北京 | Windows WSL | 286 s | 91.41 MB | 53,715 → 34,572 → 824 | V1–V12 全通过，0/0 | 几何合格；封闭黑线偏重，环状/放射特征仍不够集中 |
+| 上海 | Intel Mac | 1,874.3 s | 89.21 MB | 51,536 → 39,112 → 1,557 | V1–V12 全通过，0/0 | 黄浦江 S 弯和两岸分区清楚；边缘分割线仍偏黑 |
+| 西湖 | Windows WSL | 122.8 s | 48.80 MB | 44,420 → 21,646 → 917 | V1–V12 全通过，0/0 | 钱塘江连续且西湖可辨；黑色地块边界仍影响高级感 |
+| 芝加哥 | controller / Windows 对照 | 运行中 | — | — | — | 同 bbox、同 profile 对照 Block base 热点优化 |
+
+每个已完成目录同时保存 `design_spec.json`，记录 artifact SHA-256、实际 bbox、
+打印 profile、要素证据与 V1–V12 结果。以上 0/0 只证明当前验证器覆盖的几何约束；
+它不等价于视觉优秀，也不能证明所有语义水层都存在。当前正式水体网格仍以统一材料
+的 0.4 mm 平底水板为主，V8/V9 通过主要证明该水板闭合且有厚度。
+
+这批实测还发现两个独立性能问题：
+
+- 非交互 SSH 的 `PATH` 漏掉 `/usr/local/bin`，使 Intel Mac 在原生 osmium 已安装时
+  仍走 portable pyosmium；现已显式探测标准 Homebrew 路径。该次上海 portable
+  提取仍得到 51,536 条道路，证明回退不是“零道路但无报错”。
+- Block base 网格在同一 cell 上反复对复杂 exclusion 做 `intersects`。现在先 union、
+  再 `shapely.prepare()`，并把 prepared geometry 放在谓词第一操作数。10,000 个
+  合成 block 的定向微基准从 1.0434 s 降至 0.0215 s，布尔结果完全一致；城市级
+  加速幅度以正在运行的芝加哥同输入对照为准，不把微基准倍数外推到整条 pipeline。
+
+默认参数尚未升级：四城 15 km 阵列仍未补齐，且可见道路之外的深色封闭分割线
+尚未完成语义拆分。现阶段结果属于 P1 验收证据，不自动替换网站首页样品或生产默认值。
 
 ### P2：水体层级与墨量预算
 
@@ -218,6 +245,299 @@ P1 当前测试：
 - 线状水体按显式 `width`、等级和打印尺度处理；
 - 实现分层墨量和局部 P95；
 - 海岸/湖岸回归覆盖纽约、芝加哥、东京、上海、西湖。
+
+P2 第一切片进度（2026-08-23，`agent/city-identity-composition`）：
+
+- 删除“所有水体按单个 feature 排序后只留 500 个”的全局截断。线状水体完整
+  保留到结构层；只有异常多的普通 polygon 才受独立安全上限约束，短连接段不会再
+  因面积排名从河网中间消失。
+- 新增 `water_roles.py`：命名河流/运河先按语义 identity 合并成完整走廊，再按
+  跨画幅程度、二维展开和物理墨量选择；同一走廊内小于两个喷嘴实地宽度的端点断口
+  才允许确定性补连。
+- 普通小水面不再因为“勉强达到一个可打印点”就自动进入纯黑层；可见水面要求
+  约 4.5 个喷嘴实地宽度平方的视觉面积。命名本身也不能绕过物理约束：狭长 Polygon
+  还必须在四周内缩半喷嘴后保有至少 5% 的二维内核，避免“面积很大、实际只有一条
+  发丝宽”的河渠被误判为强水面。
+- 道路选择升级为 `print-road-roles-v3`：环状、放射和跨画幅走廊优先；墨量预算后
+  只补回两端都落在已选骨架上的短段。Block base 继续使用更密的 structural 网络，
+  因此减少深灰材料不会同步抹掉街区密度。
+- GLB 预览只消费 `preprocess_layers` 已解析的 WL/WO，不再把被视觉策略淘汰的原始
+  LineString 水网偷偷重新加回；PNG、GLB 与正式 terrain cutter 使用同一选择结果。
+
+北京 25 km 首轮对照（同 bbox、同打印 profile、同参数覆盖）：
+
+| 指标 | P1 旧结果 | 城市身份第一切片 |
+|---|---:|---:|
+| 水体源进入预处理 | 500 / 1546 | 1528 / 1528（裁框后） |
+| 命名水道候选 → 已选走廊/线段 | 103 raw lines | 126 → 11 groups / 13 merged lines |
+| 普通水面 WO（过滤前） | 85 | 52 |
+| 可见道路（最终） | 824 | 671 |
+| GLB 原始水线回灌 | 发生（925 条） | 0；只用 WL/WO |
+
+评审图：
+
+- P1：`output/print_p1_beijing_25km_shellfix/print_p1_beijing_25km_shellfix_topdown.png`
+- 城市身份第一切片：
+  `output/identity_beijing_25km_v2/identity_beijing_25km_v2_topdown.png`
+
+结论限定：北京的纯黑水网和深灰道路已明显减量，预览/正式语义也已对齐；但北京
+环路与中轴是否足够突出仍需上海、芝加哥同策略对照后再判断，当前切片不直接升级
+生产默认值。
+
+P2 水体构图第二、三轮实测（同一北京 25 km bbox）进一步确认，仅限制“最多几条线”
+仍会把宽度未知的护城河、盖板河道等扩成同宽黑线。因此策略继续收敛为：
+
+- 15/25 km 的可见中心线只接受 river / riverbank / canal；stream、drain、ditch
+  留在结构网络中，不再按类别各获得一份前景预算；
+- 有面状水体表达场景时，中心线还必须有不小于一喷嘴实地宽度的显式 `width`
+  证据；没有任何面状水体时，最多允许一条跨画幅主河作为数据质量兜底；
+- `tunnel=culvert`、`covered=yes`、`location=underground` 的水道不进入可见材料，
+  但仍留在未经裁减的结构输入中；
+- 面积过滤之外增加二维内核过滤，Block base 仍使用原始 925 条北京水线和全部水面，
+  视觉层最终使用 18 WL + 15 WO、0 条无宽度证据中心线。
+
+北京对照量化（2048² 评审图）：
+
+| 指标 | P1 基线 | 连续走廊第一轮 | 面形/宽度证据版 |
+|---|---:|---:|---:|
+| 纯黑像素占比 | 1.922% | 1.294% | 0.760% |
+| 深色像素占比（RGB ≤ 80） | 6.451% | 4.043% | 2.855% |
+| ≥25 px 黑色连通块 | 366 | 223 | 53 |
+| 可见道路 | 824 | 671 | 671 |
+
+最终评审图：
+`output/identity_beijing_25km_water_v4/identity_beijing_25km_water_v4_topdown.png`；
+对应 draft GLB 为 9.23 MB，后检查全部图层落地。非慢速回归为
+`458 passed, 2 skipped, 11 deselected`。这仍是构图候选，不自动覆盖网站或生产默认值；
+上海与芝加哥必须分别验证宽江和海岸没有被误删。
+
+北京 25 km 正式 3MF 验收使用同一 bbox、同一参数覆盖，并移除 `--draft`：
+
+```bash
+.venv/bin/python generate_city_legacy.py \
+  --bbox 39.7911535,116.2610224,40.0172465,116.5537776 \
+  --pbf pbf_cache/beijing-latest.osm.pbf \
+  --city identity_beijing_25km_formal_v5 --review-png --auto-params \
+  --params-json data/print_profiles/city_identity_25km_classic.json \
+  --no-cache --no-snap
+
+.venv/bin/python tools/validate_3mf.py \
+  output/identity_beijing_25km_formal_v5/\
+full_identity_beijing_25km_formal_v5_0823_2350.3mf --json
+```
+
+- 正式文件 70,320,345 bytes（67.06 MiB），SHA-256
+  `d9bb88f707b4a898fcdc8a5e730e1608df94e96fc1eed13b6de687d0c12a3cf1`；
+- `design_spec.json` 与 3MF 同目录，记录 53,715 → 34,572 → 25,135 → 671
+  的道路 source / topology / structural / visible 证据和完整 water roles；
+- terrain 100,000 faces、buildings 1,590,720、roads 14,688、water 12、
+  vegetation 182,280，所有必需图层非零；
+- 项目验证器 V1–V13 全部通过，`passed=true`、`strict_passed=true`、
+  0 errors、0 warnings；总生成耗时 174.5 秒。该耗时仅代表当前 M1 Mac 的这次
+  实测，不外推到 Linux 云机或其他 Mac。
+
+严格验收仍有一个必须公开的既有限制：legacy 正式 builder 当前把水体导出为
+12 faces 的全幅 E3 平底板，日志明确显示 `18 WL + 15 WO skipped`；V8/V9 验证的是
+底板厚度和侧壁，不证明 WL/WO 在地形顶面实际可见。因此上述 0/0 能证明文件结构、
+材料映射和主要 mesh 约束合格，不能证明正式 3MF 的水面视觉与 draft GLB 完全一致。
+本分支已统一 PNG/GLB 的选择输入并把 WL/WO 证据写进 DesignSpec，但不在没有新的
+地形开孔方案验证前擅自恢复会损伤地形的全局 Manifold 水体布尔；该项必须在默认
+升级前单独解决。
+
+上海与芝加哥阻断场景也已使用同一策略完成 25 km draft 验收：
+
+| 城市 | 水体走廊 | 可见水面（过滤后） | 可见道路 | 纯黑占比 | ≥25 px 黑块 | draft GLB | 视觉结论 |
+|---|---:|---:|---:|---:|---:|---:|---|
+| 上海 | 294 candidates → 1 line | 26 WL + 16 WO | 1,481 | 3.548% → 2.821% | 132 → 65 | 9.53 MB | 黄浦江 S 弯与两岸分区保留，细水系不再主导画面 |
+| 芝加哥 | 74 candidates → 0 lines | 23 WL + 5 WO | 2,053 | 8.809% → 8.649% | 85 → 65 | 30.90 MB | 密歇根湖岸完整；黑色占比主要来自真实大湖，不为追指标削湖 |
+
+上海运行在 Intel Mac，preprocess 163.3 秒、GLB 52.7 秒；911.4 秒总时长还包含
+该节点本次数据/进程阶段，不归因于 1.1 秒的水体角色选择，也不外推到其他设备。
+芝加哥运行在 Windows WSL2，总时长 1,445.0 秒；758,876 个建筑读取 750.0 秒、
+preprocess 555.0 秒，峰值约 19 GiB（25 GiB 配额），因此该节点只适合串行跑一个
+同级 25 km 高密城市。两个节点的 GLB postcheck 均确认全部图层落地。
+
+P2 北京视觉回读修正（2026-08-24）：面形/宽度证据版把所有亚喷嘴水面一起删除时，
+也误删了带 Wikidata/Wikipedia 的筒子河，故宫矩形身份随之消失；道路配额同时降得
+过低，使主干骨架显得过于稀疏。修正后不恢复小河网，也不全局加粗：
+
+- `print-water-roles-v4` 先归一化 `waterway` / `water` 标签，避免空
+  `waterway` 被 pandas NaN 变成无效的 `"nan"` 类型；
+- 仅命名的 `water=moat` 可进入最多 2 个、独立 0.15% 墨量的小型二维闭环预算，
+  因而恢复故宫护城河而不放回普通沟渠；
+- `print-road-roles-v4` 把四级道路预算从合计 3.5% 调到 4.5%，仍低于早期 5.5%
+  方案，并保持同一喷嘴线宽层级，没有以全局加粗掩盖构图问题。
+
+同 bbox 的 `identity_beijing_25km_identity_v6` draft 实测为：道路最终
+671 → 865，深灰道路像素 2.069% → 2.624%（早期偏密版 3.378%），水体
+18 WL + 15 WO + 0 line → 19 WL + 15 WO + 1 个筒子河闭环；GLB 9.49 MB，
+postcheck 全图层落地，总耗时 97.6 秒。结果路径：
+`output/identity_beijing_25km_identity_v6/identity_beijing_25km_identity_v6_topdown.png`。
+非慢速回归为 `461 passed, 2 skipped, 11 deselected`。该次是当前 M1 Mac 的本地
+缓存实测，不外推为其他节点性能结论；正式 3MF 的 legacy 顶面水体限制仍与上文一致。
+
+P2 城市身份结构修正（2026-08-24）：仅增加道路总量仍不能保证“画对城市”。北京
+会丢失分段命名、跨道路等级的二环；芝加哥的环状与网格结构则可能只保住其中一类。
+`print-road-roles-v5` 因此把墨量从排序目标降为物理上限，并增加以下确定性约束：
+
+- 将“东/南/西/北 + 二环”等方向分段归并为同一编号环线，最多保护一个位于画面
+  中心、尺度合理、完整的语义环；普通超大 `Ring Road` 不因名字自动成为主角；
+- 在分道路等级预算后，用 6 × 6 画幅网格补足缺失象限和中心结构，只选择能改善
+  空间覆盖的完整走廊；短连接仅在两端都接入已选网络时恢复；
+- 城市签名验收不再只检查单一最高分特征；源数据中分数相近的环线、放射、网格
+  必须同时在可见层达到保真阈值；稀疏场景保留一条低于全局物理上限的完整走廊，
+  避免道路数量意外归零。
+
+真实 25 km PBF 快速审计（只做预处理与拓扑签名，不生成 mesh）：
+
+| 城市 | source → structural → visible | 必须保留的源特征 | 可见结果 | 结论 |
+|---|---:|---|---|---|
+| 北京 | 53,715 → 25,135 → 1,099 | ring 0.354 / radial 0.383 / grid 0.364 | 0.437 / 0.332 / 0.322 | 三项通过；完整保护二环 197 段 |
+| 上海 | 52,308 → 25,814 → 1,414 | ring 0.373 / radial 0.367 | 0.409 / 0.319 | 两项通过；内环 107 段完整 |
+| 芝加哥 | 247,385 → 32,489 → 3,240 | ring 0.429 / grid 0.432 | 0.432 / 0.428 | 两项通过；不虚构语义环 |
+
+北京完整 draft 回读为
+`output/identity_beijing_25km_identity_v9/identity_beijing_25km_identity_v9_topdown.png`：
+故宫护城河矩形和中心二环均可识别，深色像素占比 4.173%，与 v8 的 4.175% 基本
+一致，说明提升来自结构选择而不是整体增墨；最终道路 1,075，GLB 9.75 MB，postcheck
+全部图层落地，总耗时 93.1 秒。当前仍有外围跨画幅主干偏粗、边缘截断生硬的问题，
+因此它是“结构正确”的开发候选，不是最终审美成品，不自动部署网站或升级生产默认值。
+快速审计入口为 `tools/diagnose_road_identity.py`，可把选择证据输出为 JSON。
+
+P2 区域特性诊断实验（2026-08-24）：固定全局墨量无法同时适配道路密集和道路稀疏
+城市，因此先新增只读分析层 `aesthetic/scene_character.py`，但暂不让它控制生成。
+分析器将投影后的 25 km 画幅划为 8 × 8 网格，分别记录：
+
+- 合并分段无关的结构道路长度密度、主干密度、共享节点密度和方向集中度；
+- 建筑覆盖率、建筑数量、语义/大体量地标证据；
+- 水面覆盖率、岸线长度和线状水道密度；
+- 以本画幅分位数推导的 dense core / grid / arterial / waterfront / sparse；
+- 被高城市信号邻格包围、但自身道路建筑均很低的 `possible_data_gap`。
+
+地标不能由“存在一个标签”直接认定。大学、车站和宫殿在 OSM 中常被拆成数百栋
+building parts，因此当前只把聚合证据最强的 5% 网格（8 × 8 时最多 4 格）标为
+`landmark_focus` 候选。`osm_internal_consistency=high` 也只表示道路、建筑和水体在
+OSM 内部没有明显局部空洞，不声称数据与现实完整一致。
+
+真实 PBF / 既有可信缓存的 25 km 结果：
+
+| 城市 | 道路 / 建筑 / 水体 | 道路密度 P50 | 建筑覆盖 P50 | 水面 | grid 格 | dense 格 | 疑似空洞 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 北京 | 53,715 / 60,326 / 1,528 | 10.59 km/km² | 9.94% | 1.97% | 45.31% | 21.88% | 1 |
+| 上海 | 52,308 / 74,953 / 2,521 | 9.14 km/km² | 8.28% | 4.59% | 1.56% | 20.31% | 0 |
+| 芝加哥 | 247,069 / 1,410,399 / 2,331 | 12.60 km/km² | 21.78% | 19.48% | 43.75% | 15.62% | 0 |
+
+诊断图分别位于 `output/scene_character_beijing_25km/`、
+`output/scene_character_shanghai_25km/` 和 `output/scene_character_chicago_25km/`。
+结果能够区分北京规则高密结构、上海黄浦江贯穿的滨水带，以及芝加哥高密网格与
+东侧大湖；但北京东北角的疑似空洞和四个地标焦点仍必须通过外部地图或人工回读，
+不能自动解释为数据缺失或真实地标。CLI 为 `tools/diagnose_scene_character.py`，
+会输出完整每格 JSON 和四面板 PNG；诊断过程显式禁用无关的 Overture 高度下载。
+非慢速测试为 `469 passed, 2 skipped, 11 deselected`。本实验没有修改墨量、道路选择、
+mesh、Z、布尔、网站或生产默认值。
+
+P2 高德水体交叉核验（2026-08-24）：项目此前已经有两条高德链路，但彼此独立：
+网页端的 `AMAP_KEY` 只用于国内 POI 搜索，生成端则从无需 key 的无标注高德瓦片
+分割蓝色水体。后者现在通过 `--amap-crosscheck` 接入区域特性诊断，仍严格保持
+`evidence_only`：不会把高德栅格直接写进水体、mesh、Z 或布尔运算。
+
+核验先把高德瓦片从 GCJ-02 转为 WGS84，再投影到与 OSM 相同的 UTM 坐标系；画幅
+边缘内缩 5%，OSM 线状水道按 30 m 半宽表达，两个来源各容忍 30 m 对齐误差。
+JSON 保存双方水面面积、互相覆盖率、差异面积、紧凑差异与线状/噪声差异的全部
+记录；四面板图只标出面积最大的 8 个紧凑候选和 6 个线状候选，避免把原始差异
+数量画成不可读的“报警墙”。紧凑候选也只是人工复核目标，不等于 OSM 确实漏水。
+
+真实 25 km 交叉核验结果：
+
+| 城市 | 高德瓦片 / 水面多边形 | 高德水面被 OSM 覆盖 | OSM 水面被高德覆盖 | 高德独有紧凑 / 线状候选 | 高德阶段耗时 |
+|---|---:|---:|---:|---:|---:|
+| 北京 | 196 / 274 | 36.903% | 43.574% | 48 / 12 | 101.6 秒 |
+| 上海 | 169 / 358 | 74.342% | 54.710% | 57 / 37 | 113.2 秒 |
+
+上海的黄浦江主结构在两源间有较高重合；北京只有 36.9% 的高德水面落入 OSM
+模糊覆盖，说明该区域必须人工区分真实漏绘、两源口径差异与底图颜色分割误差，
+不能自动补强。反向覆盖率更低还受到 OSM 线状水道 30 m 缓冲和两源水体分类口径
+不同的影响。首次高德下载仍为串行瓶颈；北京/上海分别下载约 102/113 秒，缓存命中
+后读取分别为 0.083/0.175 秒，不会重复请求。诊断图和完整 JSON 位于
+`output/scene_character_beijing_25km/` 与
+`output/scene_character_shanghai_25km/`。
+
+当前高德没有接入可合法、稳定使用的道路或建筑矢量接口，因此本项只声称完成
+“水体交叉核验”，不声称道路、建筑或城市审美已经由第二数据源验证。POI 搜索也
+没有在本机配置 key，后续若用于地标候选，仍需单独处理配额、授权、缓存与坐标审计。
+运行示例：
+
+```bash
+.venv/bin/python tools/diagnose_scene_character.py \
+  --bbox 31.1173535,121.3423817,31.3434465,121.6050183 \
+  --pbf pbf_cache/shanghai-latest.osm.pbf \
+  --output-dir output/scene_character_shanghai_25km \
+  --tag shanghai_25km --amap-crosscheck
+```
+
+对应单元测试覆盖紧凑漏水候选、线状水道模糊匹配和第二来源不可用三条路径；完整
+非慢速回归为 `473 passed, 2 skipped, 11 deselected`。
+
+P2 高德视觉显著性 mask（2026-08-24）：几何差分只能回答“两个来源哪里不同”，
+不能回答用户真正关心的“高德上哪些连续道路和水体最醒目”。因此新增
+`aesthetic/amap_salience.py`，从 style-7 无标注瓦片稳定色板提取三档道路和水体
+mask，并把它作为只读构图证据接入现有 OSM 选择器：
+
+- WGS84 四角先转 GCJ-02，再按 WebMercator 精确裁切，不接受约 500 m 偏移；
+- 道路只在现有硬墨量预算内重排完整 OSM group，不增加配额、不放粗、不拼接碎片；
+- 水体先保留 OSM 河宽、riverbank 等原生证据，高德只确认既有 OSM 线或填剩余名额；
+- 不把高德像素矢量化后写进 mesh，不让其控制 Z、全局高度或布尔运算；
+- 中国大陆以外明确 `not_applicable`，自动使用 OSM-only。
+
+最初实验曾给高德单独增加 0.8% 道路墨量，虽提高北京高速召回，却压低次干路召回，
+已判定失败并删除。当前“同预算重排”选择级实测如下（召回含 5 px 对齐容差）：
+
+| 城市 / 策略 | 主路 | 次干路 | 背景路 | 水体 |
+|---|---:|---:|---:|---:|
+| 北京 OSM-only | 48.88% | 42.49% | 25.03% | 24.33% |
+| 北京 AMap guide | 50.55% | 45.09% | 28.18% | 24.33% |
+| 上海 OSM-only | 15.01% | 35.32% | 25.05% | 89.58% |
+| 上海 AMap guide | 15.74% | 38.33% | 18.77% | 90.00% |
+
+上海说明“更像标准地图”和“保留更多背景密度”不是同一目标：主次结构与水体提升，
+背景路召回下降 6.28 个百分点。因此该能力通过
+`generate_city_legacy.py --amap-salience {off,cache,network}` 显式启用，默认 `off`，
+尚不升级 Web 默认值。`cache` 模式不联网；`network` 仅在参考缓存缺失时下载。
+选择级复现实验入口为 `tools/diagnose_amap_guided_selection.py`，图与 JSON 位于
+`output/amap_guided_beijing_25km_native_first/` 和
+`output/amap_guided_shanghai_25km_native_first/`。诊断不构建 mesh，因此不能代替
+3MF 水密、材料、喷嘴与验证器验收。对应完整非慢速回归为
+`484 passed, 2 skipped, 11 deselected`。
+
+P2 构图角色落地（2026-08-24）：同预算重排能够改善“选哪条 OSM 路”，但仍把所有
+已选道路交给一个扁平渲染层，无法表达主轴、辅助走廊与短连接段的差异。当前新增
+确定性的 `CompositionSpec` 与角色消费链：
+
+- 道路等级预算/保护环阶段得到 `primary`，空间补足阶段得到 `secondary`，仅修断口
+  的短段为 `connector`；未进前景的 structural 网络继续切 Block base；
+- 大水面优先成为水体主元素；无大水面时才从完整 OSM 走廊中确定一个主水体，命名
+  护城河保留独立身份例外；
+- `aesthetic/review_render.py` 与正式 `roads.py` 使用同一个角色化宽度解析函数；次级
+  线只能在源宽有余量时变细，绝不突破打印 profile 的最小色条；
+- `generate_city_legacy.py` 在评审-only 和正式流程都保存
+  `composition_spec.json`。它只记录 identity、角色、墨量与来源契约，不保存几何，
+  不控制 mesh、Z 或布尔运算。
+
+完整契约见 `doc/composition_spec.md`。北京、上海真实 25 km 图与角色 JSON 已在
+本切片单元/回归通过后重跑；当前仍不升级生产默认值。
+
+该验收已完成：北京 25 km 的 29 个可见语义候选中有 17 个满足跨画幅/连续性门槛，
+自适应选出 5 个主 identity（二、三、四、五环与首都机场高速）；上海 27 个候选中
+14 个满足门槛，选出 4 个（内环、延安西路、中山北路、华夏西路）。黄浦江 3.33%
+可见面占比被明确归为主水体，已有完整河廊只作次级支持。北京/上海评审图分别在
+`output/composition_beijing_25km_v3/` 与
+`output/composition_shanghai_25km_v1/`。
+
+北京中心 5 km 使用真实 SRTM 与真实 PBF 生成 10.45 MiB 3MF，正式道路 1,068 条、
+31,756 faces；V1–V13 全通过，验证器 `0 errors / 0 warnings`。一份全平 DEM 试跑曾
+因实际地形 Z range 只有 2 mm 得到 V3 警告，未修改验证器掩盖，改用真实 DEM 后
+重新生成通过。详细 artifact、命令边界与平坦 DEM 限制见
+`doc/composition_spec.md`。
 
 ### P3：视觉中心与语义 Z
 

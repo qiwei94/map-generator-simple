@@ -36,7 +36,7 @@ from _TEXTURE_STYLE_OF_DEEPSEEK.print_profile import (
     DEFAULT_PRINTER_PROFILE,
     PrinterProfile,
 )
-from _TEXTURE_STYLE_OF_DEEPSEEK.road_roles import resolve_printable_road_width_m
+from _TEXTURE_STYLE_OF_DEEPSEEK.road_roles import resolve_composed_road_width_m
 
 from _TEXTURE_STYLE_OF_DEEPSEEK.config import (
     ROAD_THICKNESS_MM,
@@ -215,7 +215,7 @@ def build_deepseek_roads(gdf: gpd.GeoDataFrame,
 # ---------------------------------------------------------------------------
 
 def build_deepseek_roads_v3(
-    roads_lines: List[Tuple[LineString, str, bool]],
+    roads_lines: List[Tuple],
     terrain_mesh: trimesh.Trimesh,
     scale: float,
     *,
@@ -225,7 +225,8 @@ def build_deepseek_roads_v3(
     """V3 roads builder — 接收 preprocess 已过滤/分类的 road lines。
 
     Args:
-        roads_lines: [(line, highway_type, is_bridge)]
+        roads_lines: [(line, highway_type, is_bridge, composition_role?)].
+            Old 3-tuples remain supported.
         terrain_mesh: 地形网格（用于 Z 采样）
         scale: mm/m
 
@@ -254,12 +255,15 @@ def build_deepseek_roads_v3(
     n_skip_short = 0
     n_skip_err = 0
 
-    for line, highway, is_bridge in roads_lines:
+    for item in roads_lines:
+        line, highway, is_bridge = item[0], item[1], item[2]
+        composition_role = item[3] if len(item) > 3 else "foreground"
         if line.length < ROAD_MIN_LINE_LENGTH_M:
             n_skip_short += 1
             continue
-        width = resolve_printable_road_width_m(
+        width = resolve_composed_road_width_m(
             highway,
+            composition_role=composition_role,
             scale_mm_per_m=scale,
             road_width_multiplier=effective_multiplier,
             min_colored_strip_mm=printer_profile.min_colored_strip_mm,

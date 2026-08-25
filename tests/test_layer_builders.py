@@ -337,6 +337,22 @@ class TestRoadsV3:
             assert isinstance(result, trimesh.Trimesh)
             assert result.is_watertight
 
+    def test_composition_role_tuple_is_supported(self):
+        """预处理输出的第 4 项角色可直接进入正式 mesh builder。"""
+        from _TEXTURE_STYLE_OF_DEEPSEEK.roads import build_deepseek_roads_v3
+
+        terrain = _make_flat_terrain_mesh()
+        roads = [
+            (LineString([(100, 100), (500, 100)]),
+             "primary", False, "primary"),
+            (LineString([(100, 300), (500, 300)]),
+             "secondary", False, "secondary"),
+        ]
+        result = build_deepseek_roads_v3(roads, terrain, 2000.0)
+        if result is not None:
+            assert isinstance(result, trimesh.Trimesh)
+            assert result.is_watertight
+
     def test_bridge_road_detection(self):
         """桥道路被正确分类为 bridge。"""
         from _TEXTURE_STYLE_OF_DEEPSEEK.roads import build_deepseek_roads_v3

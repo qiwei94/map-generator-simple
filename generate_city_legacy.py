@@ -48,7 +48,12 @@ from _TEXTURE_STYLE_OF_DEEPSEEK.print_profile import (
     PrintScale,
     build_printability_report,
 )
+from _TEXTURE_STYLE_OF_DEEPSEEK.water_roles import retain_continuous_water_source
 from _TEXTURE_STYLE_OF_DEEPSEEK.config import compute_scale, WATERWAY_WIDTHS, TERRAIN_GRID, get_area_class, BUILDING_V2_HOTSPOT_RELAX
+from aesthetic.composition_spec import (
+    build_composition_spec,
+    write_composition_spec,
+)
 
 # ---------------------------------------------------------------------------
 # 城市预设
@@ -72,7 +77,7 @@ PRESETS = {
 # CLI 参数
 # ---------------------------------------------------------------------------
 
-def parse_args():
+def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description="统一城市 3MF 模型生成 (osmium CLI pipeline)"
     )
@@ -145,6 +150,10 @@ def parse_args():
         help='同时渲染画廊级俯视图（无文字、超采样，风格画廊同源）'
     )
     parser.add_argument(
+        '--review-only', action='store_true', default=False,
+        help='生成 --review-png 后立即退出；需与 --draft 同用，避免构建 3MF/GLB'
+    )
+    parser.add_argument(
         '--draft', action='store_true', default=False,
         help='Draft 模式：跳过 brick/boolean，快速导出 GLB 预览后退出'
     )
@@ -177,8 +186,17 @@ def parse_args():
         '--no-cache', action='store_true', default=False,
         help='禁用 preprocess 阶段缓存（强制重算）'
     )
+    parser.add_argument(
+        '--amap-salience', choices=('off', 'cache', 'network'),
+        default='off',
+        help=(
+            '高德道路/水体视觉显著性约束：off=关闭（默认），'
+            'cache=仅使用已有缓存，network=缓存缺失时下载；'
+            '仅在中国大陆适用，不替换 OSM 几何'
+        ),
+    )
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     # 合并 preset + 显式参数
     if args.preset:
@@ -228,6 +246,31 @@ def _load_printer_profile(path):
         return PrinterProfile(**payload)
     except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
         raise SystemExit(f"invalid --printer-profile-json: {exc}")
+
+
+def _load_amap_salience_guide(mode, bbox_wgs84, bbox_local):
+    """Resolve optional read-only AMap evidence without making it mandatory."""
+    if mode == "off":
+        return None, {
+            "status": "disabled",
+            "reason": "--amap-salience=off",
+        }
+    from aesthetic.amap_salience import build_amap_salience_guide
+    return build_amap_salience_guide(
+        bbox_wgs84,
+        bbox_local,
+        allow_network=(mode == "network"),
+    )
+
+
+def _amap_salience_cache_fingerprint(mode, evidence):
+    """Keep baseline/guided preprocess objects in distinct cache entries."""
+    return {
+        "mode": str(mode),
+        "status": str(evidence.get("status", "unknown")),
+        "palette_version": evidence.get("palette_version"),
+        "bbox_wgs84": evidence.get("bbox_wgs84"),
+    }
 
 
 # =====================================================================
@@ -327,7 +370,9 @@ def _transform_layers_to_exact(layers, dx, dy, clip_box):
         bb_cls = list(layers.block_base_classes)
 
     roads = []
-    for line, tier, flag in layers.roads_lines:
+    for item in layers.roads_lines:
+        line, tier, flag = item[0], item[1], item[2]
+        role = item[3] if len(item) > 3 else None
         moved = translate(line, xoff=dx, yoff=dy)
         try:
             seg = moved.intersection(clip)
@@ -339,9 +384,12 @@ def _transform_layers_to_exact(layers, dx, dy, clip_box):
         if seg.is_empty:
             continue
         if seg.geom_type == "LineString":
-            roads.append((seg, tier, flag))
+            roads.append((seg, tier, flag, role) if role else
+                         (seg, tier, flag))
         elif seg.geom_type == "MultiLineString":
-            roads.extend((g, tier, flag) for g in seg.geoms if not g.is_empty)
+            roads.extend(((g, tier, flag, role) if role else
+                          (g, tier, flag))
+                         for g in seg.geoms if not g.is_empty)
 
     layers.BL = BL
     layers.BL_categories = BL_cat
@@ -364,6 +412,8 @@ def main():
         raise SystemExit("--base-thickness-mm must be between 0.4 and 3.0")
     if cli_args.preview_fast and not cli_args.draft:
         raise SystemExit("--preview-fast requires --draft")
+    if cli_args.review_only and not (cli_args.draft and cli_args.review_png):
+        raise SystemExit("--review-only requires --draft --review-png")
 
     LAT1, LON1, LAT2, LON2 = cli_args.bbox_tuple
     CITY_NAME = cli_args.city
@@ -562,10 +612,12 @@ def main():
 
         water_gdf['est_area'] = water_gdf.apply(lambda r: estimate_water_area(r.geometry, r), axis=1)
 
-        MAX_WATER = 500
-        if len(water_gdf) > MAX_WATER:
-            water_gdf = water_gdf.nlargest(MAX_WATER, 'est_area')
-            print(f"  Filtered to top {MAX_WATER} features")
+        water_gdf, water_source_roles = retain_continuous_water_source(water_gdf)
+        print("  Water source roles: "
+              f"{water_source_roles['retained_features']}/"
+              f"{water_source_roles['source_features']} retained; "
+              f"lines={water_source_roles['retained_line_features']}, "
+              f"polygons={water_source_roles['retained_polygon_features']}")
 
         if 'name' in water_gdf.columns:
             named = water_gdf['name'].dropna().unique()
@@ -865,6 +917,14 @@ def main():
         _hotspot_relax = (auto_resolved.building_v2_hotspot_relax
                           if auto_resolved is not None
                           else BUILDING_V2_HOTSPOT_RELAX)
+        _amap_guide, _amap_evidence = _load_amap_salience_guide(
+            cli_args.amap_salience,
+            (fs, fw, fn, fe),
+            _snap_bbox_local,
+        )
+        print("[preprocess] amap_salience: "
+              f"{_amap_evidence.get('status')} "
+              f"({_amap_evidence.get('reason', 'reference ready')})")
 
         _auto_fp = "none" if auto_resolved is None else json.dumps({
             "road_tier": auto_resolved.building_v2_road_tier,
@@ -902,6 +962,7 @@ def main():
                 utm_crs=utm_crs,
                 origin=_snap_origin,
                 printer_profile=printer_profile,
+                amap_salience_guide=_amap_guide,
                 **_preprocess_overrides,
             )
 
@@ -916,6 +977,8 @@ def main():
                 "block_base": ENABLE_BLOCK_BASE,
                 "merge": MERGE_BLOCK_LAYERS,
                 "printer_profile": printer_profile.to_dict(),
+                "amap_salience": _amap_salience_cache_fingerprint(
+                    cli_args.amap_salience, _amap_evidence),
             },
             compute_fn=_compute_layers_snap,
             label="preprocess(snap)",
@@ -926,6 +989,14 @@ def main():
         _dy = _snap_origin[1] - origin[1]
         layers = _transform_layers_to_exact(layers, _dx, _dy, bbox_local)
     else:
+        _amap_guide, _amap_evidence = _load_amap_salience_guide(
+            cli_args.amap_salience,
+            (south, west, north, east),
+            bbox_local,
+        )
+        print("[preprocess] amap_salience: "
+              f"{_amap_evidence.get('status')} "
+              f"({_amap_evidence.get('reason', 'reference ready')})")
         layers = preprocess_layers(
             buildings_gdf=buildings_gdf,
             roads_gdf=roads_gdf,
@@ -945,10 +1016,24 @@ def main():
             utm_crs=utm_crs,
             origin=origin,
             printer_profile=printer_profile,
+            amap_salience_guide=_amap_guide,
             **_preprocess_overrides,
         )
     print(f"  {layers.summary()}")
     print(f"  Time: {time.time() - t45:.1f}s")
+
+    # CompositionSpec is written for both review-only and formal generation.
+    # It is an audit sidecar and never feeds geometry, Z, or booleans back into
+    # the pipeline.
+    _composition_spec = build_composition_spec(
+        city=CITY_NAME,
+        bbox_wgs84=(south, west, north, east),
+        layers=layers,
+        amap_evidence=_amap_evidence,
+    )
+    _composition_spec_path = write_composition_spec(
+        OUTPUT_DIR, _composition_spec)
+    print(f"  CompositionSpec: {_composition_spec_path}")
 
     # =====================================================================
     # Stage 4.6: Render PNG preview (optional, --png flag)
@@ -993,6 +1078,12 @@ def main():
             print(f"  Time: {time.time() - t465:.1f}s")
         except Exception as e:
             print(f"  WARNING: gallery preview failed: {type(e).__name__}: {e}")
+
+    if getattr(cli_args, "review_only", False):
+        total_time = time.time() - t_start
+        print(f"  Review-only complete in {total_time:.1f}s; "
+              "GLB and 3MF skipped")
+        return
 
     # =====================================================================
     # Stage 4.8: Draft GLB 快速预览（--draft：导出后提前退出）
@@ -1306,7 +1397,13 @@ def main():
         "landuse": len(landuse_gdf) if landuse_gdf is not None else 0,
     }
     _resolved_params = auto_resolved.to_dict() if auto_resolved is not None else {}
-    _decisions = (auto_resolved.reasons if auto_resolved is not None else {})
+    _decisions = dict(
+        auto_resolved.reasons if auto_resolved is not None else {})
+    _decisions["composition_spec"] = {
+        "filename": os.path.basename(_composition_spec_path),
+        "schema_version": _composition_spec["schema_version"],
+        "policy_version": _composition_spec["policy_version"],
+    }
     _profile = profile.to_dict() if profile is not None else {}
     _block_base_enabled = not cli_args.no_block_base
     _design_spec = build_design_spec(
@@ -1348,6 +1445,7 @@ def main():
             },
         ),
         road_roles=getattr(layers, "road_roles", {}),
+        water_roles=getattr(layers, "water_roles", {}),
     )
     _design_spec_path = write_design_spec(OUTPUT_DIR, _design_spec)
     print(f"  DesignSpec: {_design_spec_path}")

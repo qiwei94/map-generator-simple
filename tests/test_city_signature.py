@@ -90,6 +90,40 @@ def test_visible_network_must_preserve_dominant_source_trait():
     assert "lost" in lost["reason"]
 
 
+def test_co_dominant_source_traits_must_both_survive():
+    center = 12_500.0
+    def ring(radius):
+        diagonal = radius * 0.707
+        return LineString([
+            (center + radius, center),
+            (center + diagonal, center + diagonal),
+            (center, center + radius),
+            (center - diagonal, center + diagonal),
+            (center - radius, center),
+            (center - diagonal, center - diagonal),
+            (center, center - radius),
+            (center + diagonal, center - diagonal),
+            (center + radius, center),
+        ])
+    radials = [
+        LineString([(center + dx * 800, center + dy * 800),
+                    (center + dx * 9000, center + dy * 9000)])
+        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1),
+                       (0.707, 0.707), (-0.707, 0.707),
+                       (0.707, -0.707), (-0.707, -0.707))
+    ]
+    # Two ring alignments plus repeated radial carriageways yield two nearly
+    # equal real-valued topology scores; this is intentionally not a mock.
+    source = _roads([ring(6000), ring(5500), *radials, *radials[:6]])
+
+    result = compare_visible_road_signature(source, _roads([ring(6000)]), FRAME)
+
+    assert set(result["required_traits"]) == {"ring", "radial"}
+    assert result["trait_results"]["ring"]["passed"] is True
+    assert result["trait_results"]["radial"]["passed"] is False
+    assert result["passed"] is False
+
+
 def test_ambiguous_source_signature_is_non_blocking():
     road = LineString([(1000, 1000), (24_000, 1000)])
 

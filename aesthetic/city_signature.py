@@ -228,18 +228,43 @@ def compare_visible_road_signature(source_roads, visible_roads,
     visible_strength = visible_strengths[dominant_trait]
 
     source_is_distinctive = source_strength >= 0.35
-    required_visible_strength = max(0.22, source_strength * 0.60)
+    required_traits = []
+    if source_is_distinctive:
+        # A city can genuinely be ring+radial (Beijing) or grid+ring
+        # (Chicago).  Treat strengths within five points of the leader as one
+        # composition contract; preserving only one can still draw the city
+        # incorrectly while the old single-score check reports success.
+        required_traits = [
+            trait for trait, strength in source_strengths.items()
+            if strength >= 0.35 and source_strength - strength <= 0.05
+        ]
+    trait_results = {}
+    for trait in required_traits:
+        required = max(0.22, source_strengths[trait] * 0.60)
+        retained = visible_strengths[trait] >= required
+        trait_results[trait] = {
+            "source_strength": round(source_strengths[trait], 4),
+            "visible_strength": round(visible_strengths[trait], 4),
+            "required_visible_strength": round(required, 4),
+            "passed": bool(retained),
+        }
     passed = (not source_is_distinctive
-              or visible_strength >= required_visible_strength)
+              or all(result["passed"] for result in trait_results.values()))
+    required_visible_strength = max(0.22, source_strength * 0.60)
     if not source_is_distinctive:
         reason = "source frame has no dominant road signature"
     elif passed:
-        reason = f"visible network preserves the source {dominant_trait} trait"
+        reason = ("visible network preserves source traits: "
+                  + ", ".join(required_traits))
     else:
-        reason = f"visible network lost the source {dominant_trait} trait"
+        lost = [trait for trait, result in trait_results.items()
+                if not result["passed"]]
+        reason = "visible network lost source traits: " + ", ".join(lost)
     return {
         "passed": bool(passed),
         "dominant_trait": dominant_trait,
+        "required_traits": required_traits,
+        "trait_results": trait_results,
         "source_is_distinctive": bool(source_is_distinctive),
         "source_strength": round(source_strength, 4),
         "visible_strength": round(visible_strength, 4),

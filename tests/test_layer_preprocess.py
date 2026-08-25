@@ -229,7 +229,10 @@ def test_preprocess_records_separate_road_roles_and_printable_seam_width():
 
     layers = preprocess_layers(
         empty, roads, empty, empty,
-        bbox_local=(0, 0, 1000, 1000),
+        # Keep the local frame consistent with the 15 km scale and declared
+        # 225 km² area; a 1 km frame makes the synthetic 1 km road exceed the
+        # global ink ceiling for reasons unrelated to this integration test.
+        bbox_local=(0, 0, 15000, 15000),
         scale=scale,
         area_km2=225,
     )
