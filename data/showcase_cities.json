@@ -147,6 +147,7 @@
       "pbf": "shanghai-latest.osm.pbf",
       "prototype": "skyline",
       "hero_style": "block_fill",
+      "review_release_25km": "shanghai-v13-fixed2",
       "featured": true
     },
     {
