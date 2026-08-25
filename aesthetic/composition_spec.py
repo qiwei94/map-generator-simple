@@ -43,6 +43,8 @@ def _safe_reference_evidence(evidence: Mapping | None) -> dict:
     allowed = (
         "status", "reason", "palette_version", "template_policy_version",
         "bbox_wgs84", "image_size", "coverage", "source", "mask_evidence",
+        "preprocess_frame", "snap_cache_fallback", "snap_cache_reason",
+        "exact_cache_fallback",
     )
     result = {key: _json_value(source[key])
               for key in allowed if key in source}

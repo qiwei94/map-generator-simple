@@ -28,7 +28,7 @@
       "hero_style": "dense_detail",
       "review_style_25km": "dense_detail",
       "review_label_25km": "CITY STRUCTURE",
-      "review_release_25km": "domestic-v11",
+      "review_release_25km": "hangzhou-v13",
       "review_kind_25km": "最新 25 × 25 KM 城市骨架样品",
       "featured": true
     },
@@ -43,7 +43,7 @@
       "hero_style": "block_fill",
       "review_style_25km": "block_fill",
       "review_label_25km": "CITY STRUCTURE",
-      "review_release_25km": "domestic-v11",
+      "review_release_25km": "suzhou-v13-guided-water",
       "review_kind_25km": "最新 25 × 25 KM 城市骨架样品",
       "featured": false
     },
@@ -147,6 +147,7 @@
       "pbf": "shanghai-latest.osm.pbf",
       "prototype": "skyline",
       "hero_style": "block_fill",
+      "review_release_25km": "shanghai-v13-fixed2",
       "featured": true
     },
     {
@@ -160,7 +161,7 @@
       "hero_style": "block_fill",
       "review_style_25km": "block_fill",
       "review_label_25km": "CITY STRUCTURE",
-      "review_release_25km": "domestic-v11",
+      "review_release_25km": "guangzhou-v13-guided",
       "review_kind_25km": "最新 25 × 25 KM 城市骨架样品",
       "featured": true
     },
@@ -172,7 +173,8 @@
       "center": [39.9042, 116.4074],
       "pbf": "beijing-latest.osm.pbf",
       "prototype": "skyline",
-      "hero_style": "baseline"
+      "hero_style": "baseline",
+      "review_release_25km": "beijing-v13-exactguide"
     },
     {
       "key": "berlin",

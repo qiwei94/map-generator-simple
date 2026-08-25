@@ -266,6 +266,49 @@ def _load_amap_salience_guide(mode, bbox_wgs84, bbox_local):
     )
 
 
+def _load_snap_amap_salience_guide(
+    mode,
+    snap_bbox_wgs84,
+    snap_bbox_local,
+    exact_bbox_wgs84,
+    exact_bbox_local,
+):
+    """Load snap-frame evidence, then reuse an exact-frame cache if needed.
+
+    Historical diagnostics and gallery batches cached AMap salience against
+    the finished exact frame.  The reusable preprocessing path later started
+    asking only for the larger snapped fetch frame, which made an otherwise
+    valid exact cache look unavailable.  Keep the snapped cache as the first
+    choice, but pair an exact raster with the finished frame's own local
+    bounds when falling back.  The caller also preprocesses in that exact
+    coordinate frame; translating the guide into snap-local coordinates would
+    shift every lookup after the sources are clipped back to exact-local.
+    """
+
+    guide, evidence = _load_amap_salience_guide(
+        mode, snap_bbox_wgs84, snap_bbox_local)
+    if guide is not None or mode != "cache":
+        return guide, {**evidence, "preprocess_frame": "snap"}
+
+    exact_guide, exact_evidence = _load_amap_salience_guide(
+        mode, exact_bbox_wgs84, exact_bbox_local)
+    if exact_guide is None:
+        return None, {
+            **evidence,
+            "preprocess_frame": "snap",
+            "exact_cache_fallback": {
+                "status": exact_evidence.get("status", "unavailable"),
+                "reason": exact_evidence.get("reason"),
+            },
+        }
+    return exact_guide, {
+        **exact_evidence,
+        "preprocess_frame": "exact_within_snap",
+        "snap_cache_fallback": True,
+        "snap_cache_reason": evidence.get("reason"),
+    }
+
+
 def _amap_salience_cache_fingerprint(mode, evidence):
     """Keep baseline/guided preprocess objects in distinct cache entries."""
     return {
@@ -318,6 +361,25 @@ def _split_polygons(geom):
         return [g for g in geom.geoms
                 if g.geom_type == "Polygon" and not g.is_empty]
     return []
+
+
+def _clip_gdf_to_bbox(gdf, bbox):
+    """Clip a projected source GeoDataFrame to the finished composition frame.
+
+    Snapped fetches intentionally contain a margin around the requested map so
+    their raw OSM data can be reused.  Salience ranking, however, is dependent
+    on the final composition frame: candidates outside the finished map must
+    not compete with the roads and waterways the customer will actually see.
+    """
+    if gdf is None or len(gdf) == 0:
+        return gdf
+    from shapely.geometry import box as _box
+
+    clipped = gdf.clip(_box(*bbox))
+    if len(clipped) == 0:
+        return clipped
+    clipped = clipped[clipped.geometry.notna() & ~clipped.geometry.is_empty]
+    return clipped.reset_index(drop=True)
 
 
 def _transform_layers_to_exact(layers, dx, dy, clip_box):
@@ -920,10 +982,12 @@ def main():
         _hotspot_relax = (auto_resolved.building_v2_hotspot_relax
                           if auto_resolved is not None
                           else BUILDING_V2_HOTSPOT_RELAX)
-        _amap_guide, _amap_evidence = _load_amap_salience_guide(
+        _amap_guide, _amap_evidence = _load_snap_amap_salience_guide(
             cli_args.amap_salience,
             (fs, fw, fn, fe),
             _snap_bbox_local,
+            (south, west, north, east),
+            bbox_local,
         )
         print("[preprocess] amap_salience: "
               f"{_amap_evidence.get('status')} "
@@ -947,51 +1011,100 @@ def main():
             f"snap_{fs:.4f}_{fw:.4f}_{fn:.4f}_{fe:.4f}",
             enabled=not cli_args.no_cache)
 
-        def _compute_layers_snap():
-            return preprocess_layers(
-                buildings_gdf=_gdf_to_snap(buildings_gdf),
-                roads_gdf=_gdf_to_snap(roads_gdf),
-                water_gdf=_gdf_to_snap(water_gdf),
-                vegetation_gdf=_gdf_to_snap(vegetation_gdf),
-                bbox_local=_snap_bbox_local,
-                scale=_scale_snap,
-                enable_hotspot=True,
-                hotspot_relax=_hotspot_relax,
-                area_km2=snap_info["area_km2"],
-                landuse_gdf=_gdf_to_snap(landuse_gdf),
-                narrow_threshold=cli_args.narrow_threshold,
-                narrow_penalty=cli_args.narrow_penalty,
-                bbox_wgs84=(fs, fw, fn, fe),
-                utm_crs=utm_crs,
-                origin=_snap_origin,
-                printer_profile=printer_profile,
-                amap_salience_guide=_amap_guide,
-                **_preprocess_overrides,
+        _common_cache_inputs = {
+            "snap_bbox": f"{fs:.4f},{fw:.4f},{fn:.4f},{fe:.4f}",
+            "auto": _auto_fp,
+            "style": _style_fp,
+            "narrow": f"{cli_args.narrow_threshold}/{cli_args.narrow_penalty}",
+            "veg": ENABLE_VEGETATION,
+            "block_base": ENABLE_BLOCK_BASE,
+            "merge": MERGE_BLOCK_LAYERS,
+            "printer_profile": printer_profile.to_dict(),
+            "preprocess_policy": PREPROCESS_POLICY_VERSION,
+            "amap_salience": _amap_salience_cache_fingerprint(
+                cli_args.amap_salience, _amap_evidence),
+        }
+
+        if _amap_evidence.get("preprocess_frame") == "exact_within_snap":
+            # The raw fetch margin remains reusable, but an exact-frame AMap
+            # guide must rank exact-frame candidates.  Ranking the full snap
+            # frame changed which complete river group won in Shanghai and
+            # left a visible gap after clipping.  Clip raw data first and run
+            # all frame-dependent topology/salience decisions in the frame
+            # that is actually rendered.
+            print("[preprocess] exact-frame guide: clipping reusable snap "
+                  "sources before composition")
+
+            def _compute_layers_exact_within_snap():
+                return preprocess_layers(
+                    buildings_gdf=_clip_gdf_to_bbox(
+                        buildings_gdf, bbox_local),
+                    roads_gdf=_clip_gdf_to_bbox(roads_gdf, bbox_local),
+                    water_gdf=_clip_gdf_to_bbox(water_gdf, bbox_local),
+                    vegetation_gdf=_clip_gdf_to_bbox(
+                        vegetation_gdf, bbox_local),
+                    bbox_local=bbox_local,
+                    scale=scale,
+                    enable_hotspot=True,
+                    hotspot_relax=_hotspot_relax,
+                    area_km2=area_km2,
+                    landuse_gdf=_clip_gdf_to_bbox(landuse_gdf, bbox_local),
+                    narrow_threshold=cli_args.narrow_threshold,
+                    narrow_penalty=cli_args.narrow_penalty,
+                    bbox_wgs84=(south, west, north, east),
+                    utm_crs=utm_crs,
+                    origin=origin,
+                    printer_profile=printer_profile,
+                    amap_salience_guide=_amap_guide,
+                    **_preprocess_overrides,
+                )
+
+            layers = _snap_cache.get_or_compute(
+                "preprocess_exact_v1",
+                input_keys={
+                    **_common_cache_inputs,
+                    "exact_bbox": (
+                        f"{south:.7f},{west:.7f},{north:.7f},{east:.7f}"),
+                    "composition_frame": "exact_within_snap_v1",
+                },
+                compute_fn=_compute_layers_exact_within_snap,
+                label="preprocess(exact within snap)",
+            )
+        else:
+            def _compute_layers_snap():
+                return preprocess_layers(
+                    buildings_gdf=_gdf_to_snap(buildings_gdf),
+                    roads_gdf=_gdf_to_snap(roads_gdf),
+                    water_gdf=_gdf_to_snap(water_gdf),
+                    vegetation_gdf=_gdf_to_snap(vegetation_gdf),
+                    bbox_local=_snap_bbox_local,
+                    scale=_scale_snap,
+                    enable_hotspot=True,
+                    hotspot_relax=_hotspot_relax,
+                    area_km2=snap_info["area_km2"],
+                    landuse_gdf=_gdf_to_snap(landuse_gdf),
+                    narrow_threshold=cli_args.narrow_threshold,
+                    narrow_penalty=cli_args.narrow_penalty,
+                    bbox_wgs84=(fs, fw, fn, fe),
+                    utm_crs=utm_crs,
+                    origin=_snap_origin,
+                    printer_profile=printer_profile,
+                    amap_salience_guide=_amap_guide,
+                    **_preprocess_overrides,
+                )
+
+            layers = _snap_cache.get_or_compute(
+                "preprocess_v2",
+                input_keys=_common_cache_inputs,
+                compute_fn=_compute_layers_snap,
+                label="preprocess(snap)",
             )
 
-        layers = _snap_cache.get_or_compute(
-            "preprocess_v2",
-            input_keys={
-                "snap_bbox": f"{fs:.4f},{fw:.4f},{fn:.4f},{fe:.4f}",
-                "auto": _auto_fp,
-                "style": _style_fp,
-                "narrow": f"{cli_args.narrow_threshold}/{cli_args.narrow_penalty}",
-                "veg": ENABLE_VEGETATION,
-                "block_base": ENABLE_BLOCK_BASE,
-                "merge": MERGE_BLOCK_LAYERS,
-                "printer_profile": printer_profile.to_dict(),
-                "preprocess_policy": PREPROCESS_POLICY_VERSION,
-                "amap_salience": _amap_salience_cache_fingerprint(
-                    cli_args.amap_salience, _amap_evidence),
-            },
-            compute_fn=_compute_layers_snap,
-            label="preprocess(snap)",
-        )
-
-        # snap 坐标系 → 精确坐标系，并裁剪到用户精确 bbox
-        _dx = _snap_origin[0] - origin[0]
-        _dy = _snap_origin[1] - origin[1]
-        layers = _transform_layers_to_exact(layers, _dx, _dy, bbox_local)
+            # snap 坐标系 → 精确坐标系，并裁剪到用户精确 bbox
+            _dx = _snap_origin[0] - origin[0]
+            _dy = _snap_origin[1] - origin[1]
+            layers = _transform_layers_to_exact(
+                layers, _dx, _dy, bbox_local)
     else:
         _amap_guide, _amap_evidence = _load_amap_salience_guide(
             cli_args.amap_salience,

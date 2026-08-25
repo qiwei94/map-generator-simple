@@ -70,6 +70,9 @@ def test_composition_spec_records_contract_and_identities_not_geometry():
             "palette_version": "amap-mask-v1",
             "template_policy_version": "amap-template-v1",
             "cache_path": "/private/controller/cache/reference.png",
+            "preprocess_frame": "exact_within_snap",
+            "snap_cache_fallback": True,
+            "snap_cache_reason": "snap miss",
             "secret": "must-not-leak",
         },
     )
@@ -85,6 +88,9 @@ def test_composition_spec_records_contract_and_identities_not_geometry():
     assert spec["reference"]["evidence"]["cache_file"] == "reference.png"
     assert spec["reference"]["evidence"]["template_policy_version"] == (
         "amap-template-v1")
+    assert spec["reference"]["evidence"]["preprocess_frame"] == (
+        "exact_within_snap")
+    assert spec["reference"]["evidence"]["snap_cache_fallback"] is True
     assert "spatially matching" in (
         spec["decision_contract"]["salience_reference"])
     assert spec["evidence"]["road_corridor_matching"] == {

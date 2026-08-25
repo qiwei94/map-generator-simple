@@ -17,11 +17,22 @@ Completed foundations on `agent/web-premium-studio`:
 
 Still open:
 
+- [x] Restore bounded OSM mid-frequency road structure behind the AMap-backed
+  primary skeleton.  `print-road-roles-v13.0` selects only complete existing
+  corridors that add a bridge, crosslink, loop or frame axis; it rejects
+  one-ended and near-parallel candidates and keeps additions visually quiet.
+  Cross-city evidence: `doc/mid_frequency_corridors_v13.md`.
 - [ ] Data-quality-aware `block-base-mode auto` policy and cross-region A/B acceptance.
 - [ ] DesignSpec coverage for every 3MF-producing entry and explicit exact-vs-snap measurement scope.
 - [ ] Remaining selective geometry backports: exact terrain interpolation, road footprint clipping,
   bridge separation, all-layer printability gates, and a small real structural golden fixture.
 - [ ] Global PBF/DEM storage rollout; the existing ~80 PBF cache is not global coverage.
+- [ ] Introduce a hybrid spatial-data layer: PostgreSQL/PostGIS for indexed,
+  versioned vector geometry and derived corridor evidence; keep raw PBF, DEM,
+  previews, GLB, PNG, and 3MF in data-disk/object storage. Start with domestic
+  road/water/building layers and persist AMap-to-OSM complete-corridor matches
+  so jobs and users can reuse them. Do not treat the database as a replacement
+  for raw-source archives or as an automatic cartographic-quality solution.
 - [ ] Overseas multi-source evidence fusion is designed but traffic-paused until
   the next billing month. Resume from `doc/global_data_fusion_plan.md`; do not
   start Overture/JRC/Hydro/Microsoft downloads before the user re-enables them.
