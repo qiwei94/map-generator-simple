@@ -47,7 +47,11 @@ The formal CLI now tries the snapped cache first and then the exact cache.  An
 exact raster is always paired with its own exact local bounds; it is never
 stretched over the larger snapped frame.  Raw OSM extraction still reuses the
 snapped fetch cache, but exact-frame sources are clipped before topology,
-salience and water-group ranking.  Frame-dependent composition decisions are
+salience and water-group ranking.  The exact AMap guide is also built in
+exact-local coordinates.  Translating that guide into snap-local coordinates
+while the sources were exact-local caused a second, approximately 2.2 km white
+gap in the northern Huangpu River.  Data, reference mask and candidate ranking
+now share one coordinate frame.  Frame-dependent composition decisions are
 therefore made only from content that can appear in the finished map.  The
 selected frame and fallback are persisted in composition evidence and in the
 preprocess cache fingerprint.
@@ -58,12 +62,19 @@ guide.  It selected an off-frame source group instead of Dianpu River and left
 a long white gap in the Huangpu River after final clipping.  With exact-frame
 composition restored, the rendered water-surface ratio recovered from
 `0.020047` to `0.033498`; the independent exact-frame control was `0.033345`.
-The Huangpu River is continuous in the fixed formal-path output:
+A 100 m centerline sampling diagnostic reports 348/351 covered samples for
+both the fixed formal path and the independent exact-frame control.  The three
+uncovered samples are only at the two frame-clipped endpoints.  The rejected
+intermediate fix covered 326/351 samples and missed a continuous 2.2 km
+northern section.  The Huangpu River is continuous in the final formal-path
+output:
 
 - failing snap composition:
   `output/domestic_shanghai_25km_v13/domestic_shanghai_25km_v13_topdown.png`
-- fixed formal snap-fetch / exact-composition path:
+- rejected coordinate-mismatched intermediate output:
   `output/domestic_shanghai_25km_v13_fixed/domestic_shanghai_25km_v13_fixed_topdown.png`
+- fixed formal snap-fetch / exact-composition path:
+  `output/domestic_shanghai_25km_v13_fixed2/domestic_shanghai_25km_v13_fixed2_topdown.png`
 - independent exact-frame control:
   `output/domestic_shanghai_25km_v13_exact/domestic_shanghai_25km_v13_exact_topdown.png`
 

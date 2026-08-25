@@ -279,7 +279,10 @@ def _load_snap_amap_salience_guide(
     the finished exact frame.  The reusable preprocessing path later started
     asking only for the larger snapped fetch frame, which made an otherwise
     valid exact cache look unavailable.  Keep the snapped cache as the first
-    choice, but pair an exact raster with its exact bounds when falling back.
+    choice, but pair an exact raster with the finished frame's own local
+    bounds when falling back.  The caller also preprocesses in that exact
+    coordinate frame; translating the guide into snap-local coordinates would
+    shift every lookup after the sources are clipped back to exact-local.
     """
 
     guide, evidence = _load_amap_salience_guide(
@@ -979,16 +982,12 @@ def main():
         _hotspot_relax = (auto_resolved.building_v2_hotspot_relax
                           if auto_resolved is not None
                           else BUILDING_V2_HOTSPOT_RELAX)
-        _exact_bbox_local_in_snap = tuple(
-            value + offset
-            for value, offset in zip(
-                bbox_local, (_sxoff, _syoff, _sxoff, _syoff)))
         _amap_guide, _amap_evidence = _load_snap_amap_salience_guide(
             cli_args.amap_salience,
             (fs, fw, fn, fe),
             _snap_bbox_local,
             (south, west, north, east),
-            _exact_bbox_local_in_snap,
+            bbox_local,
         )
         print("[preprocess] amap_salience: "
               f"{_amap_evidence.get('status')} "

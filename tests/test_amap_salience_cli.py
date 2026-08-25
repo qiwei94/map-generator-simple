@@ -57,14 +57,14 @@ def test_snap_salience_reuses_exact_cache_with_paired_bounds(monkeypatch):
         (39.75, 116.25, 40.05, 116.60),
         (0, 0, 30000, 30000),
         (39.79, 116.26, 40.02, 116.55),
-        (1000, 1200, 26000, 26200),
+        (0, 0, 25000, 25000),
     )
 
     assert guide is exact_guide
     assert calls[1] == (
         "cache",
         (39.79, 116.26, 40.02, 116.55),
-        (1000, 1200, 26000, 26200),
+        (0, 0, 25000, 25000),
     )
     assert evidence["preprocess_frame"] == "exact_within_snap"
     assert evidence["snap_cache_fallback"] is True
