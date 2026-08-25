@@ -21,13 +21,13 @@ from typing import Any
 
 import geopandas as gpd
 from shapely.geometry import Point
-from shapely.ops import unary_union
+from shapely.ops import linemerge, unary_union
 
 from .buildings import ROAD_TIERS
 from .config import ROAD_DEFAULT_WIDTH_M, ROAD_FILTER, ROAD_WIDTHS
 
 
-POLICY_VERSION = "print-road-roles-v12.9"
+POLICY_VERSION = "print-road-roles-v13.0"
 COMPOSITION_ROLE_COLUMN = "_composition_role"
 
 # A role changes visual hierarchy, never source geometry.  The secondary and
@@ -111,6 +111,22 @@ _TEMPLATE_SKELETON_LEAF_MIN_FRAME_FRACTIONS = {
     "context": 0.080,
 }
 _TEMPLATE_SKELETON_ISOLATED_FACTOR = 1.20
+
+# The AMap template intentionally omits many distributor roads at 15/25 km.
+# Those omissions are useful for the primary hierarchy but leave the visible
+# city graph too sparse when treated as a hard gate.  A second, topology-only
+# pass may therefore admit complete OSM corridors that add a connection,
+# cycle, frame axis or under-served spatial cell.  It never admits individual
+# mask fragments and never invents geometry.
+_MID_FREQUENCY_GRID_SIZE = 16
+_MID_FREQUENCY_CELL_CAPACITY = 2
+_MID_FREQUENCY_MAX_CORRIDORS = 64
+_MID_FREQUENCY_MIN_FRAME_FRACTION = 0.012
+_MID_FREQUENCY_MIN_NOZZLE_FACTOR = 4.0
+_MID_FREQUENCY_CONNECTION_FACTOR = 0.30
+_MID_FREQUENCY_MAX_CONNECTION_M = 24.0
+_MID_FREQUENCY_PARALLEL_OVERLAP = 0.68
+_MID_FREQUENCY_WEAK_SUPPORT = 0.08
 _WIDTH_FACTORS = {
     "motorway": 1.35,
     "motorway_link": 1.10,
@@ -719,6 +735,344 @@ def _build_physical_corridor_groups(
     }
 
 
+def _merged_line_parts(geometry) -> list:
+    """Return mergeable line parts without changing their coordinates."""
+
+    if geometry is None or geometry.is_empty:
+        return []
+    try:
+        merged = geometry if geometry.geom_type == "LineString" \
+            else linemerge(geometry)
+    except (TypeError, ValueError):
+        merged = geometry
+    if merged.geom_type == "LineString":
+        return [merged]
+    if merged.geom_type == "MultiLineString":
+        return list(merged.geoms)
+    if hasattr(merged, "geoms"):
+        return [part for part in merged.geoms
+                if part.geom_type == "LineString"]
+    return []
+
+
+def _corridor_terminal_points(geometry, tolerance_m: float) -> list[Point]:
+    """Return de-duplicated open endpoints for one complete corridor."""
+
+    tolerance_m = max(float(tolerance_m), 0.001)
+    buckets: dict[tuple[int, int], Point] = {}
+    for part in _merged_line_parts(geometry):
+        coordinates = list(part.coords)
+        if len(coordinates) < 2 or part.is_ring:
+            continue
+        for x, y, *_ in (coordinates[0], coordinates[-1]):
+            point = Point(float(x), float(y))
+            key = (int(round(point.x / tolerance_m)),
+                   int(round(point.y / tolerance_m)))
+            buckets.setdefault(key, point)
+    return list(buckets.values())
+
+
+def _select_mid_frequency_corridors(
+    work: gpd.GeoDataFrame,
+    candidate_records: list[dict[str, Any]],
+    backbone_records: list[tuple[int, dict[str, Any]]],
+    backbone_components: dict[int, int],
+    *,
+    bbox_local,
+    nozzle_real_m: float,
+    connection_m: float,
+    parallel_collapse_m: float,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Add complete OSM corridors that improve the backbone topology.
+
+    AMap remains authoritative for the primary hierarchy.  This pass considers
+    only complete named/ref physical OSM corridors omitted by that hierarchy.
+    A corridor is useful when it connects two backbone records/components,
+    closes a loop, or joins the backbone to the frame through under-served
+    spatial cells.  One-ended local branches and near-parallel duplicates are
+    rejected.  No source coordinate is generated, buffered or modified.
+    """
+
+    xmin, ymin, xmax, ymax = (float(value) for value in bbox_local)
+    frame_span = max(xmax - xmin, ymax - ymin, 1.0)
+    minimum_length_m = max(
+        frame_span * _MID_FREQUENCY_MIN_FRAME_FRACTION,
+        nozzle_real_m * _MID_FREQUENCY_MIN_NOZZLE_FACTOR,
+    )
+    base_evidence = {
+        "method": "topology_scored_complete_osm_mid_frequency_v1",
+        "candidate_corridors": len(candidate_records),
+        "backbone_corridors": len(backbone_records),
+        "grid_size": _MID_FREQUENCY_GRID_SIZE,
+        "cell_capacity": _MID_FREQUENCY_CELL_CAPACITY,
+        "maximum_corridors": _MID_FREQUENCY_MAX_CORRIDORS,
+        "minimum_length_m": round(minimum_length_m, 3),
+        "connection_m": round(connection_m, 3),
+        "parallel_collapse_m": round(parallel_collapse_m, 3),
+        "parallel_overlap_limit": _MID_FREQUENCY_PARALLEL_OVERLAP,
+        "geometry_policy": "select_complete_existing_osm_corridor_only",
+    }
+    if not candidate_records or not backbone_records:
+        return [], {
+            **base_evidence,
+            "eligible_corridors": 0,
+            "selected_corridors": 0,
+            "selected_features": 0,
+            "selected_length_m": 0.0,
+            "component_bridges": 0,
+            "crosslinks": 0,
+            "closed_loops": 0,
+            "frame_axes": 0,
+            "newly_served_cells": 0,
+            "rejected_parallel": 0,
+            "rejected_one_ended": 0,
+            "rejected_saturated": 0,
+        }
+
+    backbone_frame = gpd.GeoDataFrame(
+        {
+            "record_index": [index for index, _ in backbone_records],
+            "geometry": [record["geometry"]
+                         for _, record in backbone_records],
+        },
+        geometry="geometry",
+        crs=work.crs,
+    )
+    backbone_index = backbone_frame.sindex
+    backbone_union = unary_union(list(backbone_frame.geometry))
+    backbone_record_by_index = {
+        index: record for index, record in backbone_records
+    }
+    backbone_positions = set().union(*(
+        set(record["positions"]) for _, record in backbone_records
+    ))
+
+    cell_load: dict[int, int] = {}
+    for _, record in backbone_records:
+        for cell in _sampled_grid_cells(
+                record["geometry"], bbox_local,
+                _MID_FREQUENCY_GRID_SIZE):
+            cell_load[cell] = cell_load.get(cell, 0) + 1
+    initially_served_cells = set(cell_load)
+
+    eligible: list[dict[str, Any]] = []
+    rejected_parallel = 0
+    rejected_one_ended = 0
+    frame_margin_m = max(connection_m, frame_span * 0.0025)
+
+    for record in candidate_records:
+        positions = set(record["positions"])
+        if positions & backbone_positions:
+            continue
+        length_m = float(record["length_m"])
+        if length_m < minimum_length_m:
+            continue
+        if not bool(record.get("has_semantic_identity")):
+            continue
+        highways = [str(work.iloc[position].get("highway") or "")
+                    for position in positions]
+        link_fraction = sum(
+            highway.endswith("_link") for highway in highways
+        ) / max(len(highways), 1)
+        if link_fraction > 0.35:
+            continue
+
+        geometry = record["geometry"]
+        query_geometry = geometry.buffer(parallel_collapse_m)
+        nearby = sorted(int(value) for value in backbone_index.query(
+            query_geometry, predicate="intersects"))
+        maximum_parallel_overlap = 0.0
+        for local_index in nearby:
+            backbone_geometry = backbone_frame.iloc[local_index].geometry
+            try:
+                overlap = float(geometry.intersection(
+                    backbone_geometry.buffer(parallel_collapse_m)).length)
+                maximum_parallel_overlap = max(
+                    maximum_parallel_overlap,
+                    overlap / max(length_m, 1.0),
+                )
+            except Exception:
+                continue
+        if maximum_parallel_overlap >= _MID_FREQUENCY_PARALLEL_OVERLAP:
+            rejected_parallel += 1
+            continue
+
+        nearby_connection = sorted(int(value) for value in
+                                   backbone_index.query(
+            geometry.buffer(connection_m), predicate="intersects"))
+        touched_record_indexes: set[int] = set()
+        for local_index in nearby_connection:
+            backbone_geometry = backbone_frame.iloc[local_index].geometry
+            if geometry.distance(backbone_geometry) <= connection_m:
+                touched_record_indexes.add(int(
+                    backbone_frame.iloc[local_index]["record_index"]))
+        touched_components = {
+            backbone_components[index] for index in touched_record_indexes
+            if index in backbone_components
+        }
+
+        terminals = _corridor_terminal_points(geometry, connection_m)
+        attached_terminals = sum(
+            point.distance(backbone_union) <= connection_m
+            for point in terminals
+        )
+        frame_terminals = sum(
+            point.x - xmin <= frame_margin_m
+            or xmax - point.x <= frame_margin_m
+            or point.y - ymin <= frame_margin_m
+            or ymax - point.y <= frame_margin_m
+            for point in terminals
+        )
+        line_parts = _merged_line_parts(geometry)
+        closed_loop = bool(line_parts) and any(
+            part.is_ring for part in line_parts)
+        component_bridge = len(touched_components) >= 2
+        crosslink = (len(touched_record_indexes) >= 2
+                     or attached_terminals >= 2)
+        frame_axis = bool(
+            frame_terminals >= 1
+            and (attached_terminals >= 1
+                 or len(touched_record_indexes) >= 1)
+        )
+        weak_support = float(record.get("coverage", 0.0)) \
+            >= _MID_FREQUENCY_WEAK_SUPPORT
+        cells = _sampled_grid_cells(
+            geometry, bbox_local, _MID_FREQUENCY_GRID_SIZE)
+        initially_new_cells = cells - initially_served_cells
+        touched_backbone_identities = {
+            str(backbone_record_by_index[index]["identity"])
+            for index in touched_record_indexes
+            if index in backbone_record_by_index
+        }
+        candidate_identities = set(record.get(
+            "component_identities", []))
+        touched_component_identities = set().union(*(
+            set(backbone_record_by_index[index].get(
+                "component_identities", []))
+            for index in touched_record_indexes
+            if index in backbone_record_by_index
+        )) if touched_record_indexes else set()
+        # A short differently named line can sit exactly inside a palette gap
+        # of one retained backbone record.  Two nearby endpoints alone must
+        # not let that alternate identity masquerade as a useful crosslink.
+        # A genuine same-corridor loop must either leave the already served
+        # cells, close geometrically, or retain independent weak map support.
+        if (len(touched_record_indexes) == 1
+                and attached_terminals >= 2
+                and not closed_loop
+                and not initially_new_cells
+                and not weak_support):
+            rejected_one_ended += 1
+            continue
+        if (len(touched_record_indexes) >= 2
+                and len(touched_backbone_identities) == 1
+                and candidate_identities.isdisjoint(
+                    touched_component_identities)
+                and not initially_new_cells
+                and not weak_support):
+            rejected_one_ended += 1
+            continue
+        loop_candidate = bool(
+            closed_loop
+            and (touched_record_indexes or weak_support)
+        )
+        if not (component_bridge or crosslink or frame_axis
+                or loop_candidate):
+            rejected_one_ended += 1
+            continue
+
+        under_served = sum(
+            cell_load.get(cell, 0) < _MID_FREQUENCY_CELL_CAPACITY
+            for cell in cells
+        )
+        highway_ranks = [
+            rank for highway in highways
+            if (rank := _road_class_rank(highway)) is not None
+        ]
+        highway_rank = min(highway_ranks, default=4)
+        score = (
+            (12.0 if component_bridge else 0.0)
+            + (7.0 if crosslink else 0.0)
+            + (4.0 if loop_candidate else 0.0)
+            + (3.0 if frame_axis else 0.0)
+            + min(5.0, float(under_served))
+            + min(3.0, length_m / frame_span * 20.0)
+            + max(0.0, 3.0 - float(highway_rank))
+            + float(record.get("coverage", 0.0)) * 2.0
+            + float(record.get("weighted_support", 0.0))
+            - maximum_parallel_overlap * 6.0
+            - link_fraction * 5.0
+        )
+        eligible.append({
+            **record,
+            "cells": cells,
+            "component_bridge": component_bridge,
+            "crosslink": crosslink,
+            "closed_loop": loop_candidate,
+            "frame_axis": frame_axis,
+            "touched_records": len(touched_record_indexes),
+            "touched_components": len(touched_components),
+            "attached_terminals": int(attached_terminals),
+            "frame_terminals": int(frame_terminals),
+            "maximum_parallel_overlap": maximum_parallel_overlap,
+            "score": score,
+        })
+
+    eligible.sort(key=lambda record: (
+        -float(record["score"]),
+        -float(record["length_m"]),
+        min(record["positions"]),
+    ))
+    selected: list[dict[str, Any]] = []
+    rejected_saturated = 0
+    for record in eligible:
+        if len(selected) >= _MID_FREQUENCY_MAX_CORRIDORS:
+            rejected_saturated += 1
+            continue
+        under_served_cells = {
+            cell for cell in record["cells"]
+            if cell_load.get(cell, 0) < _MID_FREQUENCY_CELL_CAPACITY
+        }
+        structural_exception = bool(record["component_bridge"])
+        if not structural_exception:
+            if record["crosslink"] and not under_served_cells:
+                rejected_saturated += 1
+                continue
+            if ((record["closed_loop"] or record["frame_axis"])
+                    and len(under_served_cells) < 2):
+                rejected_saturated += 1
+                continue
+        selected.append(record)
+        for cell in record["cells"]:
+            cell_load[cell] = cell_load.get(cell, 0) + 1
+
+    selected_cells = set().union(*(
+        set(record["cells"]) for record in selected
+    )) if selected else set()
+    return selected, {
+        **base_evidence,
+        "eligible_corridors": len(eligible),
+        "selected_corridors": len(selected),
+        "selected_features": sum(
+            len(record["positions"]) for record in selected),
+        "selected_length_m": round(sum(
+            float(record["length_m"]) for record in selected), 3),
+        "component_bridges": sum(
+            bool(record["component_bridge"]) for record in selected),
+        "crosslinks": sum(
+            bool(record["crosslink"]) for record in selected),
+        "closed_loops": sum(
+            bool(record["closed_loop"]) for record in selected),
+        "frame_axes": sum(
+            bool(record["frame_axis"]) for record in selected),
+        "initially_served_cells": len(initially_served_cells),
+        "newly_served_cells": len(selected_cells - initially_served_cells),
+        "rejected_parallel": rejected_parallel,
+        "rejected_one_ended": rejected_one_ended,
+        "rejected_saturated": rejected_saturated,
+    }
+
+
 def _match_template_corridors(
     work: gpd.GeoDataFrame,
     provisional_roles: dict[int, str],
@@ -772,6 +1126,7 @@ def _match_template_corridors(
         )
 
     corridor_records: list[dict[str, Any]] = []
+    mid_frequency_candidates: list[dict[str, Any]] = []
     component_count = 0
     joined_endpoint_pairs = 0
 
@@ -857,26 +1212,15 @@ def _match_template_corridors(
             total_length_m = sum(lengths.values())
             if total_length_m <= 0:
                 continue
+            component_identities = sorted({
+                value for position in component_positions
+                if (value := _template_identity_for_row(
+                    work.iloc[position]))
+            })
             seed_positions = [
                 position for position in component_positions
                 if position in provisional_roles
             ]
-            if not seed_positions:
-                continue
-            seed_lengths = {role: 0.0 for role in role_rank}
-            for position in seed_positions:
-                seed_lengths[provisional_roles[position]] += lengths[position]
-            seed_threshold_m = max(
-                nozzle_real_m * 1.5,
-                total_length_m * 0.08,
-            )
-            eligible_roles = [
-                role for role in role_rank
-                if seed_lengths[role] >= seed_threshold_m
-            ]
-            if not eligible_roles:
-                continue
-            role = min(eligible_roles, key=role_rank.get)
             covered_length_m = sum(
                 lengths[position] * float(
                     support_by_position.get(position, {}).get(
@@ -894,6 +1238,44 @@ def _match_template_corridors(
             )
             coverage = covered_length_m / total_length_m
             weighted_support = weighted_length_m / total_length_m
+            geometry = unary_union([
+                work.iloc[position].geometry
+                for position in component_positions
+            ])
+            base_record = {
+                "identity": identity,
+                "positions": set(component_positions),
+                "geometry": geometry,
+                "length_m": total_length_m,
+                "coverage": coverage,
+                "weighted_support": weighted_support,
+                "seed_features": len(seed_positions),
+                "has_semantic_identity": bool(component_identities),
+                "component_identities": component_identities,
+                "protected": any(
+                    _truthy_osm_tag(work.iloc[position].get("bridge"))
+                    or _truthy_osm_tag(work.iloc[position].get("tunnel"))
+                    for position in component_positions
+                ),
+            }
+            mid_frequency_candidates.append(base_record)
+
+            if not seed_positions:
+                continue
+            seed_lengths = {role: 0.0 for role in role_rank}
+            for position in seed_positions:
+                seed_lengths[provisional_roles[position]] += lengths[position]
+            seed_threshold_m = max(
+                nozzle_real_m * 1.5,
+                total_length_m * 0.08,
+            )
+            eligible_roles = [
+                role for role in role_rank
+                if seed_lengths[role] >= seed_threshold_m
+            ]
+            if not eligible_roles:
+                continue
+            role = min(eligible_roles, key=role_rank.get)
             seed_fraction = sum(
                 lengths[position] for position in seed_positions
             ) / total_length_m
@@ -905,24 +1287,9 @@ def _match_template_corridors(
                     or coverage < _TEMPLATE_CORRIDOR_MIN_COVERAGE[role]
                     or seed_fraction < _TEMPLATE_CORRIDOR_MIN_SEED_FRACTION):
                 continue
-            geometry = unary_union([
-                work.iloc[position].geometry
-                for position in component_positions
-            ])
             corridor_records.append({
-                "identity": identity,
-                "positions": set(component_positions),
+                **base_record,
                 "role": role,
-                "geometry": geometry,
-                "length_m": total_length_m,
-                "coverage": coverage,
-                "weighted_support": weighted_support,
-                "seed_features": len(seed_positions),
-                "protected": any(
-                    _truthy_osm_tag(work.iloc[position].get("bridge"))
-                    or _truthy_osm_tag(work.iloc[position].get("tunnel"))
-                    for position in component_positions
-                ),
                 "score": (
                     (3 - role_rank[role]) * 10.0
                     + coverage * 3.0
@@ -1066,6 +1433,48 @@ def _match_template_corridors(
         skeleton_dropped_roles[role] = (
             skeleton_dropped_roles.get(role, 0) + 1)
 
+    backbone_indexes = sorted(
+        active_record_indexes - skeleton_dropped_indexes)
+    backbone_parents = {index: index for index in backbone_indexes}
+
+    def backbone_find(index: int) -> int:
+        while backbone_parents[index] != index:
+            backbone_parents[index] = backbone_parents[
+                backbone_parents[index]]
+            index = backbone_parents[index]
+        return index
+
+    def backbone_union(left: int, right: int) -> None:
+        left_root = backbone_find(left)
+        right_root = backbone_find(right)
+        if left_root != right_root:
+            backbone_parents[right_root] = left_root
+
+    for index in backbone_indexes:
+        for neighbor in record_neighbors.get(index, set()):
+            if neighbor in backbone_parents:
+                backbone_union(index, neighbor)
+    backbone_components = {
+        index: backbone_find(index) for index in backbone_indexes
+    }
+    mid_frequency_records, mid_frequency_evidence = \
+        _select_mid_frequency_corridors(
+            work,
+            mid_frequency_candidates,
+            [(index, corridor_records[index])
+             for index in backbone_indexes],
+            backbone_components,
+            bbox_local=bbox_local,
+            nozzle_real_m=nozzle_real_m,
+            connection_m=max(
+                skeleton_connection_m,
+                min(_MID_FREQUENCY_MAX_CONNECTION_M,
+                    nozzle_real_m
+                    * _MID_FREQUENCY_CONNECTION_FACTOR),
+            ),
+            parallel_collapse_m=parallel_collapse_m,
+        )
+
     selected_roles: dict[int, str] = {}
     selected_corridors = 0
     internal_link_features = 0
@@ -1088,6 +1497,19 @@ def _match_template_corridors(
             previous = selected_roles.get(position)
             if previous is None or role_rank[role] < role_rank[previous]:
                 selected_roles[position] = role
+
+    for record in mid_frequency_records:
+        selected_corridors += 1
+        for position in record["positions"]:
+            highway = str(work.iloc[position].get("highway") or "")
+            if highway.endswith("_link"):
+                selected_roles[position] = "connector"
+                internal_link_features += 1
+            else:
+                # Mid-frequency corridors are deliberately quiet.  Their
+                # selection carries topological value, not permission to
+                # compete with the AMap-backed primary hierarchy.
+                selected_roles.setdefault(position, "context")
 
     # Anonymous OSM ways cannot form a trustworthy semantic corridor.  Keep
     # only exceptionally long, strongly mask-supported source features; short
@@ -1140,6 +1562,7 @@ def _match_template_corridors(
         "skeleton_dropped_length_m": round(
             skeleton_dropped_length_m, 3),
         "skeleton_dropped_roles": skeleton_dropped_roles,
+        "mid_frequency_supplement": mid_frequency_evidence,
         "minimum_coverage": dict(_TEMPLATE_CORRIDOR_MIN_COVERAGE),
         "minimum_seed_fraction": _TEMPLATE_CORRIDOR_MIN_SEED_FRACTION,
         "geometry_policy": "select_complete_source_corridor_never_draw_mask",
@@ -2220,7 +2643,7 @@ def _apply_amap_spatial_template(
         getattr(visual_salience_guide, "reference", None), "evidence", {}) or {}
     composition_roles = {
         "schema_version": "1.0",
-        "method": "amap_physical_corridor_skeleton_to_osm_roles_v6",
+        "method": "amap_backbone_plus_osm_mid_frequency_roles_v7",
         "primary": _role_evidence("primary"),
         "secondary": _role_evidence("secondary"),
         "context": _role_evidence("context"),
@@ -2239,7 +2662,7 @@ def _apply_amap_spatial_template(
     })
     return selected, {
         "applied": True,
-        "method": "amap_physical_corridor_skeleton_existing_osm_v6",
+        "method": "amap_backbone_plus_osm_mid_frequency_existing_v7",
         "candidate_features": len(work),
         "selected_features": len(selected),
         "selected_estimated_ink_ratio": round(selected_ink, 6),

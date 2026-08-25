@@ -443,10 +443,139 @@ def test_spatial_template_assigns_three_roles_without_copying_geometry():
 
     budget = roles.evidence["ink_budget"]
     assert budget["method"] == (
-        "amap_physical_corridor_skeleton_existing_osm_v6")
+        "amap_backbone_plus_osm_mid_frequency_existing_v7")
     assert "hard_ink_limit_ratio" not in budget
     assert budget["corridor_matching"]["selected_corridors"] == 3
     assert budget["composition_roles"]["context"]["features"] == 1
+
+
+def test_spatial_template_adds_complete_unmasked_crosslink_as_mid_frequency():
+    class Guide:
+        version = "synthetic-salience-v1"
+        template_policy_version = "synthetic-template-v1"
+
+        @staticmethod
+        def road_support(geometry):
+            supported = geometry.centroid.x in (2000, 8000)
+            value = 0.95 if supported else 0.0
+            return {
+                "covered_fraction": value,
+                "any_template_fraction": value,
+                "weighted_salience": 0.90 if supported else 0.0,
+                "major_mask_fraction": 0.80 if supported else 0.0,
+                "arterial_or_major_fraction": 0.90 if supported else 0.0,
+                "context_mask_fraction": 0.0,
+            }
+
+    roads = gpd.GeoDataFrame({
+        "highway": ["primary", "primary", "secondary"],
+        "name": ["West Spine", "East Spine", "Middle Connector"],
+        "geometry": [
+            LineString([(2000, 1000), (2000, 9000)]),
+            LineString([(8000, 1000), (8000, 9000)]),
+            LineString([(2000, 5000), (8000, 5000)]),
+        ],
+    }, geometry="geometry", crs="EPSG:3857")
+    source_wkb = roads.set_index("name").geometry.to_wkb().to_dict()
+
+    roles = select_road_roles(
+        roads, topology_tier=4, nozzle_real_m=50.0,
+        bbox_local=(0, 0, 10000, 10000), scale_mm_per_m=0.02,
+        visual_salience_guide=Guide(),
+    )
+
+    selected = roles.visible.set_index("name")
+    assert set(selected.index) == {
+        "West Spine", "East Spine", "Middle Connector"}
+    assert selected.loc[
+        "Middle Connector", COMPOSITION_ROLE_COLUMN] == "context"
+    assert selected.loc["Middle Connector"].geometry.wkb == source_wkb[
+        "Middle Connector"]
+    supplement = roles.evidence["ink_budget"]["corridor_matching"][
+        "mid_frequency_supplement"]
+    assert supplement["selected_corridors"] == 1
+    assert supplement["crosslinks"] == 1
+    assert supplement["selected_features"] == 1
+
+
+def test_spatial_template_rejects_unmasked_one_ended_mid_frequency_branch():
+    class Guide:
+        version = "synthetic-salience-v1"
+        template_policy_version = "synthetic-template-v1"
+
+        @staticmethod
+        def road_support(geometry):
+            supported = geometry.centroid.y == 5000
+            value = 0.95 if supported else 0.0
+            return {
+                "covered_fraction": value,
+                "any_template_fraction": value,
+                "weighted_salience": 0.90 if supported else 0.0,
+                "major_mask_fraction": 0.80 if supported else 0.0,
+                "arterial_or_major_fraction": 0.90 if supported else 0.0,
+                "context_mask_fraction": 0.0,
+            }
+
+    roads = gpd.GeoDataFrame({
+        "highway": ["primary", "secondary"],
+        "name": ["Main Axis", "One End Branch"],
+        "geometry": [
+            LineString([(1000, 5000), (9000, 5000)]),
+            LineString([(5000, 5000), (5000, 7000)]),
+        ],
+    }, geometry="geometry", crs="EPSG:3857")
+
+    roles = select_road_roles(
+        roads, topology_tier=4, nozzle_real_m=50.0,
+        bbox_local=(0, 0, 10000, 10000), scale_mm_per_m=0.02,
+        visual_salience_guide=Guide(),
+    )
+
+    assert list(roles.visible["name"]) == ["Main Axis"]
+    supplement = roles.evidence["ink_budget"]["corridor_matching"][
+        "mid_frequency_supplement"]
+    assert supplement["selected_corridors"] == 0
+    assert supplement["rejected_one_ended"] == 1
+
+
+def test_spatial_template_rejects_unmasked_parallel_mid_frequency_axis():
+    class Guide:
+        version = "synthetic-salience-v1"
+        template_policy_version = "synthetic-template-v1"
+
+        @staticmethod
+        def road_support(geometry):
+            supported = geometry.centroid.y == 5000
+            value = 0.95 if supported else 0.0
+            return {
+                "covered_fraction": value,
+                "any_template_fraction": value,
+                "weighted_salience": 0.90 if supported else 0.0,
+                "major_mask_fraction": 0.80 if supported else 0.0,
+                "arterial_or_major_fraction": 0.90 if supported else 0.0,
+                "context_mask_fraction": 0.0,
+            }
+
+    roads = gpd.GeoDataFrame({
+        "highway": ["primary", "secondary"],
+        "name": ["Main Axis", "Parallel Axis"],
+        "geometry": [
+            LineString([(1000, 5000), (9000, 5000)]),
+            LineString([(1000, 5040), (9000, 5040)]),
+        ],
+    }, geometry="geometry", crs="EPSG:3857")
+
+    roles = select_road_roles(
+        roads, topology_tier=4, nozzle_real_m=50.0,
+        bbox_local=(0, 0, 10000, 10000), scale_mm_per_m=0.02,
+        visual_salience_guide=Guide(),
+    )
+
+    assert list(roles.visible["name"]) == ["Main Axis"]
+    supplement = roles.evidence["ink_budget"]["corridor_matching"][
+        "mid_frequency_supplement"]
+    assert supplement["selected_corridors"] == 0
+    assert supplement["rejected_parallel"] == 1
 
 
 def test_spatial_template_rejects_short_intersection_spur_but_keeps_corridor():
