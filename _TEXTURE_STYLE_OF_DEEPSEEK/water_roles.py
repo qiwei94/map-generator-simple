@@ -23,7 +23,7 @@ from shapely.errors import GEOSException
 from shapely.ops import linemerge, unary_union
 
 
-POLICY_VERSION = "print-water-roles-v6"
+POLICY_VERSION = "print-water-roles-v7"
 
 _LINE_INK_QUOTAS = {
     "river": 0.0060,

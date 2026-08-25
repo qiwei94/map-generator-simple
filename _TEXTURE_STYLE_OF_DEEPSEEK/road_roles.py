@@ -27,7 +27,7 @@ from .buildings import ROAD_TIERS
 from .config import ROAD_DEFAULT_WIDTH_M, ROAD_FILTER, ROAD_WIDTHS
 
 
-POLICY_VERSION = "print-road-roles-v13.0"
+POLICY_VERSION = "print-road-roles-v14.0"
 COMPOSITION_ROLE_COLUMN = "_composition_role"
 
 # A role changes visual hierarchy, never source geometry.  The secondary and
@@ -87,7 +87,7 @@ _TEMPLATE_PROXIMITY_CONTINUATION_COSINE = 0.85
 _TEMPLATE_CORRIDOR_JOIN_COSINE = 0.88
 _TEMPLATE_CORRIDOR_JOIN_MIN_M = 6.0
 _TEMPLATE_CORRIDOR_JOIN_MAX_M = 45.0
-_TEMPLATE_PARALLEL_COLLAPSE_FACTOR = 1.10
+_TEMPLATE_PARALLEL_COLLAPSE_FACTOR = 2.00
 _TEMPLATE_PARALLEL_OVERLAP_FRACTION = 0.70
 _TEMPLATE_CORRIDOR_MIN_FRAME_FRACTIONS = {
     "primary": 0.015,
@@ -127,6 +127,8 @@ _MID_FREQUENCY_CONNECTION_FACTOR = 0.30
 _MID_FREQUENCY_MAX_CONNECTION_M = 24.0
 _MID_FREQUENCY_PARALLEL_OVERLAP = 0.68
 _MID_FREQUENCY_WEAK_SUPPORT = 0.08
+_MID_FREQUENCY_MIN_DYNAMIC_CORRIDORS = 20
+_MID_FREQUENCY_UNSERVED_CELLS_PER_CORRIDOR = 3.0
 _WIDTH_FACTORS = {
     "motorway": 1.35,
     "motorway_link": 1.10,
@@ -772,6 +774,43 @@ def _corridor_terminal_points(geometry, tolerance_m: float) -> list[Point]:
     return list(buckets.values())
 
 
+def _resolve_mid_frequency_budget(
+    initially_served_cells: set[int],
+    *,
+    grid_size: int = _MID_FREQUENCY_GRID_SIZE,
+) -> dict[str, Any]:
+    """Resolve a spatial supplement budget from the existing skeleton.
+
+    A fixed number of OSM supplements has opposite effects in different
+    cities: it overwhelms a dense AMap skeleton while leaving a sparse one
+    empty.  The missing spatial cells are a deterministic proxy for how much
+    mid-frequency structure the current composition still needs.  Roughly one
+    complete corridor may be added per three unserved cells, with a small
+    floor so a dense city can still recover topology-critical crosslinks.
+    """
+
+    total_cells = max(int(grid_size), 1) ** 2
+    served_cells = min(len(initially_served_cells), total_cells)
+    unserved_cells = total_cells - served_cells
+    maximum_corridors = int(round(
+        unserved_cells / _MID_FREQUENCY_UNSERVED_CELLS_PER_CORRIDOR))
+    maximum_corridors = max(
+        _MID_FREQUENCY_MIN_DYNAMIC_CORRIDORS,
+        min(_MID_FREQUENCY_MAX_CORRIDORS, maximum_corridors),
+    )
+    return {
+        "method": "unserved_spatial_cells_v1",
+        "total_cells": total_cells,
+        "served_cells": served_cells,
+        "unserved_cells": unserved_cells,
+        "unserved_cells_per_corridor": (
+            _MID_FREQUENCY_UNSERVED_CELLS_PER_CORRIDOR),
+        "minimum_corridors": _MID_FREQUENCY_MIN_DYNAMIC_CORRIDORS,
+        "hard_maximum_corridors": _MID_FREQUENCY_MAX_CORRIDORS,
+        "maximum_corridors": maximum_corridors,
+    }
+
+
 def _select_mid_frequency_corridors(
     work: gpd.GeoDataFrame,
     candidate_records: list[dict[str, Any]],
@@ -805,7 +844,6 @@ def _select_mid_frequency_corridors(
         "backbone_corridors": len(backbone_records),
         "grid_size": _MID_FREQUENCY_GRID_SIZE,
         "cell_capacity": _MID_FREQUENCY_CELL_CAPACITY,
-        "maximum_corridors": _MID_FREQUENCY_MAX_CORRIDORS,
         "minimum_length_m": round(minimum_length_m, 3),
         "connection_m": round(connection_m, 3),
         "parallel_collapse_m": round(parallel_collapse_m, 3),
@@ -815,6 +853,11 @@ def _select_mid_frequency_corridors(
     if not candidate_records or not backbone_records:
         return [], {
             **base_evidence,
+            "maximum_corridors": 0,
+            "dynamic_budget": {
+                "method": "unavailable_without_backbone_v1",
+                "maximum_corridors": 0,
+            },
             "eligible_corridors": 0,
             "selected_corridors": 0,
             "selected_features": 0,
@@ -854,6 +897,15 @@ def _select_mid_frequency_corridors(
                 _MID_FREQUENCY_GRID_SIZE):
             cell_load[cell] = cell_load.get(cell, 0) + 1
     initially_served_cells = set(cell_load)
+    dynamic_budget = _resolve_mid_frequency_budget(
+        initially_served_cells,
+        grid_size=_MID_FREQUENCY_GRID_SIZE,
+    )
+    maximum_corridors = int(dynamic_budget["maximum_corridors"])
+    base_evidence.update({
+        "maximum_corridors": maximum_corridors,
+        "dynamic_budget": dynamic_budget,
+    })
 
     eligible: list[dict[str, Any]] = []
     rejected_parallel = 0
@@ -1026,7 +1078,7 @@ def _select_mid_frequency_corridors(
     selected: list[dict[str, Any]] = []
     rejected_saturated = 0
     for record in eligible:
-        if len(selected) >= _MID_FREQUENCY_MAX_CORRIDORS:
+        if len(selected) >= maximum_corridors:
             rejected_saturated += 1
             continue
         under_served_cells = {
@@ -1298,50 +1350,59 @@ def _match_template_corridors(
                 ),
             })
 
-    # Collapse only strongly overlapping components of the same semantic
-    # road.  End-to-end pieces remain separate and are both retained.
+    # Collapse strongly overlapping components at the physical print scale.
+    # v13 only compared records sharing one semantic identity, so dual
+    # carriageways, frontage roads and renamed continuations could stack even
+    # when the printer cannot resolve the gap.  Cross-identity records are now
+    # compared too, but require *both* routes to overlap substantially; this
+    # keeps intersecting roads and short shared approaches intact.  End-to-end
+    # pieces still have near-zero overlap and remain separate.
     dropped_record_indexes: set[int] = set()
-    records_by_identity: dict[str, list[int]] = {}
-    for index, record in enumerate(corridor_records):
-        records_by_identity.setdefault(record["identity"], []).append(index)
     collapsed_parallel_corridors = 0
     collapsed_parallel_features = 0
-    for indexes in records_by_identity.values():
-        for offset, left_index in enumerate(indexes):
-            if left_index in dropped_record_indexes:
+    collapsed_cross_identity_corridors = 0
+    for left_index, left in enumerate(corridor_records):
+        if left_index in dropped_record_indexes:
+            continue
+        for right_index in range(left_index + 1, len(corridor_records)):
+            if right_index in dropped_record_indexes:
                 continue
-            for right_index in indexes[offset + 1:]:
-                if right_index in dropped_record_indexes:
-                    continue
-                left = corridor_records[left_index]
-                right = corridor_records[right_index]
-                try:
-                    left_near = float(left["geometry"].intersection(
-                        right["geometry"].buffer(
-                            parallel_collapse_m)).length) / max(
-                                float(left["length_m"]), 1.0)
-                    right_near = float(right["geometry"].intersection(
-                        left["geometry"].buffer(
-                            parallel_collapse_m)).length) / max(
-                                float(right["length_m"]), 1.0)
-                except Exception:
-                    continue
-                if max(left_near, right_near) \
-                        < _TEMPLATE_PARALLEL_OVERLAP_FRACTION:
-                    continue
-                # Prefer the component covering more of the route, then the
-                # one more strongly supported by the cartographic skeleton.
-                left_choice = (
-                    float(left["length_m"]), float(left["score"]))
-                right_choice = (
-                    float(right["length_m"]), float(right["score"]))
-                loser = right_index if left_choice >= right_choice else left_index
-                dropped_record_indexes.add(loser)
-                collapsed_parallel_corridors += 1
-                collapsed_parallel_features += len(
-                    corridor_records[loser]["positions"])
-                if loser == left_index:
-                    break
+            right = corridor_records[right_index]
+            if left["geometry"].distance(right["geometry"]) \
+                    > parallel_collapse_m:
+                continue
+            try:
+                left_near = float(left["geometry"].intersection(
+                    right["geometry"].buffer(
+                        parallel_collapse_m)).length) / max(
+                            float(left["length_m"]), 1.0)
+                right_near = float(right["geometry"].intersection(
+                    left["geometry"].buffer(
+                        parallel_collapse_m)).length) / max(
+                            float(right["length_m"]), 1.0)
+            except Exception:
+                continue
+            same_identity = left["identity"] == right["identity"]
+            overlap = (max(left_near, right_near) if same_identity
+                       else min(left_near, right_near))
+            if overlap < _TEMPLATE_PARALLEL_OVERLAP_FRACTION:
+                continue
+            # Prefer stronger cartographic evidence before route length.  A
+            # long frontage road must not erase the actual mapped main axis.
+            left_choice = (float(left["score"]),
+                           float(left["coverage"]),
+                           float(left["length_m"]))
+            right_choice = (float(right["score"]),
+                            float(right["coverage"]),
+                            float(right["length_m"]))
+            loser = right_index if left_choice >= right_choice else left_index
+            dropped_record_indexes.add(loser)
+            collapsed_parallel_corridors += 1
+            collapsed_cross_identity_corridors += int(not same_identity)
+            collapsed_parallel_features += len(
+                corridor_records[loser]["positions"])
+            if loser == left_index:
+                break
 
     # Turn the selected *corridors* into the visual skeleton before expanding
     # them back to individual OSM features.  This is deliberately one level
@@ -1551,6 +1612,8 @@ def _match_template_corridors(
         "parallel_overlap_fraction": (
             _TEMPLATE_PARALLEL_OVERLAP_FRACTION),
         "collapsed_parallel_corridors": collapsed_parallel_corridors,
+        "collapsed_cross_identity_corridors": (
+            collapsed_cross_identity_corridors),
         "collapsed_parallel_features": collapsed_parallel_features,
         "skeleton_method": "complete_corridor_leaf_graph_v1",
         "skeleton_connection_m": round(skeleton_connection_m, 3),

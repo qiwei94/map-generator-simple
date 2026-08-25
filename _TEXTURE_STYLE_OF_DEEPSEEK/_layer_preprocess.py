@@ -852,6 +852,8 @@ def _extract_WL_WO(
     repaired_water_count = 0
     ordinary_polygon_drops = 0
     unprintable_surface_drops = 0
+    landmark_polygon_demotions = 0
+    isolated_polygon_drops = 0
     # 可打印下限 = 1 喷嘴宽（0.5×nozzle_real 半宽）。历史 1.5× 把大框
     # （scale 小、nozzle_real 大）的城市河道全部撑到 ~200m 宽蓝带。
     min_buffer = nozzle_real_m * 0.5
@@ -860,7 +862,62 @@ def _extract_WL_WO(
     # merely survive as a printable black dot.  All source polygons still
     # participate in structural block cutting before this visible-layer gate.
     visual_polygon_min_area = max(1000.0, (nozzle_real_m * 4.5) ** 2)
-    ordinary_min_area = visual_polygon_min_area
+    if bbox_local is not None:
+        xmin, ymin, xmax, ymax = (float(value) for value in bbox_local)
+        frame_area = max((xmax - xmin) * (ymax - ymin), 1.0)
+    else:
+        frame_area = 0.0
+    # At city scale a named ornamental pond is not automatically a primary
+    # black water mass.  The frame-relative thresholds preserve large rivers
+    # and lakes while preventing dozens of isolated named ponds from competing
+    # with the city's defining water structure.  All source water remains
+    # available to terrain/block topology before this visible-material gate.
+    main_surface_min_area = max(
+        visual_polygon_min_area,
+        frame_area * 0.00040,
+    )
+    ordinary_min_area = max(
+        visual_polygon_min_area,
+        frame_area * 0.00015,
+    )
+
+    def _present(row, column: str) -> bool:
+        value = row.get(column)
+        if value is None:
+            return False
+        try:
+            if pd.isna(value):
+                return False
+        except (TypeError, ValueError):
+            pass
+        return bool(str(value).strip())
+
+    def _main_water_evidence(row, poly: Polygon, area: float) -> bool:
+        waterway = (str(row.get("waterway")).casefold()
+                    if _present(row, "waterway") else "")
+        water_kind = (str(row.get("water")).casefold()
+                      if _present(row, "water") else "")
+        factual_identity = _present(row, "wikidata") or _present(
+            row, "wikipedia")
+        factual_corridor = (
+            waterway in {"river", "canal", "riverbank"}
+            or water_kind in {"river", "canal", "riverbank"}
+        )
+        visual_support = 0.0
+        if visual_salience_guide is not None:
+            try:
+                visual_support = float(
+                    visual_salience_guide.water_support(poly).get(
+                        "covered_fraction", 0.0))
+            except Exception:
+                visual_support = 0.0
+        return bool(
+            factual_identity
+            or factual_corridor
+            or visual_support >= 0.60
+            or (area >= main_surface_min_area
+                and is_water_landmark(row, area_m2=area))
+        )
 
     for source_index, row in water_gdf.iterrows():
         geom = row.geometry
@@ -883,13 +940,17 @@ def _extract_WL_WO(
                         poly, nozzle_real_m=nozzle_real_m):
                     unprintable_surface_drops += 1
                     continue
+                landmark = is_water_landmark(row, area_m2=area)
                 if (area >= visual_polygon_min_area
-                        and is_water_landmark(row, area_m2=area)):
+                        and landmark
+                        and _main_water_evidence(row, poly, area)):
                     WL_polys.append(poly)
                 elif area >= ordinary_min_area:
                     WO_polys.append(poly)
+                    landmark_polygon_demotions += int(landmark)
                 else:
                     ordinary_polygon_drops += 1
+                    isolated_polygon_drops += int(landmark)
 
         # LineString / MultiLineString
         elif isinstance(geom, (LineString, MultiLineString)):
@@ -983,8 +1044,11 @@ def _extract_WL_WO(
     water_role_evidence = dict(visible_water.evidence)
     water_role_evidence.update({
         "source_features": len(water_gdf),
+        "main_surface_min_area_m2": main_surface_min_area,
         "ordinary_polygon_min_area_m2": ordinary_min_area,
         "ordinary_polygon_drops": ordinary_polygon_drops,
+        "isolated_polygon_drops": isolated_polygon_drops,
+        "landmark_polygon_demotions": landmark_polygon_demotions,
         "unprintable_surface_drops": unprintable_surface_drops,
         "visible_landmark_polygons": len(WL_polys),
         "visible_ordinary_polygons": len(WO_polys),

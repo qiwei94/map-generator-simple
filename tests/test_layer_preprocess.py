@@ -24,6 +24,7 @@ from _TEXTURE_STYLE_OF_DEEPSEEK._layer_preprocess import (
     _extract_roads,
     _effective_road_tier,
     _close_unprintable_water_gaps,
+    _extract_WL_WO,
     preprocess_layers,
     LayerPolygons,
 )
@@ -41,6 +42,33 @@ def _make_square(x: float, y: float, side: float) -> Polygon:
 
 def _area(*polys: Polygon) -> float:
     return sum(p.area for p in polys if p is not None and not p.is_empty)
+
+
+def test_city_scale_water_demotes_named_pond_but_keeps_main_surfaces():
+    water = gpd.GeoDataFrame({
+        "name": ["Identity Lake", "Park Pond", "Tiny Pond", "Main River"],
+        "natural": ["water"] * 4,
+        "waterway": [None, None, None, "river"],
+        "geometry": [
+            box(1000, 1000, 2000, 2000),       # 1,000,000 m²
+            box(3000, 3000, 3350, 3350),       # 122,500 m²
+            box(5000, 5000, 5250, 5250),       # 62,500 m²
+            box(7000, 7000, 7300, 7300),       # 90,000 m²
+        ],
+    }, geometry="geometry", crs="EPSG:3857")
+
+    wl, wo, lines, evidence = _extract_WL_WO(
+        water,
+        nozzle_real_m=50.0,
+        bbox_local=(0, 0, 25000, 25000),
+    )
+
+    assert len(wl) == 2
+    assert len(wo) == 1
+    assert lines == []
+    assert evidence["main_surface_min_area_m2"] == pytest.approx(250000.0)
+    assert evidence["landmark_polygon_demotions"] == 1
+    assert evidence["isolated_polygon_drops"] == 1
 
 
 # ---------------------------------------------------------------------------

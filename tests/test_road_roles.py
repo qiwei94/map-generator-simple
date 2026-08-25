@@ -4,6 +4,7 @@ from shapely.geometry import LineString, Point
 
 from _TEXTURE_STYLE_OF_DEEPSEEK.road_roles import (
     COMPOSITION_ROLE_COLUMN,
+    _resolve_mid_frequency_budget,
     resolve_composed_road_width_m,
     resolve_printable_road_width_m,
     ring_corridor_identity,
@@ -12,6 +13,17 @@ from _TEXTURE_STYLE_OF_DEEPSEEK.road_roles import (
     resolve_visible_highways,
     select_road_roles,
 )
+
+
+def test_mid_frequency_budget_tracks_unserved_composition_cells():
+    sparse = _resolve_mid_frequency_budget(set(range(40)), grid_size=16)
+    dense = _resolve_mid_frequency_budget(set(range(200)), grid_size=16)
+
+    assert sparse["maximum_corridors"] == 64
+    assert dense["maximum_corridors"] == 20
+    assert sparse["maximum_corridors"] > dense["maximum_corridors"]
+    assert dense["method"] == "unserved_spatial_cells_v1"
+    assert dense["unserved_cells"] == 56
 
 
 def _roads():
@@ -576,6 +588,42 @@ def test_spatial_template_rejects_unmasked_parallel_mid_frequency_axis():
         "mid_frequency_supplement"]
     assert supplement["selected_corridors"] == 0
     assert supplement["rejected_parallel"] == 1
+
+
+def test_spatial_template_collapses_cross_identity_parallel_print_strips():
+    class Guide:
+        version = "synthetic-salience-v1"
+        template_policy_version = "synthetic-template-v1"
+
+        @staticmethod
+        def road_support(geometry):
+            return {
+                "covered_fraction": 0.95,
+                "any_template_fraction": 0.95,
+                "weighted_salience": 0.90,
+                "major_mask_fraction": 0.80,
+                "arterial_or_major_fraction": 0.90,
+                "context_mask_fraction": 0.0,
+            }
+
+    roads = gpd.GeoDataFrame({
+        "highway": ["primary", "primary"],
+        "name": ["Main Axis", "Frontage Axis"],
+        "geometry": [
+            LineString([(1000, 5000), (9000, 5000)]),
+            LineString([(1000, 5075), (9000, 5075)]),
+        ],
+    }, geometry="geometry", crs="EPSG:3857")
+
+    roles = select_road_roles(
+        roads, topology_tier=4, nozzle_real_m=50.0,
+        bbox_local=(0, 0, 10000, 10000), scale_mm_per_m=0.02,
+        visual_salience_guide=Guide(),
+    )
+
+    assert len(roles.visible) == 1
+    matching = roles.evidence["ink_budget"]["corridor_matching"]
+    assert matching["collapsed_cross_identity_corridors"] == 1
 
 
 def test_spatial_template_rejects_short_intersection_spur_but_keeps_corridor():
