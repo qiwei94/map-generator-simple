@@ -312,6 +312,8 @@ def main():
     ap.add_argument("--job-class", action="append", dest="job_classes",
                     choices=("styles", "draft", "full"),
                     help="允许领取的任务类型；可重复指定")
+    ap.add_argument("--ca-cert", default=os.environ.get("WORKER_CA_CERT", ""),
+                    help="私有 HTTPS 入口的 CA/服务器证书路径")
     ap.add_argument("--task-timeout", type=int, default=7200,
                     help="单任务最长秒数（默认 7200，即 2 小时）")
     ap.add_argument("--max-tasks", type=int, default=0,
@@ -327,6 +329,11 @@ def main():
 
     session = requests.Session()
     session.headers.update({"Authorization": f"Bearer {args.token}"})
+    if args.ca_cert:
+        ca_cert = Path(args.ca_cert).expanduser()
+        if not ca_cert.is_file():
+            ap.error(f"CA 证书不存在: {ca_cert}")
+        session.verify = str(ca_cert)
     capabilities = detect_capabilities(args.job_classes)
 
     def register() -> bool:
