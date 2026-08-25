@@ -442,8 +442,10 @@ def test_spatial_template_assigns_three_roles_without_copying_geometry():
         assert geometry.wkb == source_wkb[name]
 
     budget = roles.evidence["ink_budget"]
-    assert budget["method"] == "amap_spatial_template_existing_osm_v4"
+    assert budget["method"] == (
+        "amap_physical_corridor_skeleton_existing_osm_v6")
     assert "hard_ink_limit_ratio" not in budget
+    assert budget["corridor_matching"]["selected_corridors"] == 3
     assert budget["composition_roles"]["context"]["features"] == 1
 
 
@@ -487,7 +489,7 @@ def test_spatial_template_rejects_short_intersection_spur_but_keeps_corridor():
     assert len(roles.visible) == 5
 
 
-def test_spatial_template_restores_two_ended_osm_gap_with_exact_geometry():
+def test_spatial_template_selects_complete_corridor_across_mask_gap():
     class Guide:
         version = "synthetic-salience-v1"
         template_policy_version = "synthetic-template-v1"
@@ -524,13 +526,14 @@ def test_spatial_template_restores_two_ended_osm_gap_with_exact_geometry():
 
     assert len(roles.visible) == 3
     assert roles.visible.geometry.iloc[1].wkb == source_wkb
-    restoration = roles.evidence["ink_budget"]["continuity_restoration"]
-    assert restoration["restored_paths"] == 1
-    assert restoration["restored_features"] == 1
-    assert restoration["restored_roles"] == {"primary": 1}
+    budget = roles.evidence["ink_budget"]
+    matching = budget["corridor_matching"]
+    assert matching["selected_corridors"] == 1
+    assert matching["promoted_complete_path_features"] == 1
+    assert budget["continuity_restoration"]["restored_paths"] == 0
 
 
-def test_spatial_template_restores_bounded_link_in_confirmed_corridor():
+def test_spatial_template_keeps_required_bounded_link_in_complete_corridor():
     class Guide:
         version = "synthetic-salience-v1"
         template_policy_version = "synthetic-template-v1"
@@ -565,9 +568,8 @@ def test_spatial_template_restores_bounded_link_in_confirmed_corridor():
     )
 
     assert set(roles.visible["highway"]) == {"primary", "primary_link"}
-    restoration = roles.evidence["ink_budget"]["continuity_restoration"]
-    assert restoration["restored_features"] == 1
-    assert restoration["restored_link_features"] == 1
+    matching = roles.evidence["ink_budget"]["corridor_matching"]
+    assert matching["internal_link_features"] == 1
 
 
 def test_spatial_template_infers_aligned_unnamed_link_inside_same_ring():
@@ -604,9 +606,9 @@ def test_spatial_template_infers_aligned_unnamed_link_inside_same_ring():
     )
 
     assert set(roles.visible["highway"]) == {"trunk", "trunk_link"}
-    restoration = roles.evidence["ink_budget"]["continuity_restoration"]
-    assert restoration["inferred_corridor_paths"] == 1
-    assert restoration["restored_link_features"] == 1
+    matching = roles.evidence["ink_budget"]["corridor_matching"]
+    assert matching["physical_grouping"][
+        "cross_identity_continuation_pairs"] >= 1
 
 
 def test_spatial_template_closes_ring_even_when_other_side_is_connected():
@@ -649,11 +651,55 @@ def test_spatial_template_closes_ring_even_when_other_side_is_connected():
     )
 
     assert set(roles.visible["highway"]) == {"trunk", "trunk_link"}
-    restoration = roles.evidence["ink_budget"]["continuity_restoration"]
-    assert restoration["inferred_corridor_paths"] == 1
+    matching = roles.evidence["ink_budget"]["corridor_matching"]
+    assert matching["physical_grouping"][
+        "cross_identity_continuation_pairs"] >= 1
 
 
-def test_spatial_template_restores_longer_straight_semantic_corridor_gap():
+def test_spatial_template_matches_physical_route_across_name_and_class_change():
+    class Guide:
+        version = "synthetic-salience-v1"
+        template_policy_version = "synthetic-template-v1"
+
+        @staticmethod
+        def road_support(geometry):
+            supported = geometry.length > 1500
+            return {
+                "covered_fraction": 0.95 if supported else 0.0,
+                "any_template_fraction": 0.95 if supported else 0.0,
+                "weighted_salience": 0.90 if supported else 0.0,
+                "major_mask_fraction": 0.80 if supported else 0.0,
+                "arterial_or_major_fraction": 0.90 if supported else 0.0,
+                "context_mask_fraction": 0.0,
+            }
+
+    roads = gpd.GeoDataFrame({
+        "highway": ["primary", "secondary", "primary", "secondary"],
+        "name": ["Alpha Road", "Interchange", "Gamma Avenue", "Short Spur"],
+        "geometry": [
+            LineString([(1000, 5000), (4000, 5000)]),
+            LineString([(4000, 5000), (4200, 5000)]),
+            LineString([(4200, 5000), (9000, 5000)]),
+            LineString([(4000, 5000), (4000, 6000)]),
+        ],
+    }, geometry="geometry", crs="EPSG:3857")
+
+    roles = select_road_roles(
+        roads, topology_tier=4, nozzle_real_m=50.0,
+        bbox_local=(0, 0, 10000, 10000), scale_mm_per_m=0.02,
+        visual_salience_guide=Guide(),
+    )
+
+    assert set(roles.visible["name"]) == {
+        "Alpha Road", "Interchange", "Gamma Avenue"}
+    matching = roles.evidence["ink_budget"]["corridor_matching"]
+    assert matching["route_matching_method"] == (
+        "global_existing_osm_physical_corridors_v1")
+    assert matching["physical_grouping"][
+        "cross_identity_continuation_pairs"] >= 2
+
+
+def test_spatial_template_selects_complete_long_semantic_corridor():
     class Guide:
         version = "synthetic-salience-v1"
         template_policy_version = "synthetic-template-v1"
@@ -688,12 +734,12 @@ def test_spatial_template_restores_longer_straight_semantic_corridor_gap():
     )
 
     assert len(roles.visible) == 3
-    restoration = roles.evidence["ink_budget"]["continuity_restoration"]
-    assert restoration["semantic_paths"] == 1
-    assert restoration["restored_length_m"] == 600.0
+    matching = roles.evidence["ink_budget"]["corridor_matching"]
+    assert matching["selected_corridors"] == 1
+    assert matching["promoted_complete_path_features"] == 1
 
 
-def test_spatial_template_restores_offset_osm_segments_in_same_corridor():
+def test_spatial_template_joins_aligned_offset_osm_corridor_segments():
     class Guide:
         version = "synthetic-salience-v1"
         template_policy_version = "synthetic-template-v1"
@@ -728,8 +774,10 @@ def test_spatial_template_restores_offset_osm_segments_in_same_corridor():
     )
 
     assert len(roles.visible) == 3
-    restoration = roles.evidence["ink_budget"]["continuity_restoration"]
-    assert restoration["proximity_corridor_paths"] == 1
+    matching = roles.evidence["ink_budget"]["corridor_matching"]
+    assert matching["selected_corridors"] == 1
+    assert matching["joined_endpoint_pairs"] == 2
+    assert matching["promoted_complete_path_features"] == 1
 
 
 def test_spatial_template_rejects_nearby_offset_segment_with_other_identity():
@@ -849,7 +897,7 @@ def test_spatial_template_does_not_restore_one_ended_osm_branch():
         "restored_features"] == 0
 
 
-def test_spatial_template_rejects_gap_path_above_role_limit():
+def test_spatial_template_keeps_complete_named_corridor_without_gap_limit():
     class Guide:
         version = "synthetic-salience-v1"
         template_policy_version = "synthetic-template-v1"
@@ -884,9 +932,54 @@ def test_spatial_template_rejects_gap_path_above_role_limit():
         visual_salience_guide=Guide(),
     )
 
-    assert len(roles.visible) == 2
-    assert roles.evidence["ink_budget"]["continuity_restoration"][
-        "restored_features"] == 0
+    assert len(roles.visible) == 4
+    budget = roles.evidence["ink_budget"]
+    assert budget["corridor_matching"]["selected_corridors"] == 1
+    assert budget["corridor_matching"][
+        "promoted_complete_path_features"] == 2
+    assert budget["continuity_restoration"]["restored_features"] == 0
+
+
+def test_spatial_template_collapses_unprintable_parallel_carriageway():
+    class Guide:
+        version = "synthetic-salience-v1"
+        template_policy_version = "synthetic-template-v1"
+
+        @staticmethod
+        def road_support(geometry):
+            stronger = geometry.centroid.y < 5030
+            return {
+                "covered_fraction": 0.95 if stronger else 0.72,
+                "any_template_fraction": 0.95 if stronger else 0.72,
+                "weighted_salience": 0.90 if stronger else 0.62,
+                "major_mask_fraction": 0.80 if stronger else 0.55,
+                "arterial_or_major_fraction": 0.90,
+                "context_mask_fraction": 0.0,
+            }
+
+    roads = gpd.GeoDataFrame({
+        "highway": ["primary", "primary"],
+        "name": ["Main Axis", "Main Axis"],
+        "geometry": [
+            LineString([(1000, 5000), (9000, 5000)]),
+            LineString([(1000, 5040), (9000, 5040)]),
+        ],
+    }, geometry="geometry", crs="EPSG:3857")
+
+    roles = select_road_roles(
+        roads,
+        topology_tier=4,
+        nozzle_real_m=50.0,
+        bbox_local=(0, 0, 10000, 10000),
+        scale_mm_per_m=0.02,
+        visual_salience_guide=Guide(),
+    )
+
+    assert len(roles.visible) == 1
+    assert roles.visible.geometry.iloc[0].centroid.y == 5000
+    matching = roles.evidence["ink_budget"]["corridor_matching"]
+    assert matching["collapsed_parallel_corridors"] == 1
+    assert matching["collapsed_parallel_features"] == 1
 
 
 def test_spatial_template_prunes_multi_segment_dangling_thread():
@@ -925,9 +1018,15 @@ def test_spatial_template_prunes_multi_segment_dangling_thread():
     )
 
     assert list(roles.visible["name"]) == ["Main Axis"]
+    matching = roles.evidence["ink_budget"]["corridor_matching"]
+    assert matching["skeleton_dropped_corridors"] == 1
+    assert matching["skeleton_dropped_features"] == 2
+    assert matching["skeleton_dropped_length_m"] == 220.0
     pruning = roles.evidence["ink_budget"]["dangling_chain_pruning"]
-    assert pruning["removed_features"] == 2
-    assert pruning["removed_length_m"] == 220.0
+    assert pruning["method"] == (
+        "disabled_by_complete_corridor_leaf_graph_v1")
+    assert pruning["removed_features"] == 0
+    assert pruning["removed_length_m"] == 0.0
 
 
 def test_spatial_template_keeps_short_road_connected_at_both_ends():

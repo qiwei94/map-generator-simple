@@ -147,6 +147,9 @@ def build_composition_spec(
                 water_evidence.get("source_line_segments", 0)),
             "water_visible_segments": int(
                 water_evidence.get("visible_line_segments", 0)),
+            "road_corridor_matching": _json_value(
+                road_evidence.get("ink_budget", {}).get(
+                    "corridor_matching", {})),
             "road_continuity_restoration": _json_value(
                 road_evidence.get("ink_budget", {}).get(
                     "continuity_restoration", {})),

@@ -26,6 +26,12 @@ def _layers():
                 "background": {"role": "block_base_only", "features": 9},
             },
             "ink_budget": {
+                "corridor_matching": {
+                    "method": (
+                        "amap_seed_to_complete_osm_physical_corridor_v2"),
+                    "selected_corridors": 4,
+                    "promoted_complete_path_features": 7,
+                },
                 "continuity_restoration": {
                     "method": "two_ended_original_osm_path_v1",
                     "restored_features": 3,
@@ -81,6 +87,11 @@ def test_composition_spec_records_contract_and_identities_not_geometry():
         "amap-template-v1")
     assert "spatially matching" in (
         spec["decision_contract"]["salience_reference"])
+    assert spec["evidence"]["road_corridor_matching"] == {
+        "method": "amap_seed_to_complete_osm_physical_corridor_v2",
+        "selected_corridors": 4,
+        "promoted_complete_path_features": 7,
+    }
     assert spec["evidence"]["road_continuity_restoration"] == {
         "method": "two_ended_original_osm_path_v1",
         "restored_features": 3,

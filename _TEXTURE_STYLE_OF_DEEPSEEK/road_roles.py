@@ -27,7 +27,7 @@ from .buildings import ROAD_TIERS
 from .config import ROAD_DEFAULT_WIDTH_M, ROAD_FILTER, ROAD_WIDTHS
 
 
-POLICY_VERSION = "print-road-roles-v11"
+POLICY_VERSION = "print-road-roles-v12.9"
 COMPOSITION_ROLE_COLUMN = "_composition_role"
 
 # A role changes visual hierarchy, never source geometry.  The secondary and
@@ -84,7 +84,33 @@ _TEMPLATE_CORRIDOR_SNAP_FRAME_FRACTION = 0.0015
 _TEMPLATE_CORRIDOR_SNAP_MIN_M = 8.0
 _TEMPLATE_CORRIDOR_SNAP_MAX_M = 60.0
 _TEMPLATE_PROXIMITY_CONTINUATION_COSINE = 0.85
-
+_TEMPLATE_CORRIDOR_JOIN_COSINE = 0.88
+_TEMPLATE_CORRIDOR_JOIN_MIN_M = 6.0
+_TEMPLATE_CORRIDOR_JOIN_MAX_M = 45.0
+_TEMPLATE_PARALLEL_COLLAPSE_FACTOR = 1.10
+_TEMPLATE_PARALLEL_OVERLAP_FRACTION = 0.70
+_TEMPLATE_CORRIDOR_MIN_FRAME_FRACTIONS = {
+    "primary": 0.015,
+    "secondary": 0.022,
+    "context": 0.032,
+}
+_TEMPLATE_CORRIDOR_MIN_NOZZLE_FACTORS = {
+    "primary": 4.0,
+    "secondary": 6.0,
+    "context": 8.0,
+}
+_TEMPLATE_CORRIDOR_MIN_COVERAGE = {
+    "primary": 0.18,
+    "secondary": 0.26,
+    "context": 0.46,
+}
+_TEMPLATE_CORRIDOR_MIN_SEED_FRACTION = 0.10
+_TEMPLATE_SKELETON_LEAF_MIN_FRAME_FRACTIONS = {
+    "primary": 0.045,
+    "secondary": 0.060,
+    "context": 0.080,
+}
+_TEMPLATE_SKELETON_ISOLATED_FACTOR = 1.20
 _WIDTH_FACTORS = {
     "motorway": 1.35,
     "motorway_link": 1.10,
@@ -417,6 +443,707 @@ def _template_identity_for_row(row) -> str:
         if isinstance(value, str) and value.strip():
             return f"{column}:{value.strip().casefold()}"
     return ""
+
+
+def _build_physical_corridor_groups(
+    work: gpd.GeoDataFrame,
+    support_by_position: dict[int, dict[str, float]],
+    *,
+    endpoint_snap_m: float,
+    corridor_join_m: float,
+) -> tuple[list[list[int]], dict[str, Any]]:
+    """Partition OSM source ways into complete physical road corridors.
+
+    Semantic OSM identities are useful but not authoritative: a physical road
+    can change name/class at a bridge, interchange or administrative boundary.
+    Build the source topology *before* applying the raster template.  Ways of
+    one identity are joined first; at a real shared endpoint, remaining
+    half-edges are paired by their natural through direction and compatible
+    OSM class.  A T-junction therefore keeps its straight road together and
+    leaves the side branch as its own complete corridor.
+
+    The function only unions existing source features.  It neither creates
+    coordinates nor bridges a geometric gap between different identities.
+    """
+
+    parents = list(range(len(work)))
+
+    def find(position: int) -> int:
+        while parents[position] != position:
+            parents[position] = parents[parents[position]]
+            position = parents[position]
+        return position
+
+    def union(left: int, right: int) -> bool:
+        left_root = find(left)
+        right_root = find(right)
+        if left_root == right_root:
+            return False
+        parents[right_root] = left_root
+        return True
+
+    identities: dict[str, list[int]] = {}
+    identity_by_position: dict[int, str] = {}
+    for position, row in work.iterrows():
+        identity = _template_identity_for_row(row)
+        identity_by_position[int(position)] = identity
+        if identity:
+            identities.setdefault(identity, []).append(int(position))
+
+    semantic_pairs = 0
+    aligned_semantic_pairs = 0
+    claimed_semantic_terminals: set[tuple[int, int]] = set()
+    bucket_size = max(corridor_join_m, endpoint_snap_m)
+    for positions in identities.values():
+        endpoint_buckets: dict[tuple[int, int], list[tuple[
+            int, int, Point, tuple[float, float] | None,
+        ]]] = {}
+        pair_candidates = []
+        for position in positions:
+            row = work.iloc[position]
+            terminals = _line_terminals(row.geometry)
+            if terminals is None:
+                continue
+            for terminal_index, point in enumerate(terminals):
+                direction = _terminal_direction(row.geometry, terminal_index)
+                bx = int(math.floor(point.x / bucket_size))
+                by = int(math.floor(point.y / bucket_size))
+                for dx in (-1, 0, 1):
+                    for dy in (-1, 0, 1):
+                        for (other, other_terminal, other_point,
+                             other_direction) in \
+                                endpoint_buckets.get((bx + dx, by + dy), []):
+                            if other == position:
+                                continue
+                            distance_m = point.distance(other_point)
+                            exact_join = distance_m <= endpoint_snap_m
+                            if direction is None or other_direction is None:
+                                continue
+                            continuation = -(
+                                direction[0] * other_direction[0]
+                                + direction[1] * other_direction[1]
+                            )
+                            aligned_join = bool(
+                                not exact_join
+                                and distance_m <= corridor_join_m
+                                and _road_classes_compatible(
+                                    row.get("highway"),
+                                    work.iloc[other].get("highway"))
+                                and continuation
+                                >= _TEMPLATE_CORRIDOR_JOIN_COSINE
+                            )
+                            if exact_join or aligned_join:
+                                left_key = (other, other_terminal)
+                                right_key = (position, terminal_index)
+                                score = (
+                                    (2.0 if exact_join else 0.0)
+                                    + continuation * 3.0
+                                    - distance_m / max(corridor_join_m, 1.0)
+                                    - (2.0 if (
+                                        str(row.get("highway") or "")
+                                        .endswith("_link")
+                                        or str(work.iloc[other].get(
+                                            "highway") or "")
+                                        .endswith("_link")) else 0.0)
+                                )
+                                pair_candidates.append((
+                                    score, continuation, exact_join,
+                                    left_key, right_key,
+                                ))
+                endpoint_buckets.setdefault((bx, by), []).append(
+                    (position, terminal_index, point, direction))
+
+        # A road identity may branch at an interchange.  Pair half-edges,
+        # never whole connected components: each source endpoint is allowed
+        # one natural continuation, so the result remains a path or ring.
+        pair_candidates.sort(
+            key=lambda item: (-item[0], -item[1], item[3], item[4]))
+        used_terminals: set[tuple[int, int]] = set()
+        for _, _, exact_join, left_key, right_key in pair_candidates:
+            if left_key in used_terminals or right_key in used_terminals:
+                continue
+            used_terminals.add(left_key)
+            used_terminals.add(right_key)
+            claimed_semantic_terminals.add(left_key)
+            claimed_semantic_terminals.add(right_key)
+            union(left_key[0], right_key[0])
+            semantic_pairs += 1
+            aligned_semantic_pairs += int(not exact_join)
+
+    # Cluster terminals that are factually coincident in OSM.  Cross-name
+    # pairing is deliberately limited to these shared endpoints; the aligned
+    # gap allowance above is reserved for one explicit semantic identity.
+    terminal_directions: dict[
+        tuple[int, int], tuple[float, float] | None] = {}
+    terminal_neighbors: dict[
+        tuple[int, int], set[tuple[int, int]]] = {}
+    endpoint_bucket_size = max(endpoint_snap_m, 0.5)
+    endpoint_buckets: dict[
+        tuple[int, int], list[tuple[int, int, Point]]] = {}
+    for position, row in work.iterrows():
+        terminals = _line_terminals(row.geometry)
+        if terminals is None:
+            continue
+        for terminal_index, point in enumerate(terminals):
+            key = (int(position), terminal_index)
+            terminal_directions[key] = _terminal_direction(
+                row.geometry, terminal_index)
+            terminal_neighbors.setdefault(key, set())
+            bx = int(math.floor(point.x / endpoint_bucket_size))
+            by = int(math.floor(point.y / endpoint_bucket_size))
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    for other_position, other_terminal, other_point in \
+                            endpoint_buckets.get((bx + dx, by + dy), []):
+                        if point.distance(other_point) > endpoint_snap_m:
+                            continue
+                        other_key = (other_position, other_terminal)
+                        terminal_neighbors[key].add(other_key)
+                        terminal_neighbors.setdefault(other_key, set()).add(
+                            key)
+            endpoint_buckets.setdefault((bx, by), []).append(
+                (int(position), terminal_index, point))
+
+    node_components: list[list[tuple[int, int]]] = []
+    unseen = set(terminal_neighbors)
+    while unseen:
+        start = min(unseen)
+        stack = [start]
+        unseen.remove(start)
+        node = []
+        while stack:
+            current = stack.pop()
+            node.append(current)
+            for neighbor in terminal_neighbors.get(current, ()):
+                if neighbor in unseen:
+                    unseen.remove(neighbor)
+                    stack.append(neighbor)
+        if len(node) > 1:
+            node_components.append(sorted(node))
+
+    physical_pairs = 0
+    cross_identity_pairs = 0
+    ambiguous_nodes = 0
+    for node in node_components:
+        pair_candidates = []
+        for offset, left_key in enumerate(node):
+            if left_key in claimed_semantic_terminals:
+                continue
+            left_position, _ = left_key
+            left_direction = terminal_directions.get(left_key)
+            if left_direction is None:
+                continue
+            for right_key in node[offset + 1:]:
+                if right_key in claimed_semantic_terminals:
+                    continue
+                right_position, _ = right_key
+                if left_position == right_position:
+                    continue
+                if find(left_position) == find(right_position):
+                    continue
+                right_direction = terminal_directions.get(right_key)
+                if right_direction is None:
+                    continue
+                if not _road_classes_compatible(
+                        work.iloc[left_position].get("highway"),
+                        work.iloc[right_position].get("highway")):
+                    continue
+                continuation = -(
+                    left_direction[0] * right_direction[0]
+                    + left_direction[1] * right_direction[1]
+                )
+                # A degree-two source junction can be a genuine bend.  At a
+                # multi-way junction demand a strong through direction so a
+                # perpendicular side road never joins the skeleton corridor.
+                minimum_continuation = 0.20 if len(node) == 2 else 0.70
+                if continuation < minimum_continuation:
+                    continue
+                left_support = float(support_by_position.get(
+                    left_position, {}).get("weighted_salience", 0.0))
+                right_support = float(support_by_position.get(
+                    right_position, {}).get("weighted_salience", 0.0))
+                left_rank = _road_class_rank(
+                    work.iloc[left_position].get("highway"))
+                right_rank = _road_class_rank(
+                    work.iloc[right_position].get("highway"))
+                class_bonus = 0.0
+                if left_rank is not None and right_rank is not None:
+                    class_bonus = 0.30 if left_rank == right_rank else 0.10
+                score = (
+                    continuation * 4.0
+                    + min(left_support, right_support) * 0.35
+                    + class_bonus
+                )
+                pair_candidates.append((
+                    score, continuation, left_key, right_key,
+                ))
+        pair_candidates.sort(
+            key=lambda item: (-item[0], -item[1], item[2], item[3]))
+        used_half_edges: set[tuple[int, int]] = set()
+        accepted_at_node = 0
+        for _, _, left_key, right_key in pair_candidates:
+            if left_key in used_half_edges or right_key in used_half_edges:
+                continue
+            left_position = left_key[0]
+            right_position = right_key[0]
+            if find(left_position) == find(right_position):
+                continue
+            left_identity = identity_by_position.get(left_position, "")
+            right_identity = identity_by_position.get(right_position, "")
+            if union(left_position, right_position):
+                physical_pairs += 1
+                cross_identity_pairs += int(
+                    left_identity != right_identity)
+                accepted_at_node += 1
+                used_half_edges.add(left_key)
+                used_half_edges.add(right_key)
+        if len(pair_candidates) > accepted_at_node and len(node) > 2:
+            ambiguous_nodes += 1
+
+    components: dict[int, list[int]] = {}
+    for position in range(len(work)):
+        components.setdefault(find(position), []).append(position)
+    groups = [sorted(positions) for positions in components.values()]
+    groups.sort(key=lambda positions: positions[0])
+    return groups, {
+        "method": "global_existing_osm_physical_corridors_v1",
+        "semantic_identities": len(identities),
+        "semantic_join_pairs": semantic_pairs,
+        "aligned_semantic_join_pairs": aligned_semantic_pairs,
+        "topology_nodes": len(node_components),
+        "physical_continuation_pairs": physical_pairs,
+        "cross_identity_continuation_pairs": cross_identity_pairs,
+        "ambiguous_topology_nodes": ambiguous_nodes,
+        "physical_corridors": len(groups),
+        "geometry_policy": "union_existing_osm_features_only",
+    }
+
+
+def _match_template_corridors(
+    work: gpd.GeoDataFrame,
+    provisional_roles: dict[int, str],
+    support_by_position: dict[int, dict[str, float]],
+    *,
+    bbox_local,
+    nozzle_real_m: float,
+) -> tuple[dict[int, str], dict[str, Any]]:
+    """Promote complete OSM corridors from sparse template-supported seeds.
+
+    A cartographic raster is good at saying *which corridor matters* but poor
+    at selecting individual OSM ways: palette gaps and wide antialiasing masks
+    respectively create broken roads and perpendicular thread-like fragments.
+    This matcher therefore treats per-feature mask hits only as seeds.  Before
+    any raster score is applied, existing OSM half-edges are paired into
+    physical corridors by semantic identity, endpoint topology, natural
+    continuation and compatible road class.  Each resulting path/ring is then
+    scored and selected atomically.  No geometry is generated or modified.
+
+    Parallel carriageway components closer than one printable strip are not
+    independently useful at 15/25 km scale.  When their routes substantially
+    overlap, only the better-supported source component remains visible; all
+    source roads remain available to topology and Block base.
+    """
+
+    xmin, ymin, xmax, ymax = (float(value) for value in bbox_local)
+    frame_span = max(xmax - xmin, ymax - ymin, 1.0)
+    endpoint_snap_m = max(0.5, min(2.0, frame_span * 0.00004))
+    corridor_join_m = min(
+        _TEMPLATE_CORRIDOR_JOIN_MAX_M,
+        max(_TEMPLATE_CORRIDOR_JOIN_MIN_M, nozzle_real_m * 0.75),
+    )
+    parallel_collapse_m = max(
+        endpoint_snap_m * 2.0,
+        nozzle_real_m * _TEMPLATE_PARALLEL_COLLAPSE_FACTOR,
+    )
+    role_rank = {"primary": 0, "secondary": 1, "context": 2}
+
+    identities: dict[str, list[int]] = {}
+    for position, row in work.iterrows():
+        identity = _template_identity_for_row(row)
+        if identity:
+            identities.setdefault(identity, []).append(int(position))
+
+    physical_groups, physical_grouping_evidence = \
+        _build_physical_corridor_groups(
+            work,
+            support_by_position,
+            endpoint_snap_m=endpoint_snap_m,
+            corridor_join_m=corridor_join_m,
+        )
+
+    corridor_records: list[dict[str, Any]] = []
+    component_count = 0
+    joined_endpoint_pairs = 0
+
+    for positions in physical_groups:
+        group_identities = sorted({
+            identity
+            for position in positions
+            if (identity := _template_identity_for_row(work.iloc[position]))
+        })
+        identity = (
+            "physical:" + "|".join(group_identities)
+            if group_identities else f"physical:anonymous:{positions[0]}"
+        )
+        parents = {position: position for position in positions}
+
+        def find(position: int) -> int:
+            while parents[position] != position:
+                parents[position] = parents[parents[position]]
+                position = parents[position]
+            return position
+
+        def union(left: int, right: int) -> None:
+            left_root = find(left)
+            right_root = find(right)
+            if left_root != right_root:
+                parents[right_root] = left_root
+
+        # A small spatial bucket keeps the endpoint join near-linear even for
+        # long named urban arterials split into hundreds of OSM ways.
+        bucket_size = max(corridor_join_m, endpoint_snap_m)
+        endpoint_buckets: dict[tuple[int, int], list[tuple[
+            int, Point, tuple[float, float] | None,
+        ]]] = {}
+        for position in positions:
+            row = work.iloc[position]
+            terminals = _line_terminals(row.geometry)
+            if terminals is None:
+                continue
+            for terminal_index, point in enumerate(terminals):
+                direction = _terminal_direction(row.geometry, terminal_index)
+                bx = int(math.floor(point.x / bucket_size))
+                by = int(math.floor(point.y / bucket_size))
+                for dx in (-1, 0, 1):
+                    for dy in (-1, 0, 1):
+                        for other, other_point, other_direction in \
+                                endpoint_buckets.get((bx + dx, by + dy), []):
+                            if other == position:
+                                continue
+                            distance_m = point.distance(other_point)
+                            exact_join = distance_m <= endpoint_snap_m
+                            aligned_join = False
+                            if (not exact_join
+                                    and distance_m <= corridor_join_m
+                                    and direction is not None
+                                    and other_direction is not None
+                                    and _road_classes_compatible(
+                                        row.get("highway"),
+                                        work.iloc[other].get("highway"))):
+                                continuation = -(
+                                    direction[0] * other_direction[0]
+                                    + direction[1] * other_direction[1]
+                                )
+                                aligned_join = (
+                                    continuation
+                                    >= _TEMPLATE_CORRIDOR_JOIN_COSINE)
+                            if exact_join or aligned_join:
+                                before = find(position) != find(other)
+                                union(position, other)
+                                joined_endpoint_pairs += int(before)
+                endpoint_buckets.setdefault((bx, by), []).append(
+                    (position, point, direction))
+
+        components: dict[int, list[int]] = {}
+        for position in positions:
+            components.setdefault(find(position), []).append(position)
+
+        for component_positions in components.values():
+            component_count += 1
+            lengths = {
+                position: float(work.iloc[position].geometry.length)
+                for position in component_positions
+            }
+            total_length_m = sum(lengths.values())
+            if total_length_m <= 0:
+                continue
+            seed_positions = [
+                position for position in component_positions
+                if position in provisional_roles
+            ]
+            if not seed_positions:
+                continue
+            seed_lengths = {role: 0.0 for role in role_rank}
+            for position in seed_positions:
+                seed_lengths[provisional_roles[position]] += lengths[position]
+            seed_threshold_m = max(
+                nozzle_real_m * 1.5,
+                total_length_m * 0.08,
+            )
+            eligible_roles = [
+                role for role in role_rank
+                if seed_lengths[role] >= seed_threshold_m
+            ]
+            if not eligible_roles:
+                continue
+            role = min(eligible_roles, key=role_rank.get)
+            covered_length_m = sum(
+                lengths[position] * float(
+                    support_by_position.get(position, {}).get(
+                        "any_template_fraction",
+                        support_by_position.get(position, {}).get(
+                            "covered_fraction", 0.0),
+                    ))
+                for position in component_positions
+            )
+            weighted_length_m = sum(
+                lengths[position] * float(
+                    support_by_position.get(position, {}).get(
+                        "weighted_salience", 0.0))
+                for position in component_positions
+            )
+            coverage = covered_length_m / total_length_m
+            weighted_support = weighted_length_m / total_length_m
+            seed_fraction = sum(
+                lengths[position] for position in seed_positions
+            ) / total_length_m
+            minimum_length_m = max(
+                frame_span * _TEMPLATE_CORRIDOR_MIN_FRAME_FRACTIONS[role],
+                nozzle_real_m * _TEMPLATE_CORRIDOR_MIN_NOZZLE_FACTORS[role],
+            )
+            if (total_length_m < minimum_length_m
+                    or coverage < _TEMPLATE_CORRIDOR_MIN_COVERAGE[role]
+                    or seed_fraction < _TEMPLATE_CORRIDOR_MIN_SEED_FRACTION):
+                continue
+            geometry = unary_union([
+                work.iloc[position].geometry
+                for position in component_positions
+            ])
+            corridor_records.append({
+                "identity": identity,
+                "positions": set(component_positions),
+                "role": role,
+                "geometry": geometry,
+                "length_m": total_length_m,
+                "coverage": coverage,
+                "weighted_support": weighted_support,
+                "seed_features": len(seed_positions),
+                "protected": any(
+                    _truthy_osm_tag(work.iloc[position].get("bridge"))
+                    or _truthy_osm_tag(work.iloc[position].get("tunnel"))
+                    for position in component_positions
+                ),
+                "score": (
+                    (3 - role_rank[role]) * 10.0
+                    + coverage * 3.0
+                    + weighted_support
+                    + min(1.0, total_length_m / frame_span)
+                ),
+            })
+
+    # Collapse only strongly overlapping components of the same semantic
+    # road.  End-to-end pieces remain separate and are both retained.
+    dropped_record_indexes: set[int] = set()
+    records_by_identity: dict[str, list[int]] = {}
+    for index, record in enumerate(corridor_records):
+        records_by_identity.setdefault(record["identity"], []).append(index)
+    collapsed_parallel_corridors = 0
+    collapsed_parallel_features = 0
+    for indexes in records_by_identity.values():
+        for offset, left_index in enumerate(indexes):
+            if left_index in dropped_record_indexes:
+                continue
+            for right_index in indexes[offset + 1:]:
+                if right_index in dropped_record_indexes:
+                    continue
+                left = corridor_records[left_index]
+                right = corridor_records[right_index]
+                try:
+                    left_near = float(left["geometry"].intersection(
+                        right["geometry"].buffer(
+                            parallel_collapse_m)).length) / max(
+                                float(left["length_m"]), 1.0)
+                    right_near = float(right["geometry"].intersection(
+                        left["geometry"].buffer(
+                            parallel_collapse_m)).length) / max(
+                                float(right["length_m"]), 1.0)
+                except Exception:
+                    continue
+                if max(left_near, right_near) \
+                        < _TEMPLATE_PARALLEL_OVERLAP_FRACTION:
+                    continue
+                # Prefer the component covering more of the route, then the
+                # one more strongly supported by the cartographic skeleton.
+                left_choice = (
+                    float(left["length_m"]), float(left["score"]))
+                right_choice = (
+                    float(right["length_m"]), float(right["score"]))
+                loser = right_index if left_choice >= right_choice else left_index
+                dropped_record_indexes.add(loser)
+                collapsed_parallel_corridors += 1
+                collapsed_parallel_features += len(
+                    corridor_records[loser]["positions"])
+                if loser == left_index:
+                    break
+
+    # Turn the selected *corridors* into the visual skeleton before expanding
+    # them back to individual OSM features.  This is deliberately one level
+    # above the old leaf-feature pruning: a short side street is rejected as a
+    # whole corridor, while every source way belonging to a retained corridor
+    # survives together.  It therefore cannot re-introduce gaps after the
+    # whole-path match.
+    active_record_indexes = {
+        index for index in range(len(corridor_records))
+        if index not in dropped_record_indexes
+    }
+    skeleton_connection_m = max(
+        endpoint_snap_m * 2.0,
+        min(18.0, nozzle_real_m * 0.22),
+    )
+    frame_margin_m = max(
+        skeleton_connection_m,
+        min(nozzle_real_m * 1.25, frame_span * 0.004),
+    )
+    record_neighbors: dict[int, set[int]] = {
+        index: set() for index in active_record_indexes
+    }
+    active_sorted = sorted(active_record_indexes)
+    for offset, left_index in enumerate(active_sorted):
+        left_geometry = corridor_records[left_index]["geometry"]
+        for right_index in active_sorted[offset + 1:]:
+            right_geometry = corridor_records[right_index]["geometry"]
+            if left_geometry.distance(right_geometry) > skeleton_connection_m:
+                continue
+            record_neighbors[left_index].add(right_index)
+            record_neighbors[right_index].add(left_index)
+
+    def _record_reaches_frame(index: int) -> bool:
+        gxmin, gymin, gxmax, gymax = corridor_records[index]["geometry"].bounds
+        return (gxmin - xmin <= frame_margin_m
+                or xmax - gxmax <= frame_margin_m
+                or gymin - ymin <= frame_margin_m
+                or ymax - gymax <= frame_margin_m)
+
+    skeleton_dropped_indexes: set[int] = set()
+    # Iteration matters: removing a decorative leaf can reveal another short
+    # leaf behind it.  The unit is always a complete semantic source corridor.
+    while True:
+        remaining = active_record_indexes - skeleton_dropped_indexes
+        newly_dropped: set[int] = set()
+        for index in sorted(remaining):
+            record = corridor_records[index]
+            identity = str(record["identity"])
+            if (identity.startswith(("numbered-ring:", "named-ring:"))
+                    or bool(record.get("protected"))
+                    or _record_reaches_frame(index)):
+                continue
+            degree = sum(
+                neighbor in remaining
+                for neighbor in record_neighbors[index]
+            )
+            role = str(record["role"])
+            minimum_leaf_length_m = max(
+                frame_span
+                * _TEMPLATE_SKELETON_LEAF_MIN_FRAME_FRACTIONS[role],
+                nozzle_real_m
+                * _TEMPLATE_CORRIDOR_MIN_NOZZLE_FACTORS[role],
+            )
+            if (degree == 0
+                    and float(record["length_m"])
+                    < minimum_leaf_length_m
+                    * _TEMPLATE_SKELETON_ISOLATED_FACTOR):
+                newly_dropped.add(index)
+            elif (degree == 1
+                  and float(record["length_m"]) < minimum_leaf_length_m):
+                newly_dropped.add(index)
+        newly_dropped -= skeleton_dropped_indexes
+        if not newly_dropped:
+            break
+        skeleton_dropped_indexes.update(newly_dropped)
+
+    dropped_record_indexes.update(skeleton_dropped_indexes)
+    skeleton_dropped_features = sum(
+        len(corridor_records[index]["positions"])
+        for index in skeleton_dropped_indexes
+    )
+    skeleton_dropped_length_m = sum(
+        float(corridor_records[index]["length_m"])
+        for index in skeleton_dropped_indexes
+    )
+    skeleton_dropped_roles: dict[str, int] = {}
+    for index in skeleton_dropped_indexes:
+        role = str(corridor_records[index]["role"])
+        skeleton_dropped_roles[role] = (
+            skeleton_dropped_roles.get(role, 0) + 1)
+
+    selected_roles: dict[int, str] = {}
+    selected_corridors = 0
+    internal_link_features = 0
+
+    for index, record in enumerate(corridor_records):
+        if index in dropped_record_indexes:
+            continue
+        selected_corridors += 1
+        role = record["role"]
+        for position in record["positions"]:
+            highway = str(work.iloc[position].get("highway") or "")
+            if highway.endswith("_link"):
+                # Membership was resolved while building the complete
+                # physical corridor.  Re-running the legacy per-link
+                # component search here is both patch-oriented and quadratic
+                # on metropolitan corridors.
+                selected_roles[position] = "connector"
+                internal_link_features += 1
+                continue
+            previous = selected_roles.get(position)
+            if previous is None or role_rank[role] < role_rank[previous]:
+                selected_roles[position] = role
+
+    # Anonymous OSM ways cannot form a trustworthy semantic corridor.  Keep
+    # only exceptionally long, strongly mask-supported source features; short
+    # anonymous hits are the classic perpendicular mask-overlap threads.
+    anonymous_selected = 0
+    for position, role in provisional_roles.items():
+        if _template_identity_for_row(work.iloc[position]):
+            continue
+        geometry = work.iloc[position].geometry
+        support = support_by_position.get(position, {})
+        coverage = float(support.get(
+            "any_template_fraction", support.get("covered_fraction", 0.0)))
+        minimum_length_m = max(frame_span * 0.035, nozzle_real_m * 8.0)
+        if float(geometry.length) >= minimum_length_m and coverage >= 0.70:
+            selected_roles[position] = role
+            anonymous_selected += 1
+
+    selected_positions = set(selected_roles)
+    provisional_positions = set(provisional_roles)
+    return selected_roles, {
+        "method": "amap_seed_to_complete_osm_physical_corridor_v2",
+        "seed_features": len(provisional_roles),
+        "semantic_identities": len(identities),
+        "corridor_components": component_count,
+        "selected_corridors": selected_corridors,
+        "selected_features": len(selected_roles),
+        "promoted_complete_path_features": len(
+            selected_positions - provisional_positions),
+        "rejected_seed_features": len(
+            provisional_positions - selected_positions),
+        "joined_endpoint_pairs": joined_endpoint_pairs,
+        "anonymous_selected_features": anonymous_selected,
+        "internal_link_features": internal_link_features,
+        "route_matching_method": "global_existing_osm_physical_corridors_v1",
+        "physical_grouping": physical_grouping_evidence,
+        "endpoint_snap_m": round(endpoint_snap_m, 3),
+        "corridor_join_m": round(corridor_join_m, 3),
+        "parallel_collapse_m": round(parallel_collapse_m, 3),
+        "parallel_overlap_fraction": (
+            _TEMPLATE_PARALLEL_OVERLAP_FRACTION),
+        "collapsed_parallel_corridors": collapsed_parallel_corridors,
+        "collapsed_parallel_features": collapsed_parallel_features,
+        "skeleton_method": "complete_corridor_leaf_graph_v1",
+        "skeleton_connection_m": round(skeleton_connection_m, 3),
+        "skeleton_frame_margin_m": round(frame_margin_m, 3),
+        "skeleton_leaf_min_frame_fractions": dict(
+            _TEMPLATE_SKELETON_LEAF_MIN_FRAME_FRACTIONS),
+        "skeleton_dropped_corridors": len(skeleton_dropped_indexes),
+        "skeleton_dropped_features": skeleton_dropped_features,
+        "skeleton_dropped_length_m": round(
+            skeleton_dropped_length_m, 3),
+        "skeleton_dropped_roles": skeleton_dropped_roles,
+        "minimum_coverage": dict(_TEMPLATE_CORRIDOR_MIN_COVERAGE),
+        "minimum_seed_fraction": _TEMPLATE_CORRIDOR_MIN_SEED_FRACTION,
+        "geometry_policy": "select_complete_source_corridor_never_draw_mask",
+    }
 
 
 def _restore_template_continuity(
@@ -1295,7 +2022,6 @@ def _apply_amap_spatial_template(
         }
 
     minimum_length_m = max(nozzle_real_m * 1.25, frame_span * 0.0025)
-    role_by_position: dict[int, str] = {}
     provisional_roles: dict[int, str] = {}
     support_by_position: dict[int, dict[str, float]] = {}
     identity_stats: dict[str, dict[str, float]] = {}
@@ -1361,12 +2087,13 @@ def _apply_amap_spatial_template(
     # 100% pixel overlap even though it is only an intersection spur.  Keep a
     # short fragment only when its full named/ref corridor has sustained
     # template coverage; long fragments are strong enough on their own.
+    seed_roles: dict[int, str] = {}
     for pos, role in provisional_roles.items():
         row = work.iloc[pos]
         geometry = row.geometry
         length_m = float(geometry.length)
         if length_m >= minimum_length_m:
-            role_by_position[pos] = role
+            seed_roles[pos] = role
             continue
         identity = _template_identity_for_row(row)
         stats = identity_stats.get(identity, {}) if identity else {}
@@ -1381,30 +2108,53 @@ def _apply_amap_spatial_template(
                 and corridor_coverage >= 0.34
                 and supported_length >= minimum_length_m * 4.0
                 and fragment_coverage >= 0.52):
-            role_by_position[pos] = role
+            seed_roles[pos] = role
 
-    # Repair only bounded paths made from original OSM features.  This catches
-    # palette/segmentation holes and the few link features needed to keep a
-    # confirmed corridor connected, without inventing replacement geometry.
-    before_continuity_positions = set(role_by_position)
-    role_by_position, continuity_evidence = _restore_template_continuity(
+    # The raster match above supplies evidence seeds, never the final visible
+    # selection.  Match those seeds to complete semantic OSM corridors in one
+    # pass so palette gaps do not produce a collection of fragments that then
+    # needs hundreds of local continuity patches.
+    role_by_position, corridor_matching_evidence = _match_template_corridors(
         work,
-        role_by_position,
+        seed_roles,
         support_by_position,
         bbox_local=bbox_local,
+        nozzle_real_m=nozzle_real_m,
     )
-    connector_positions: set[int] = set()
+    connector_positions = {
+        position for position, role in role_by_position.items()
+        if role == "connector"
+    }
 
-    role_by_position, dangling_chain_evidence = (
-        _prune_template_dangling_chains(
-            work,
-            role_by_position,
-            bbox_local=bbox_local,
-        )
-    )
-    restored_positions = (
-        set(role_by_position) - before_continuity_positions)
-    continuity_evidence["retained_after_pruning"] = len(restored_positions)
+    continuity_evidence = {
+        "method": "disabled_by_corridor_first_selection_v1",
+        "eligible_missing_features": 0,
+        "anchor_nodes": 0,
+        "restored_paths": 0,
+        "component_bridge_paths": 0,
+        "same_component_corridor_paths": 0,
+        "semantic_paths": 0,
+        "proximity_corridor_paths": 0,
+        "inferred_corridor_paths": 0,
+        "mask_supported_paths": 0,
+        "restored_features": 0,
+        "restored_length_m": 0.0,
+        "restored_link_features": 0,
+        "restored_roles": {},
+    }
+
+    # Corridor-level skeleton pruning already rejected decorative leaves as
+    # whole paths.  Running the legacy feature-level pruner here would punch
+    # fresh gaps into those complete paths and undo the central v12 contract.
+    dangling_chain_evidence = {
+        "method": "disabled_by_complete_corridor_leaf_graph_v1",
+        "candidate_features": len(role_by_position),
+        "traced_leaf_chains": 0,
+        "removed_features": 0,
+        "removed_length_m": 0.0,
+        "removed_roles": {},
+    }
+    continuity_evidence["retained_after_pruning"] = 0
 
     selected_positions = set(role_by_position)
     selected = work.iloc[sorted(selected_positions)].copy()
@@ -1470,7 +2220,7 @@ def _apply_amap_spatial_template(
         getattr(visual_salience_guide, "reference", None), "evidence", {}) or {}
     composition_roles = {
         "schema_version": "1.0",
-        "method": "amap_spatial_template_to_osm_roles_v4",
+        "method": "amap_physical_corridor_skeleton_to_osm_roles_v6",
         "primary": _role_evidence("primary"),
         "secondary": _role_evidence("secondary"),
         "context": _role_evidence("context"),
@@ -1489,7 +2239,7 @@ def _apply_amap_spatial_template(
     })
     return selected, {
         "applied": True,
-        "method": "amap_spatial_template_existing_osm_v4",
+        "method": "amap_physical_corridor_skeleton_existing_osm_v6",
         "candidate_features": len(work),
         "selected_features": len(selected),
         "selected_estimated_ink_ratio": round(selected_ink, 6),
@@ -1513,6 +2263,7 @@ def _apply_amap_spatial_template(
             "short_supported_length_factor": 4.0,
             "short_fragment_coverage": 0.52,
         },
+        "corridor_matching": corridor_matching_evidence,
         "continuity_restoration": continuity_evidence,
         "dangling_chain_pruning": dangling_chain_evidence,
         "visual_salience": {
