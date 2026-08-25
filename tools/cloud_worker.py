@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+from __future__ import annotations
 """本机 worker：轮询云端 server，拉取任务 → 本地执行 → 上传产物 → 标记完成。
 
 用法：
@@ -15,9 +16,12 @@ import argparse
 import hashlib
 import json
 import os
+import platform
+import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -27,6 +31,18 @@ import requests
 _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
+_WEBAPP = _ROOT / "webapp"
+if str(_WEBAPP) not in sys.path:
+    sys.path.insert(0, str(_WEBAPP))
+
+from progress_protocol import progress_from_log  # noqa: E402
+
+
+_ALLOWED_ENTRYPOINTS = {
+    "generate_city_legacy.py",
+    "tools/gen_area_gallery.py",
+    "tools/generate_gallery_draft.py",
+}
 
 
 def sha256_file(path: Path) -> str:
@@ -37,15 +53,104 @@ def sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
+def _memory_mb() -> int:
+    try:
+        pages = os.sysconf("SC_PHYS_PAGES")
+        page_size = os.sysconf("SC_PAGE_SIZE")
+        return int(pages * page_size / 1024 / 1024)
+    except (AttributeError, OSError, ValueError):
+        return 0
+
+
+def _git_revision() -> str:
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"], cwd=_ROOT,
+            stderr=subprocess.DEVNULL, text=True, timeout=5).strip()
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+
+
+def detect_capabilities(job_classes: list[str] | None = None) -> dict:
+    """Describe only scheduling-relevant, non-sensitive worker properties."""
+    pbf_files = sorted(path.name for path in (_ROOT / "pbf_cache").glob(
+        "*.pbf"))
+    dem_roots = [Path(os.environ.get("MAP_DEM_DIR", ""))]
+    dem_roots.extend([_ROOT / "dem_cache", _ROOT / "data" / "dem"])
+    dem_tiles = set()
+    for root in dem_roots:
+        if str(root) and root.is_dir():
+            for pattern in ("*.hgt", "*.tif", "*.tiff"):
+                dem_tiles.update(path.name for path in root.glob(pattern))
+    try:
+        free_mb = int(shutil.disk_usage(_ROOT).free / 1024 / 1024)
+    except OSError:
+        free_mb = 0
+    return {
+        "protocol_version": 1,
+        "platform": platform.system().lower(),
+        "arch": platform.machine().lower(),
+        "cpu_threads": os.cpu_count() or 1,
+        "memory_mb": _memory_mb(),
+        "free_disk_mb": free_mb,
+        "job_classes": job_classes or ["styles", "draft", "full"],
+        "max_concurrency": 1,
+        "pbf_files": pbf_files,
+        "dem_tiles": sorted(dem_tiles),
+        "native_osmium": shutil.which("osmium") is not None,
+        "renderer_version": _git_revision(),
+    }
+
+
+def _prepare_command(spec: dict) -> tuple[list[str], tempfile.TemporaryDirectory | None]:
+    """Validate a versioned task and materialize its small inline files."""
+    task = spec.get("task")
+    if task:
+        entrypoint = str(task.get("entrypoint") or "")
+        if entrypoint not in _ALLOWED_ENTRYPOINTS:
+            raise ValueError(f"worker entrypoint 未列入白名单: {entrypoint}")
+        args = task.get("args") or []
+        if not isinstance(args, list) or not all(
+                isinstance(item, str) for item in args):
+            raise ValueError("worker task args 必须是字符串数组")
+        cmd = [sys.executable, entrypoint, *args]
+    else:
+        # One-release compatibility for jobs queued before the protocol update.
+        cmd = list(spec["cmd"])
+        cmd[0] = sys.executable
+        if len(cmd) < 2 or cmd[1] not in _ALLOWED_ENTRYPOINTS:
+            raise ValueError("legacy worker task entrypoint 不安全")
+
+    temp_dir = None
+    inline_files = spec.get("inline_files") or []
+    if inline_files:
+        temp_dir = tempfile.TemporaryDirectory(prefix="map-worker-")
+        replacements = {}
+        for item in inline_files:
+            name = Path(str(item.get("name") or "params.json")).name
+            target = Path(temp_dir.name) / name
+            target.write_text(str(item.get("content") or ""), encoding="utf-8")
+            replacements[str(item.get("source_path") or "")] = str(target)
+        cmd = [replacements.get(arg, arg) for arg in cmd]
+    return cmd, temp_dir
+
+
 def run_task(spec: dict, dry_run: bool = False, heartbeat=None,
-             timeout_s: int = 7200) -> tuple[bool, str, list[Path]]:
+             timeout_s: int = 7200,
+             job_meta: dict | None = None) -> tuple[bool, str, list[Path]]:
     """执行 spec.cmd，返回 (ok, error_msg, produced_files)。
 
     注意：spec["cwd"] 是云端路径，本机 worker 必须用自己的 _ROOT。
     """
-    cmd = list(spec["cmd"])  # copy，避免修改原 spec
-    # cmd[0] 是云端的 sys.executable，替换为本机 Python
-    cmd[0] = sys.executable
+    try:
+        cmd, temp_dir = _prepare_command(spec)
+    except (KeyError, OSError, ValueError) as exc:
+        return False, f"任务协议无效: {exc}", []
+
+    def result(value):
+        if temp_dir is not None:
+            temp_dir.cleanup()
+        return value
     cwd = str(_ROOT)  # 始终用本机项目根，不用云端路径
     env = os.environ.copy()
     env.update(spec.get("env_extra", {}))
@@ -80,7 +185,7 @@ def run_task(spec: dict, dry_run: bool = False, heartbeat=None,
             produced = [fake_glb, fake_png]
         print("  [dry-run] 生成假产物: " +
               ", ".join(path.name for path in produced))
-        return True, "", produced
+        return result((True, "", produced))
 
     print(f"  [worker] 执行: {' '.join(cmd[:4])}...")
     t0 = time.time()
@@ -105,7 +210,8 @@ def run_task(spec: dict, dry_run: bool = False, heartbeat=None,
                 tail = "".join(output_lines[-200:])[-20_000:]
             if heartbeat is not None:
                 try:
-                    alive = heartbeat(tail)
+                    alive = heartbeat(tail, progress_from_log(
+                        {"status": "running", **(job_meta or {})}, tail))
                 except Exception:
                     alive = False
                 failures = 0 if alive else failures + 1
@@ -129,19 +235,20 @@ def run_task(spec: dict, dry_run: bool = False, heartbeat=None,
         complete_tail = "".join(output_lines)[-20_000:]
     if heartbeat is not None and not lease_lost.is_set():
         try:
-            heartbeat(complete_tail)
+            heartbeat(complete_tail, progress_from_log(
+                {"status": "running", **(job_meta or {})}, complete_tail))
         except Exception:
             pass
     wall = time.time() - t0
     if timed_out.is_set():
         print(f"  [worker] 超时 (>{timeout_s}s)")
-        return False, f"计算超时（>{timeout_s}s），区域可能过大", []
+        return result((False, f"计算超时（>{timeout_s}s），区域可能过大", []))
     if lease_lost.is_set():
-        return False, "计算节点与任务队列失去连接，已停止以避免重复计算", []
+        return result((False, "计算节点与任务队列失去连接，已停止以避免重复计算", []))
     if proc.returncode != 0:
         err = complete_tail[-1000:]
         print(f"  [worker] 失败 ({wall:.0f}s): {err[:200]}")
-        return False, err, []
+        return result((False, err, []))
 
     # 收集产物
     city = cmd[cmd.index("--city") + 1] if "--city" in cmd else ""
@@ -155,21 +262,31 @@ def run_task(spec: dict, dry_run: bool = False, heartbeat=None,
         for ext in ("*.glb", "*.png", "*.3mf", "*.json"):
             produced.extend(out_dir.glob(ext))
     print(f"  [worker] 完成 ({wall:.0f}s), 产物 {len(produced)} 个")
-    return True, "", produced
+    return result((True, "", produced))
 
 
-def upload_files(server: str, token: str, job_id: str,
-                 files: list[Path]) -> list[dict]:
+def upload_files(session: requests.Session, server: str, job_id: str,
+                 worker_id: str, files: list[Path], progress=None) -> list[dict]:
     """上传产物到 server，返回 [{name, sha256, size}]。"""
     manifests = []
-    for f in files:
+    total_files = len(files)
+    for index, f in enumerate(files, 1):
+        if progress is not None:
+            progress("", {
+                "progress_pct": 98,
+                "stage_code": "uploading",
+                "stage_label": "正在上传并校验交付文件",
+                "stage_current": index - 1,
+                "stage_total": total_files,
+                "stage_detail": f"文件 {index}/{total_files}",
+            })
         h = sha256_file(f)
         size = f.stat().st_size
         print(f"  [upload] {f.name} ({size/1024:.0f} KB, sha256={h[:12]}...)")
         with open(f, "rb") as fh:
-            r = requests.post(
+            r = session.post(
                 f"{server}/api/worker/upload",
-                params={"token": token, "job_id": job_id,
+                params={"job_id": job_id, "worker_id": worker_id,
                         "filename": f.name, "sha256": h},
                 files={"file": (f.name, fh)},
                 timeout=120,
@@ -183,29 +300,65 @@ def upload_files(server: str, token: str, job_id: str,
 def main():
     ap = argparse.ArgumentParser(description="本机 worker（轮询云端拉任务）")
     ap.add_argument("--server", required=True, help="云端 server URL")
-    ap.add_argument("--token", required=True, help="WORKER_TOKEN")
+    ap.add_argument("--token", default=os.environ.get("WORKER_TOKEN", ""),
+                    help="WORKER_TOKEN（默认读取同名环境变量）")
     ap.add_argument("--poll-interval", type=int, default=5,
                     help="无任务时轮询间隔秒数（默认 5）")
     ap.add_argument("--dry-run", action="store_true",
                     help="不真跑管线，生成假产物验证回路")
     ap.add_argument("--worker-id", default=socket.gethostname(),
                     help="稳定的计算节点 ID（默认主机名）")
+    ap.add_argument("--job-class", action="append", dest="job_classes",
+                    choices=("styles", "draft", "full"),
+                    help="允许领取的任务类型；可重复指定")
     ap.add_argument("--task-timeout", type=int, default=7200,
                     help="单任务最长秒数（默认 7200，即 2 小时）")
     ap.add_argument("--max-tasks", type=int, default=0,
                     help="完成指定数量后退出；0 表示持续轮询")
     args = ap.parse_args()
 
+    if not args.token:
+        ap.error("缺少 worker token；请设置 WORKER_TOKEN 或传入 --token")
+
     server = args.server.rstrip("/")
     print(f"[worker] 连接 {server}，轮询间隔 {args.poll_interval}s"
           f"{'（DRY-RUN）' if args.dry_run else ''}")
 
+    session = requests.Session()
+    session.headers.update({"Authorization": f"Bearer {args.token}"})
+    capabilities = detect_capabilities(args.job_classes)
+
+    def register() -> bool:
+        try:
+            response = session.post(
+                f"{server}/api/worker/register",
+                json={"worker_id": args.worker_id,
+                      "capabilities": capabilities}, timeout=15)
+        except requests.RequestException as exc:
+            print(f"[worker] 注册失败: {exc}")
+            return False
+        if response.status_code == 401:
+            print("[worker] token 无效，退出")
+            sys.exit(1)
+        if response.status_code != 200:
+            print(f"[worker] 注册异常: {response.status_code} "
+                  f"{response.text[:160]}")
+            return False
+        print(f"[worker] 已注册能力: {capabilities['cpu_threads']} threads, "
+              f"{capabilities['memory_mb']} MB, "
+              f"{len(capabilities['pbf_files'])} PBF")
+        return True
+
+    register()
+    last_register = time.time()
     completed_tasks = 0
     while True:
+        if time.time() - last_register >= 60:
+            if register():
+                last_register = time.time()
         try:
-            r = requests.get(f"{server}/api/worker/next",
-                             params={"token": args.token,
-                                     "worker_id": args.worker_id}, timeout=15)
+            r = session.get(f"{server}/api/worker/next",
+                            params={"worker_id": args.worker_id}, timeout=15)
             if r.status_code == 401:
                 print("[worker] token 无效，退出")
                 sys.exit(1)
@@ -227,22 +380,28 @@ def main():
         spec = data.get("spec", {})
         print(f"\n[worker] 接到任务 {job_id} ({data.get('mode')})")
 
-        def send_heartbeat(log_tail: str) -> bool:
-            response = requests.post(
+        def send_heartbeat(log_tail: str, progress: dict | None = None) -> bool:
+            payload = {"job_id": job_id, "worker_id": args.worker_id,
+                       "log_tail": log_tail}
+            payload.update(progress or {})
+            response = session.post(
                 f"{server}/api/worker/heartbeat",
-                json={"job_id": job_id, "token": args.token,
-                      "worker_id": args.worker_id, "log_tail": log_tail},
+                json=payload,
                 timeout=15,
             )
             return response.status_code == 200
 
         ok, err, produced = run_task(
             spec, dry_run=args.dry_run, heartbeat=send_heartbeat,
-            timeout_s=args.task_timeout)
+            timeout_s=args.task_timeout,
+            job_meta={"mode": data.get("mode"),
+                      "fast_draft": data.get("fast_draft", False)})
 
         if ok and produced:
             try:
-                manifests = upload_files(server, args.token, job_id, produced)
+                manifests = upload_files(
+                    session, server, job_id, args.worker_id, produced,
+                    progress=send_heartbeat)
             except Exception as e:
                 ok = False
                 err = f"上传失败: {e}"
@@ -252,8 +411,8 @@ def main():
 
         # 标记完成
         try:
-            r = requests.post(f"{server}/api/worker/finish",
-                              json={"job_id": job_id, "token": args.token,
+            r = session.post(f"{server}/api/worker/finish",
+                              json={"job_id": job_id,
                                     "worker_id": args.worker_id,
                                     "ok": ok, "error": err, "files": manifests},
                               timeout=15)

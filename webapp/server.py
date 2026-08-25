@@ -32,6 +32,8 @@ from pydantic import BaseModel
 
 import journey as journey_mod
 from auth_store import AuthError, AuthStore, AuthUser, store_from_env
+from job_store import JobStore
+from progress_protocol import progress_from_log
 
 ROOT = Path(__file__).resolve().parent.parent
 # 以 `python webapp/server.py` 启动时 sys.path[0] 是 webapp/，
@@ -469,60 +471,9 @@ def _read_job_log_tail(job: dict, max_bytes: int = 20_000) -> str:
 
 
 def _job_progress(job: dict, log_tail: str) -> tuple[int, str]:
-    """Estimate coarse progress from real pipeline markers.
-
-    Percentages deliberately move in broad stages: they communicate that the
-    process is alive without pretending we can measure geometry work exactly.
-    """
-    status = job.get("status")
-    if status in ("starting", "pending"):
-        return 2, "等待计算节点开始处理"
-    if status == "done":
-        label = ("风格方案已经生成" if job.get("mode") == "styles"
-                 else "模型与交付文件已经生成")
-        return 100, label
-    if status == "failed":
-        return int(job.get("progress_pct", 0)), "生成未完成"
-
-    if job.get("fast_draft"):
-        stages = (
-            ("[glb] exported:", 97, "正在整理可旋转预览"),
-            ("[postcheck] PASS", 92, "正在检查图层与地形接触关系"),
-            ("[glb] block_base:", 76, "正在构建轻量 3D 图层"),
-            ("[cache HIT] preprocess", 62, "已复用风格图层，准备 3D 预览"),
-            ("[fast-draft] reopening", 18, "正在载入刚才选定的风格数据"),
-        )
-    elif job.get("mode") == "styles":
-        stages = (
-            ("contact sheet:", 98, "正在整理四种风格方案"),
-            ("/minimal]", 97, "四种风格已经渲染完成"),
-            ("/dense_detail]", 95, "正在渲染第 4 种风格"),
-            ("/block_fill]", 92, "正在渲染第 3 种风格"),
-            ("/baseline]", 89, "正在渲染第 2 种风格"),
-            ("[harness] prepared", 86, "正在渲染第 1 种风格"),
-            ("[Tile Cache] vegetation:", 64, "正在提取绿地与地表信息"),
-            ("[Tile Cache] water:", 44, "正在提取湖泊与河流信息"),
-            ("[Tile Cache] road:", 25, "正在提取道路网络"),
-            ("[Tile Cache] building:", 8, "正在提取建筑与街区"),
-            ("[area-gallery]", 4, "正在准备所选区域的地图数据"),
-        )
-    else:
-        stages = (
-            ("Exported:", 97, "正在整理与验证交付文件"),
-            ("[Stage 5", 90, "正在构建可打印模型几何"),
-            ("[Stage 4.8]", 83, "正在生成可旋转 3D 预览"),
-            ("[Stage 4.65]", 76, "正在渲染高清俯视图"),
-            ("[Stage 4.6]", 70, "正在渲染图层诊断图"),
-            ("[Stage 4.5]", 62, "正在整理道路、建筑与水体图层"),
-            ("[Stage 4]", 50, "正在构建地形与水体结构"),
-            ("[Stage 3", 35, "正在读取城市地图要素"),
-            ("[Stage 2", 20, "正在提取区域地图数据"),
-            ("[Stage 1", 10, "正在准备高程数据"),
-        )
-    for marker, progress, label in stages:
-        if marker in log_tail:
-            return progress, label
-    return 3, "正在准备地图与高程数据"
+    """Compatibility wrapper around the shared worker progress protocol."""
+    progress = progress_from_log(job, log_tail)
+    return int(progress["progress_pct"]), str(progress["stage_label"])
 
 
 def _job_stage_label(job: dict, log_tail: str) -> str:
@@ -549,6 +500,46 @@ def _job_duration_hint(job: dict) -> str:
     if job.get("generation_profile") in ("quality_flat", "quality_textured"):
         return "精细模型通常需要 20–45 分钟"
     return "正式模型通常需要 15–40 分钟"
+
+
+def _job_expected_seconds(job: dict) -> tuple[int, int]:
+    """Return a deliberately broad first-run duration range."""
+    if job.get("mode") == "styles":
+        bbox = job.get("bbox") or []
+        area_km2 = 0.0
+        if len(bbox) == 4:
+            south, west, north, east = bbox
+            mid_lat = math.radians((south + north) / 2.0)
+            area_km2 = ((north - south) * 111.32 *
+                        (east - west) * 111.32 * math.cos(mid_lat))
+        if area_km2 >= 100:
+            return 1200, 2400
+        if area_km2 >= 50:
+            return 720, 1500
+        return 480, 900
+    if job.get("mode") == "draft":
+        return (60, 240) if job.get("fast_draft") else (300, 900)
+    if job.get("generation_profile") in ("quality_flat", "quality_textured"):
+        return 1200, 2700
+    return 900, 2400
+
+
+def _job_eta(job: dict, elapsed_s: float, progress_pct: int) -> dict | None:
+    """Estimate a range; never claim an exact completion time."""
+    if job.get("status") != "running" or progress_pct >= 100:
+        return None
+    low_total, high_total = _job_expected_seconds(job)
+    if progress_pct >= 12 and elapsed_s >= 30:
+        paced_total = elapsed_s / max(progress_pct / 100.0, 0.05)
+        low_total = max(low_total, int(paced_total * 0.70))
+        high_total = max(low_total + 60, min(max(high_total,
+                                                  int(paced_total * 1.45)),
+                                              4 * 3600))
+    return {
+        "low_s": max(0, int(low_total - elapsed_s)),
+        "high_s": max(60, int(high_total - elapsed_s)),
+        "kind": "stage_weighted_estimate",
+    }
 
 
 def _job_quality_warnings(log_tail: str) -> list[str]:
@@ -642,10 +633,31 @@ def _job_public(job: dict, include_log: bool = False) -> dict:
         out["preview_bbox"] = list(preview_bbox)
         out["preview_size_km"] = PRODUCT_PREVIEW_SIZE_KM
     log_tail = _read_job_log_tail(job)
-    progress_pct, stage_label = _job_progress(job, log_tail)
-    out["stage_label"] = stage_label
+    progress = progress_from_log(job, log_tail)
+    progress_pct = max(int(job.get("progress_pct") or 0),
+                       int(progress["progress_pct"]))
+    out.update({key: value for key, value in progress.items()
+                if key not in {"progress_pct"}})
     out["progress_pct"] = progress_pct
+    out["progress_kind"] = "estimated_overall"
     out["duration_hint"] = _job_duration_hint(job)
+    eta = _job_eta(job, elapsed, progress_pct)
+    if eta:
+        out["eta"] = eta
+    if job.get("retry_count"):
+        out["retry_count"] = int(job["retry_count"])
+    if job.get("status") == "running" and job.get("exec") == "worker":
+        last_heartbeat = float(job.get("last_heartbeat") or
+                               job.get("claimed_at") or 0)
+        age = max(0.0, time.time() - last_heartbeat) if last_heartbeat else None
+        if age is not None:
+            out["last_heartbeat_age_s"] = round(age, 1)
+            if age <= 45:
+                out["worker_connection"] = "healthy"
+            elif age <= WORKER_LEASE_SECONDS:
+                out["worker_connection"] = "delayed"
+            else:
+                out["worker_connection"] = "reconnecting"
     quality_warnings = _job_quality_warnings(log_tail)
     if quality_warnings:
         out["quality_warnings"] = quality_warnings
@@ -841,6 +853,10 @@ def _claim_or_reuse_job(job: dict) -> tuple[dict, bool, bool]:
             try:
                 JOBS[job["id"]] = job
                 _save_jobs()
+                _JOB_STORE.append_event(job["id"], "queued", {
+                    "mode": job.get("mode"),
+                    "city": job.get("city"),
+                })
             except Exception:
                 JOBS.pop(job["id"], None)
                 if payer and amount > 0:
@@ -876,9 +892,60 @@ def _env(name: str, default: str = "") -> str:
 WORKER_MODE = _env("WORKER_MODE") in ("1", "true", "yes", "on")
 WORKER_TOKEN = _env("WORKER_TOKEN")
 WORKER_LEASE_SECONDS = max(30, int(_env("WORKER_LEASE_SECONDS", "90")))
-JOBS_PATH = JOB_LOG_DIR / "_jobs.json"
+WORKER_REQUIRE_CAPABILITIES = _env(
+    "WORKER_REQUIRE_CAPABILITIES", "0").lower() in ("1", "true", "yes", "on")
+JOBS_PATH = JOB_LOG_DIR / "_jobs.json"  # one-time migration / rollback snapshot
+JOB_DB_PATH = Path(_env("STUDIO_JOB_DB", str(JOB_LOG_DIR / "_jobs.sqlite3")))
+_JOB_STORE = JobStore(JOB_DB_PATH)
 _SKIP_SERIALIZE = {"proc", "fetch_paths"}   # 运行时对象/本地路径，不入库
 _LAST_WORKER_OWNER: str | None = None
+
+_ALLOWED_WORKER_ENTRYPOINTS = {
+    "generate_city_legacy.py",
+    "tools/gen_area_gallery.py",
+    "tools/generate_gallery_draft.py",
+}
+
+
+def _worker_job_requirements(cmd: list[str], mode: str) -> dict:
+    pbf_file = ""
+    if "--pbf" in cmd:
+        index = cmd.index("--pbf") + 1
+        if index < len(cmd):
+            pbf_file = Path(cmd[index]).name
+    minimum_memory = {"styles": 6000, "draft": 5000,
+                      "full": 12000}.get(mode, 5000)
+    return {
+        "job_class": mode,
+        "minimum_memory_mb": minimum_memory,
+        "pbf_file": pbf_file,
+    }
+
+
+def _make_worker_spec(cmd: list[str], mode: str,
+                      inline_paths: list[Path] | None = None) -> dict:
+    """Build a versioned, allow-listed task instead of arbitrary shell text."""
+    if len(cmd) < 2 or cmd[1] not in _ALLOWED_WORKER_ENTRYPOINTS:
+        raise ValueError(f"worker entrypoint 未列入白名单: {cmd[1:2]}")
+    inline_files = []
+    for path in inline_paths or []:
+        inline_files.append({
+            "source_path": str(path),
+            "name": path.name,
+            "content": path.read_text(encoding="utf-8"),
+        })
+    return {
+        "version": 1,
+        "task": {"entrypoint": cmd[1], "args": cmd[2:]},
+        "inline_files": inline_files,
+        "env_extra": {
+            "PYTHONIOENCODING": "utf-8",
+            "PYTHONUNBUFFERED": "1",
+        },
+        # Keep the old field for one rolling deployment; new workers ignore it.
+        "cmd": cmd,
+        "requirements": _worker_job_requirements(cmd, mode),
+    }
 
 
 def _serialize_job(job: dict) -> dict:
@@ -891,8 +958,11 @@ def _serialize_job(job: dict) -> dict:
 
 
 def _save_jobs():
-    """落盘任务表（原子写）。调用方通常在 JOBS_LOCK 内。"""
+    """Persist the in-memory compatibility mirror into SQLite WAL."""
     data = {jid: _serialize_job(j) for jid, j in JOBS.items()}
+    _JOB_STORE.save_jobs(data.values())
+    # Keep one atomic JSON snapshot during the rolling migration so reverting
+    # the API binary does not make newly submitted jobs disappear.
     tmp = JOBS_PATH.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1),
                    encoding="utf-8")
@@ -900,14 +970,17 @@ def _save_jobs():
 
 
 def _load_jobs():
-    """Restore jobs without duplicating a worker whose lease is still live."""
-    if not JOBS_PATH.exists():
-        return
-    try:
-        data = json.loads(JOBS_PATH.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return
+    """Restore SQLite jobs, migrating the legacy JSON snapshot once."""
+    data = _JOB_STORE.load_jobs()
+    if not data and JOBS_PATH.exists():
+        try:
+            data = json.loads(JOBS_PATH.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            data = {}
+        if data:
+            _JOB_STORE.save_jobs(data.values())
     now = time.time()
+    changed = False
     for jid, j in data.items():
         if j.get("status") in ("starting", "running"):
             if j.get("exec") == "worker":
@@ -915,16 +988,20 @@ def _load_jobs():
                     j["status"] = "pending"
                     j.pop("worker_id", None)
                     j.pop("lease_expires", None)
+                    changed = True
             else:
                 j["status"] = "failed"
                 j["ended"] = time.time()
+                changed = True
         JOBS[jid] = j
+    if changed:
+        _save_jobs()
 
 
 def _check_worker_token(token: str):
     if not WORKER_TOKEN:
         raise HTTPException(503, "worker 协议未启用（未配置 WORKER_TOKEN）")
-    if token != WORKER_TOKEN:
+    if not secrets.compare_digest(token or "", WORKER_TOKEN):
         raise HTTPException(401, "worker token 无效")
 
 
@@ -1671,6 +1748,7 @@ def api_styles(req: StylesRequest, request: Request = None):
     env["PATH"] = str(ROOT / "tools") + os.pathsep + env.get("PATH", "")
 
     if WORKER_MODE:
+        worker_spec = _make_worker_spec(cmd, "styles")
         job = {"id": job_id, "city": slug,
                "city_title": req.name.strip() or "自定义区域",
                "mode": "styles", "style": None, "exec": "worker",
@@ -1678,10 +1756,8 @@ def api_styles(req: StylesRequest, request: Request = None):
                "bbox": bbox,
                "log_path": str(log_path), "status": "pending",
                "started": time.time(), "queued_at": time.time(), "ended": None,
-               "spec": {"cmd": cmd, "cwd": str(ROOT), "env_extra": {
-                   "PYTHONIOENCODING": "utf-8",
-                   "PYTHONUNBUFFERED": "1",
-                   "PATH": env["PATH"]}}}
+               "requirements": worker_spec["requirements"],
+               "spec": worker_spec}
         _attach_job_account(job, user, bbox)
         claimed, reused, cached = _claim_or_reuse_job(job)
         return {"job_id": claimed["id"], "slug": slug,
@@ -1991,6 +2067,8 @@ def api_generate(req: GenerateRequest, request: Request = None):
 
     if WORKER_MODE:
         # ── Worker 模式：入队等本机 worker 拉取，不本地起进程 ──
+        worker_spec = _make_worker_spec(
+            cmd, req.mode, [params_path] if params_path is not None else [])
         job = {"id": job_id, "city": city, "city_title": city_title,
                "mode": req.mode, "style": req.style,
                "generation_profile": profile, "exec": "worker",
@@ -1998,10 +2076,8 @@ def api_generate(req: GenerateRequest, request: Request = None):
                "request_key": request_key,
                "log_path": str(log_path), "status": "pending",
                "started": time.time(), "queued_at": time.time(), "ended": None,
-               "spec": {"cmd": cmd, "cwd": str(ROOT), "env_extra": {
-                   "PYTHONIOENCODING": "utf-8",
-                   "PYTHONUNBUFFERED": "1",
-                   "PATH": env["PATH"]}}}
+               "requirements": worker_spec["requirements"],
+               "spec": worker_spec}
         if req.area is not None:
             job["bbox"] = list(req.area.bbox)
             if gallery_meta:
@@ -2098,6 +2174,19 @@ def api_job(job_id: str, include_log: bool = False,
     return _job_public(job, include_log=allow_log)
 
 
+@app.get("/api/jobs/{job_id}/events")
+def api_job_events(job_id: str, after: int = 0, request: Request = None):
+    """Return durable progress events for reconnecting browsers."""
+    user = _current_user(request, required=AUTH_REQUIRED)
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+    if job is None or (AUTH_REQUIRED and not _can_access_job(job, user)):
+        raise HTTPException(404, "任务不存在")
+    events = _JOB_STORE.list_events(job_id, after_id=after)
+    return {"job_id": job_id, "events": events,
+            "next_after": events[-1]["id"] if events else max(0, after)}
+
+
 @app.get("/api/jobs")
 def api_jobs(include_log: bool = False, mine: bool = False,
              request: Request = None):
@@ -2123,7 +2212,7 @@ def api_jobs(include_log: bool = False, mine: bool = False,
 
 class WorkerFinish(BaseModel):
     job_id: str
-    token: str
+    token: str = ""  # rolling-deploy compatibility; prefer Authorization header
     worker_id: str = "legacy-worker"
     ok: bool = True
     error: str = ""
@@ -2132,9 +2221,48 @@ class WorkerFinish(BaseModel):
 
 class WorkerHeartbeat(BaseModel):
     job_id: str
-    token: str
+    token: str = ""  # rolling-deploy compatibility; prefer Authorization header
     worker_id: str
     log_tail: str = ""
+    progress_pct: int | None = None
+    stage_code: str = ""
+    stage_label: str = ""
+    stage_current: int | None = None
+    stage_total: int | None = None
+    stage_detail: str = ""
+
+
+class WorkerRegister(BaseModel):
+    worker_id: str
+    token: str = ""
+    capabilities: dict = {}
+
+
+def _worker_request_token(request: Request | None, fallback: str = "") -> str:
+    if request is not None:
+        authorization = request.headers.get("authorization", "")
+        scheme, _, value = authorization.partition(" ")
+        if scheme.lower() == "bearer" and value.strip():
+            return value.strip()
+    return fallback
+
+
+@app.post("/api/worker/register")
+def worker_register(req: WorkerRegister, request: Request = None):
+    _check_worker_token(_worker_request_token(request, req.token))
+    worker_id = req.worker_id.strip()
+    if not worker_id or len(worker_id) > 80:
+        raise HTTPException(400, "非法 worker_id")
+    capabilities = dict(req.capabilities or {})
+    capabilities["protocol_version"] = int(
+        capabilities.get("protocol_version") or 1)
+    _JOB_STORE.record_worker(worker_id, capabilities)
+    return {
+        "ok": True,
+        "worker_id": worker_id,
+        "lease_seconds": WORKER_LEASE_SECONDS,
+        "capabilities_required": WORKER_REQUIRE_CAPABILITIES,
+    }
 
 
 def _worker_owner(job: dict) -> str:
@@ -2174,32 +2302,39 @@ def _next_fair_worker_job() -> dict | None:
 
 
 @app.get("/api/worker/next")
-def worker_next(token: str = "", worker_id: str = "legacy-worker"):
+def worker_next(token: str = "", worker_id: str = "legacy-worker",
+                request: Request = None):
     """Lease one queued task; expired leases are safely made available again."""
-    _check_worker_token(token)
+    global _LAST_WORKER_OWNER
+    _check_worker_token(_worker_request_token(request, token))
     worker_id = worker_id.strip() or "legacy-worker"
     with JOBS_LOCK:
-        now = time.time()
-        changed = _reclaim_expired_worker_jobs(now)
-        job = _next_fair_worker_job()
+        # Submissions already persist.  This upsert also protects embedded
+        # callers/tests that create a job directly in the compatibility map.
+        _JOB_STORE.save_jobs(_serialize_job(job) for job in JOBS.values())
+        worker = _JOB_STORE.get_worker(worker_id)
+        capabilities = worker["capabilities"] if worker else None
+        job, next_owner, reclaimed = _JOB_STORE.lease_next(
+            worker_id, capabilities, WORKER_LEASE_SECONDS,
+            _LAST_WORKER_OWNER,
+            require_capabilities=WORKER_REQUIRE_CAPABILITIES,
+        )
+        for reclaimed_job in reclaimed:
+            JOBS[reclaimed_job["id"]] = reclaimed_job
         if job is not None:
-            job["status"] = "running"
-            job["claimed_at"] = now
-            job["worker_id"] = worker_id
-            job["lease_expires"] = now + WORKER_LEASE_SECONDS
-            _save_jobs()
+            _LAST_WORKER_OWNER = next_owner
+            JOBS[job["id"]] = job
             return {"job_id": job["id"], "spec": job.get("spec"),
                     "city": job["city"], "mode": job["mode"],
                     "style": job.get("style"),
+                    "fast_draft": bool(job.get("fast_draft")),
                     "lease_seconds": WORKER_LEASE_SECONDS}
-        if changed:
-            _save_jobs()
     return {"job_id": None}  # 无待处理任务
 
 
 @app.post("/api/worker/heartbeat")
-def worker_heartbeat(req: WorkerHeartbeat):
-    _check_worker_token(req.token)
+def worker_heartbeat(req: WorkerHeartbeat, request: Request = None):
+    _check_worker_token(_worker_request_token(request, req.token))
     with JOBS_LOCK:
         job = JOBS.get(req.job_id)
         if not job:
@@ -2208,10 +2343,36 @@ def worker_heartbeat(req: WorkerHeartbeat):
             raise HTTPException(409, "任务已不在运行")
         if job.get("worker_id") != req.worker_id:
             raise HTTPException(409, "任务租约属于其他计算节点")
-        job["lease_expires"] = time.time() + WORKER_LEASE_SECONDS
-        job["last_heartbeat"] = time.time()
+        now = time.time()
+        old_stage = job.get("stage_code")
+        old_progress = int(job.get("progress_pct") or 0)
+        job["lease_expires"] = now + WORKER_LEASE_SECONDS
+        job["last_heartbeat"] = now
+        if req.progress_pct is not None:
+            job["progress_pct"] = max(
+                old_progress, max(0, min(99, int(req.progress_pct))))
+        for key in ("stage_code", "stage_label", "stage_detail"):
+            value = getattr(req, key)
+            if value:
+                job[key] = value[:240]
+        if req.stage_current is not None:
+            job["stage_current"] = max(0, int(req.stage_current))
+        if req.stage_total is not None:
+            job["stage_total"] = max(0, int(req.stage_total))
         _save_jobs()
+        if (job.get("stage_code") != old_stage or
+                int(job.get("progress_pct") or 0) >= old_progress + 2):
+            _JOB_STORE.append_event(req.job_id, "progress", {
+                "progress_pct": job.get("progress_pct"),
+                "stage_code": job.get("stage_code"),
+                "stage_label": job.get("stage_label"),
+                "stage_current": job.get("stage_current"),
+                "stage_total": job.get("stage_total"),
+            })
         log_path = Path(job["log_path"])
+    worker = _JOB_STORE.get_worker(req.worker_id)
+    if worker:
+        _JOB_STORE.record_worker(req.worker_id, worker["capabilities"])
     if req.log_tail:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_path.write_text(req.log_tail[-20_000:], encoding="utf-8")
@@ -2221,15 +2382,19 @@ def worker_heartbeat(req: WorkerHeartbeat):
 @app.post("/api/worker/upload")
 async def worker_upload(token: str = "", job_id: str = "",
                         filename: str = "", sha256: str = "",
-                        file: UploadFile = File(...)):
+                        worker_id: str = "",
+                        file: UploadFile = File(...),
+                        request: Request = None):
     """Worker 上传产物文件（.part 隔离 + sha256 校验）。"""
-    _check_worker_token(token)
+    _check_worker_token(_worker_request_token(request, token))
     if not job_id or not filename:
         raise HTTPException(400, "缺 job_id 或 filename")
     with JOBS_LOCK:
         job = JOBS.get(job_id)
     if not job:
         raise HTTPException(404, "任务不存在")
+    if worker_id and job.get("worker_id") != worker_id:
+        raise HTTPException(409, "任务租约属于其他计算节点")
     city = job["city"]
     # 安全：filename 不能含路径分隔符
     safe_name = Path(filename).name
@@ -2260,7 +2425,7 @@ async def worker_upload(token: str = "", job_id: str = "",
 
 
 @app.post("/api/worker/finish")
-def worker_finish(req: WorkerFinish):
+def worker_finish(req: WorkerFinish, request: Request = None):
     """Worker 标记任务完成（先验证产物完整性 → 再改状态）。
 
     完整性保证：
@@ -2268,7 +2433,7 @@ def worker_finish(req: WorkerFinish):
     - .part → 正式名（原子 rename）
     - 全部通过后才改 status=done
     """
-    _check_worker_token(req.token)
+    _check_worker_token(_worker_request_token(request, req.token))
     with JOBS_LOCK:
         job = JOBS.get(req.job_id)
     if not job:
@@ -2303,8 +2468,14 @@ def worker_finish(req: WorkerFinish):
         with JOBS_LOCK:
             job["status"] = "done"
             job["ended"] = time.time()
+            job["progress_pct"] = 100
+            job["stage_code"] = "done"
+            job["stage_label"] = "模型与交付文件已经生成"
             job.pop("lease_expires", None)
             _save_jobs()
+            _JOB_STORE.append_event(req.job_id, "completed", {
+                "status": "done", "artifacts": len(req.files),
+            })
     else:
         # worker 报告失败
         with JOBS_LOCK:
@@ -2317,6 +2488,9 @@ def worker_finish(req: WorkerFinish):
             job.pop("lease_expires", None)
             _refund_job_quota(job)
             _save_jobs()
+            _JOB_STORE.append_event(req.job_id, "failed", {
+                "error_code": job["error_code"],
+            })
         # 清理可能的 .part 残留
         for finfo in req.files:
             part = dest_dir / (Path(finfo["name"]).name + ".part")

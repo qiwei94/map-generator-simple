@@ -13,6 +13,7 @@ if str(WEBAPP) not in sys.path:
     sys.path.insert(0, str(WEBAPP))
 
 from auth_store import AuthStore  # noqa: E402
+from job_store import JobStore  # noqa: E402
 import server  # noqa: E402
 
 
@@ -21,7 +22,10 @@ def isolated_queue(monkeypatch, tmp_path):
     server.JOBS.clear()
     monkeypatch.setattr(server, "WORKER_TOKEN", "queue-secret")
     monkeypatch.setattr(server, "WORKER_LEASE_SECONDS", 90)
-    monkeypatch.setattr(server, "_save_jobs", lambda: None)
+    monkeypatch.setattr(server, "_JOB_STORE",
+                        JobStore(tmp_path / "jobs.sqlite3"))
+    monkeypatch.setattr(server, "JOBS_PATH", tmp_path / "jobs.json")
+    monkeypatch.setattr(server, "WORKER_REQUIRE_CAPABILITIES", False)
     monkeypatch.setattr(server, "OUTPUT_DIR", tmp_path / "output")
     monkeypatch.setattr(server, "GALLERY_DIR", tmp_path / "gallery")
     monkeypatch.setattr(server, "_LAST_WORKER_OWNER", None)
@@ -115,4 +119,3 @@ def test_worker_failure_refunds_reserved_quota(monkeypatch, tmp_path):
     assert result["status"] == "failed"
     assert store.get_user(user.id).quota_used == 0
     assert server.JOBS["failed1"]["quota_refunded"] is True
-
