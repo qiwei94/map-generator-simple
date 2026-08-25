@@ -174,6 +174,9 @@ class TestWaterV3:
         poly = _make_square(100, 100, 80)
         result = build_deepseek_water_v3(
             [poly], [], 0, 0, 1000, 1000, scale=2000.0,
+            flat_only=False,
+            surface_levels_mm=[0.8],
+            surface_thickness_mm=0.24,
         )
         if result is not None:
             assert isinstance(result, trimesh.Trimesh)
@@ -187,6 +190,9 @@ class TestWaterV3:
         wo_poly = _make_square(300, 300, 30)
         result = build_deepseek_water_v3(
             [wl_poly], [wo_poly], 0, 0, 500, 500, scale=2000.0,
+            flat_only=False,
+            surface_levels_mm=[0.8, 0.5],
+            surface_thickness_mm=0.24,
         )
         if result is not None:
             assert isinstance(result, trimesh.Trimesh)
@@ -199,10 +205,46 @@ class TestWaterV3:
         poly = _make_square(50, 50, 100)
         result = build_deepseek_water_v3(
             [poly], [], 0, 0, 500, 500, scale=2000.0,
+            flat_only=False,
+            surface_levels_mm=[0.8],
+            surface_thickness_mm=0.24,
         )
         # With base plate + water feature, should produce a mesh
         assert result is not None
         assert isinstance(result, trimesh.Trimesh)
+        assert len(result.faces) > 12
+        assert np.ptp(result.vertices[:, 2]) >= 0.64 - 1e-6
+
+    def test_prepare_relief_recesses_terrain_and_builds_printable_cap(self):
+        from _TEXTURE_STYLE_OF_DEEPSEEK.water import (
+            build_deepseek_water_v3,
+            prepare_deepseek_water_relief,
+        )
+
+        terrain = trimesh.creation.box(extents=[10.0, 10.0, 2.0])
+        terrain.apply_translation([0.0, 0.0, -0.6])  # Z=-1.6 .. 0.4
+        poly = _make_square(-5.0, -5.0, 10.0)
+        relief = prepare_deepseek_water_relief(
+            terrain, [poly], [], 1.0,
+            base_thickness_mm=0.4,
+            surface_thickness_mm=0.24,
+        )
+
+        assert terrain.is_watertight
+        assert relief["carved_vertex_count"] == 4
+        assert len(relief["surface_levels_mm"]) == 1
+
+        water = build_deepseek_water_v3(
+            [poly], [], -5.0, -5.0, 5.0, 5.0, scale=1.0,
+            flat_only=False,
+            base_thickness_mm=0.4,
+            surface_levels_mm=relief["surface_levels_mm"],
+            surface_thickness_mm=relief["surface_thickness_mm"],
+        )
+        assert water is not None
+        assert water.is_watertight
+        assert len(water.faces) > 12
+        assert water.bounds[1, 2] > -1.6
 
 
 # ---------------------------------------------------------------------------

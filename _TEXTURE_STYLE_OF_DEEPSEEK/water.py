@@ -59,6 +59,112 @@ def _extrude_water_manifold(poly, height: float) -> manifold3d.Manifold:
         return manifold3d.Manifold()
 
 
+def prepare_deepseek_water_relief(
+    terrain_mesh: trimesh.Trimesh,
+    WL_polys,
+    WO_polys,
+    scale: float,
+    *,
+    base_thickness_mm: float,
+    surface_thickness_mm: float,
+) -> dict:
+    """Recess terrain under printable water caps without a global boolean.
+
+    The legacy formal pipeline stopped cutting water holes because the global
+    Manifold subtraction destroyed terrain detail.  A flat E3 base plate then
+    became completely hidden by the intact terrain.  This function preserves
+    the terrain topology and only lowers top-surface vertices inside each
+    selected WL/WO polygon.  The matching water builder places a closed,
+    printable cap over the recessed surface.
+
+    Polygon coordinates are local metres; terrain XY and all returned Z values
+    are model millimetres.
+    """
+    all_polys = list(WL_polys) + list(WO_polys)
+    if terrain_mesh is None or not all_polys:
+        return {
+            "surface_levels_mm": [],
+            "carved_vertex_count": 0,
+            "surface_thickness_mm": float(surface_thickness_mm),
+        }
+    if scale <= 0:
+        raise ValueError("scale must be positive")
+    if surface_thickness_mm <= 0:
+        raise ValueError("surface thickness must be positive")
+
+    import shapely
+    from _TEXTURE_STYLE_OF_DEEPSEEK.terrain import sample_deepseek_terrain_z
+
+    terrain_base_z = Z_WATER_BASE_MM + float(base_thickness_mm)
+    inset_mm = min(float(surface_thickness_mm) / 2.0, 0.12)
+    verts = terrain_mesh.vertices
+    levels: list[float] = []
+    carved: set[int] = set()
+
+    for poly in all_polys:
+        if poly is None or poly.is_empty:
+            levels.append(terrain_base_z + float(surface_thickness_mm))
+            continue
+
+        boundary = np.asarray(poly.exterior.coords, dtype=np.float64)
+        if len(boundary) > 256:
+            boundary = boundary[np.linspace(
+                0, len(boundary) - 1, 256, dtype=np.int64)]
+        boundary_z = sample_deepseek_terrain_z(
+            terrain_mesh, boundary[:, 0] * scale, boundary[:, 1] * scale,
+        )
+        valid_z = boundary_z[np.isfinite(boundary_z)]
+        if len(valid_z):
+            water_top_z = float(np.percentile(valid_z, 25)) - inset_mm
+        else:
+            water_top_z = terrain_base_z + float(surface_thickness_mm)
+        water_top_z = max(
+            water_top_z,
+            terrain_base_z + float(surface_thickness_mm),
+        )
+        levels.append(water_top_z)
+
+        minx, miny, maxx, maxy = poly.bounds
+        in_box = (
+            (verts[:, 0] >= minx * scale) &
+            (verts[:, 0] <= maxx * scale) &
+            (verts[:, 1] >= miny * scale) &
+            (verts[:, 1] <= maxy * scale) &
+            (verts[:, 2] > terrain_base_z + 1e-6)
+        )
+        candidates = np.flatnonzero(in_box)
+        if not len(candidates):
+            continue
+        points = shapely.points(
+            verts[candidates, 0] / scale,
+            verts[candidates, 1] / scale,
+        )
+        inside = shapely.covers(poly, points)
+        carve_idx = candidates[np.asarray(inside, dtype=bool)]
+        if not len(carve_idx):
+            continue
+        cap_bottom_z = max(
+            terrain_base_z,
+            water_top_z - float(surface_thickness_mm),
+        )
+        above = verts[carve_idx, 2] > cap_bottom_z
+        carve_idx = carve_idx[above]
+        if len(carve_idx):
+            verts[carve_idx, 2] = cap_bottom_z
+            carved.update(int(i) for i in carve_idx)
+
+    terrain_mesh.vertices = verts
+    print(
+        f"  Water(v3): recessed {len(carved):,} terrain vertices for "
+        f"{len(levels)} printable caps ({surface_thickness_mm:.2f}mm)"
+    )
+    return {
+        "surface_levels_mm": levels,
+        "carved_vertex_count": len(carved),
+        "surface_thickness_mm": float(surface_thickness_mm),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -151,6 +257,8 @@ def build_deepseek_water_v3(
     scale: float = 1.0,
     flat_only: bool = True,
     base_thickness_mm: float | None = None,
+    surface_levels_mm: list[float] | None = None,
+    surface_thickness_mm: float = 0.24,
 ) -> trimesh.Trimesh:
     """V3 water builder.
 
@@ -159,8 +267,10 @@ def build_deepseek_water_v3(
         WO_polys: 小水体 polygon
         bbox_*: full bounding box (local coords, meters)
         scale: mm-per-meter
-        flat_only: True=只出平底板（水体形状由 terrain 镂空表达），
-                   False=底板+水体凸起（旧行为）
+        flat_only: True=只出平底板（仅供兼容和故障回归测试），
+                   False=底板+可打印水体壳层
+        surface_levels_mm: each WL/WO cap top in model millimetres.  When
+                   provided, caps are exactly ``surface_thickness_mm`` thick.
 
     Returns:
         Watertight trimesh of base plate (+ optional water features), or None.
@@ -187,9 +297,14 @@ def build_deepseek_water_v3(
         print(f"  Water(v3): flat base plate {resolved_base_mm:.1f}mm, "
               f"{n_wl} WL + {len(WO_polys)} WO skipped")
     else:
-        # Water feature heights in model meters (two levels)
-        wl_height_m = 2.0 / scale if scale > 0 else 50.0
-        wo_height_m = 1.5 / scale if scale > 0 else 37.5
+        if scale <= 0:
+            raise ValueError("scale must be positive")
+        if surface_thickness_mm <= 0:
+            raise ValueError("surface thickness must be positive")
+        if surface_levels_mm is not None and len(surface_levels_mm) != len(all_polys):
+            raise ValueError("surface level count must match WL + WO polygons")
+
+        terrain_base_z = Z_WATER_BASE_MM + resolved_base_mm
 
         parts: list[manifold3d.Manifold] = [
             _build_base_plate_manifold(
@@ -200,16 +315,31 @@ def build_deepseek_water_v3(
         n_extruded = 0
         n_fail = 0
         for i, poly in enumerate(all_polys):
-            h = wl_height_m if i < n_wl else wo_height_m
+            if surface_levels_mm is None:
+                # Compatibility fallback for callers without terrain-relative
+                # levels.  Formal pipelines always provide explicit levels.
+                h_mm = 2.0 if i < n_wl else 1.5
+                z_bottom_mm = terrain_base_z
+            else:
+                h_mm = float(surface_thickness_mm)
+                z_bottom_mm = max(
+                    terrain_base_z,
+                    float(surface_levels_mm[i]) - h_mm,
+                )
+            h = h_mm / scale
             man = _extrude_water_manifold(poly, h)
             if man.is_empty():
                 n_fail += 1
                 continue
+            if z_bottom_mm != terrain_base_z:
+                man = man.translate((0.0, 0.0,
+                                     (z_bottom_mm - terrain_base_z) / scale))
             parts.append(man)
             n_extruded += 1
 
         print(
-            f"  Water(v3): {n_extruded} extruded ({n_wl} WL, {len(WO_polys)} WO)"
+            f"  Water(v3): {n_extruded} printable caps "
+            f"({n_wl} WL, {len(WO_polys)} WO, {surface_thickness_mm:.2f}mm)"
             + (f", {n_fail} failures" if n_fail else "")
         )
 

@@ -378,22 +378,23 @@ def validate_3mf(filepath: str) -> Dict[str, any]:
         "detail": f"Z range: {r_z_range:.2f}mm",
     })
 
-    # ---- V8: Water plate has base + extruded features (Z span >= 0.4mm) ----
+    # ---- V8: Water object must contain more than the full-area base plate ----
     water_obj = objects.get("water")
     if water_obj and len(water_obj["vertices"]) > 0:
         water_z_span = water_obj["vertices"][:, 2].max() - water_obj["vertices"][:, 2].min()
-        # Decimal 3MF coordinates such as -2.0 and -1.6 can subtract to
-        # 0.3999999999999999 in binary floating point.  Accept the specified
-        # 0.4 mm plate instead of reporting a false critical error.
-        v8_ok = water_z_span >= 0.4 - 1e-6
+        water_face_count = len(water_obj["faces"])
+        # A rectangular base alone is exactly 12 triangles.  It is structural
+        # support, not evidence that any WL/WO surface is printable or visible.
+        v8_ok = water_face_count > 12 and water_z_span >= 0.64 - 1e-6
     else:
         water_z_span = 0
+        water_face_count = 0
         v8_ok = True
     results["rules"].append({
         "id": "V8",
-        "name": "Water plate has base + relief (Z span >= 0.4mm)",
+        "name": "Water contains printable feature geometry beyond the base",
         "passed": v8_ok,
-        "detail": f"Z span: {water_z_span:.2f}mm",
+        "detail": f"faces: {water_face_count}, Z span: {water_z_span:.2f}mm",
     })
 
     # ---- V9: Water has side walls (extruded features, not just flat plates) ----
@@ -408,15 +409,19 @@ def validate_3mf(filepath: str) -> Dict[str, any]:
         lengths = np.linalg.norm(normals, axis=1, keepdims=True)
         lengths[lengths < 1e-10] = 1.0
         normals = normals / lengths
-        # Side walls have some horizontal component
+        # A base box also has side walls, so additionally require at least
+        # three Z levels: base bottom, base top and a water-cap surface.
         has_side_walls = (np.abs(normals[:, 2]) < 0.9).any()
-        v9_ok = has_side_walls or water_z_span < 0.5  # ok if only base plate
+        z_levels = np.unique(np.round(v[:, 2], decimals=5))
+        v9_ok = has_side_walls and len(z_levels) >= 3 and len(f) > 12
     else:
+        z_levels = np.array([])
         v9_ok = True
     results["rules"].append({
         "id": "V9",
-        "name": "Water has side walls (extruded relief features)",
+        "name": "Water caps have printable side walls and distinct Z levels",
         "passed": v9_ok,
+        "detail": f"distinct Z levels: {len(z_levels)}",
     })
 
     # ---- V10: Extruder assignment correct ----

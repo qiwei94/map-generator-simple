@@ -115,7 +115,7 @@ class TestValidate3mf:
         assert "errors" in result
         assert "warnings" in result
 
-    def test_exact_point_four_mm_water_plate_is_not_rejected(self, tmp_path):
+    def test_base_only_water_plate_is_rejected(self, tmp_path):
         from _TEXTURE_STYLE_OF_DEEPSEEK.exporter import export_deepseek_3mf
 
         terrain = trimesh.creation.box(extents=[196, 176, 4])
@@ -126,7 +126,27 @@ class TestValidate3mf:
 
         result = validate_3mf(out)
         v8 = next(rule for rule in result["rules"] if rule["id"] == "V8")
+        v9 = next(rule for rule in result["rules"] if rule["id"] == "V9")
+        assert not bool(v8["passed"])
+        assert not bool(v9["passed"])
+
+    def test_water_plate_with_printable_cap_passes(self, tmp_path):
+        from _TEXTURE_STYLE_OF_DEEPSEEK.exporter import export_deepseek_3mf
+
+        terrain = trimesh.creation.box(extents=[196, 176, 4])
+        plate = trimesh.creation.box(extents=[196, 176, 0.4])
+        plate.apply_translation([0, 0, -1.8])
+        cap = trimesh.creation.box(extents=[40, 30, 0.24])
+        cap.apply_translation([0, 0, -1.48])
+        water = trimesh.util.concatenate([plate, cap])
+        out = str(tmp_path / "water-with-cap.3mf")
+        export_deepseek_3mf({"terrain": terrain, "water": water}, out)
+
+        result = validate_3mf(out)
+        v8 = next(rule for rule in result["rules"] if rule["id"] == "V8")
+        v9 = next(rule for rule in result["rules"] if rule["id"] == "V9")
         assert bool(v8["passed"])
+        assert bool(v9["passed"])
 
     def test_sloped_closed_vegetation_passes_printability_rule(self, tmp_path):
         from _TEXTURE_STYLE_OF_DEEPSEEK.exporter import export_deepseek_3mf

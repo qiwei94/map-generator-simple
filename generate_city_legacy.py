@@ -34,7 +34,11 @@ from _TEXTURE_STYLE_OF_DEEPSEEK.terrain import build_deepseek_terrain
 from _TEXTURE_STYLE_OF_DEEPSEEK.object4_terrain_with_holes import build_terrain_with_water_holes_manifold
 from _TEXTURE_STYLE_OF_DEEPSEEK.buildings import build_deepseek_buildings, build_deepseek_buildings_v3
 from _TEXTURE_STYLE_OF_DEEPSEEK.roads import build_deepseek_roads, build_deepseek_roads_v3
-from _TEXTURE_STYLE_OF_DEEPSEEK.water import build_deepseek_water, build_deepseek_water_v3
+from _TEXTURE_STYLE_OF_DEEPSEEK.water import (
+    build_deepseek_water,
+    build_deepseek_water_v3,
+    prepare_deepseek_water_relief,
+)
 from _TEXTURE_STYLE_OF_DEEPSEEK.vegetation_exclusion import build_deepseek_vegetation_v3
 from _TEXTURE_STYLE_OF_DEEPSEEK.block_base import build_deepseek_block_base_v3
 from _TEXTURE_STYLE_OF_DEEPSEEK._layer_preprocess import (
@@ -1139,6 +1143,27 @@ def main():
     print(f"  {layers.summary()}")
     print(f"  Time: {time.time() - t45:.1f}s")
 
+    # Prepare a printable E3 water surface without the destructive global
+    # terrain boolean.  Roads/buildings consume the already-recessed terrain,
+    # so bridge and shoreline Z placement matches the final formal mesh.
+    water_relief = {
+        "surface_levels_mm": [],
+        "carved_vertex_count": 0,
+        "surface_thickness_mm": printer_profile.min_surface_height_mm,
+    }
+    if terrain_solid is not None and (layers.WL or layers.WO):
+        print(f"\n[Stage 4.6] Preparing printable water relief...")
+        t46 = time.time()
+        water_relief = prepare_deepseek_water_relief(
+            terrain_solid,
+            layers.WL,
+            layers.WO,
+            scale,
+            base_thickness_mm=cli_args.base_thickness_mm,
+            surface_thickness_mm=printer_profile.min_surface_height_mm,
+        )
+        print(f"  Time: {time.time() - t46:.1f}s")
+
     # CompositionSpec is written for both review-only and formal generation.
     # It is an audit sidecar and never feeds geometry, Z, or booleans back into
     # the pipeline.
@@ -1378,7 +1403,11 @@ def main():
             water_mesh = build_deepseek_water_v3(
                 layers.WL, layers.WO,
                 bbox_x_min, bbox_y_min, bbox_x_max, bbox_y_max, scale,
-                base_thickness_mm=cli_args.base_thickness_mm)
+                flat_only=False,
+                base_thickness_mm=cli_args.base_thickness_mm,
+                surface_levels_mm=water_relief["surface_levels_mm"],
+                surface_thickness_mm=water_relief["surface_thickness_mm"],
+            )
             if water_mesh is not None:
                 print(f"  Water faces: {len(water_mesh.faces):,}")
             else:
@@ -1523,6 +1552,12 @@ def main():
     }
     _profile = profile.to_dict() if profile is not None else {}
     _block_base_enabled = not cli_args.no_block_base
+    _printable_features = layer_evidence(layers)
+    _printable_features.update({
+        "water_mesh_faces": len(water_mesh.faces) if water_mesh is not None else 0,
+        "water_relief_shells": len(water_relief["surface_levels_mm"]),
+        "water_carved_terrain_vertices": water_relief["carved_vertex_count"],
+    })
     _design_spec = build_design_spec(
         city=CITY_NAME,
         bbox_wgs84=(south, west, north, east),
@@ -1532,7 +1567,7 @@ def main():
         decisions=_decisions,
         profile=_profile,
         source_features=_source_features,
-        printable_features=layer_evidence(layers),
+        printable_features=_printable_features,
         block_base={
             "requested_mode": "textured" if _block_base_enabled else "off",
             "resolved_mode": "textured" if _block_base_enabled else "off",
