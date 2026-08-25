@@ -37,7 +37,10 @@ from _TEXTURE_STYLE_OF_DEEPSEEK.roads import build_deepseek_roads, build_deepsee
 from _TEXTURE_STYLE_OF_DEEPSEEK.water import build_deepseek_water, build_deepseek_water_v3
 from _TEXTURE_STYLE_OF_DEEPSEEK.vegetation_exclusion import build_deepseek_vegetation_v3
 from _TEXTURE_STYLE_OF_DEEPSEEK.block_base import build_deepseek_block_base_v3
-from _TEXTURE_STYLE_OF_DEEPSEEK._layer_preprocess import preprocess_layers
+from _TEXTURE_STYLE_OF_DEEPSEEK._layer_preprocess import (
+    PREPROCESS_POLICY_VERSION,
+    preprocess_layers,
+)
 from _TEXTURE_STYLE_OF_DEEPSEEK.exporter import export_deepseek_3mf, split_terrain_mesh
 from _TEXTURE_STYLE_OF_DEEPSEEK.design_spec import (
     build_design_spec, layer_evidence, write_design_spec,
@@ -977,6 +980,7 @@ def main():
                 "block_base": ENABLE_BLOCK_BASE,
                 "merge": MERGE_BLOCK_LAYERS,
                 "printer_profile": printer_profile.to_dict(),
+                "preprocess_policy": PREPROCESS_POLICY_VERSION,
                 "amap_salience": _amap_salience_cache_fingerprint(
                     cli_args.amap_salience, _amap_evidence),
             },

@@ -39,7 +39,10 @@ from _TEXTURE_STYLE_OF_DEEPSEEK.block_base import (
     build_deepseek_block_base_v3,
     filter_block_base_edges,
 )
-from _TEXTURE_STYLE_OF_DEEPSEEK._layer_preprocess import preprocess_layers
+from _TEXTURE_STYLE_OF_DEEPSEEK._layer_preprocess import (
+    PREPROCESS_POLICY_VERSION,
+    preprocess_layers,
+)
 from _TEXTURE_STYLE_OF_DEEPSEEK._pipeline_cache import PipelineCache
 from _TEXTURE_STYLE_OF_DEEPSEEK._process_lock import acquire_lock
 from _TEXTURE_STYLE_OF_DEEPSEEK.exporter import export_deepseek_3mf, split_terrain_mesh
@@ -653,6 +656,7 @@ if __name__ == "__main__":
         'merge_mode': MERGE_BLOCK_LAYERS,
         'narrow_threshold': cli_args.narrow_threshold,
         'narrow_penalty': cli_args.narrow_penalty,
+        'preprocess_policy': PREPROCESS_POLICY_VERSION,
     }
 
     def _compute_preprocess():
