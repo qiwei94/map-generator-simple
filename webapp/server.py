@@ -901,6 +901,7 @@ _SKIP_SERIALIZE = {"proc", "fetch_paths"}   # 运行时对象/本地路径，不
 _LAST_WORKER_OWNER: str | None = None
 
 _ALLOWED_WORKER_ENTRYPOINTS = {
+    "generate_city.py",
     "generate_city_legacy.py",
     "tools/gen_area_gallery.py",
     "tools/generate_gallery_draft.py",

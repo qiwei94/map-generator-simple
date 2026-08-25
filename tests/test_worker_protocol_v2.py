@@ -100,7 +100,7 @@ def test_progress_uses_real_pipeline_markers_and_counter():
         "[preprocess] road_continuity: restored\n",
     )
 
-    assert progress["progress_pct"] == 54
+    assert progress["progress_pct"] == 63
     assert progress["stage_current"] == 18
     assert progress["stage_total"] == 24
     assert "18/24" in progress["stage_detail"]

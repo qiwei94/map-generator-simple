@@ -39,6 +39,7 @@ from progress_protocol import progress_from_log  # noqa: E402
 
 
 _ALLOWED_ENTRYPOINTS = {
+    "generate_city.py",
     "generate_city_legacy.py",
     "tools/gen_area_gallery.py",
     "tools/generate_gallery_draft.py",

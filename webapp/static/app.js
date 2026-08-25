@@ -1656,18 +1656,31 @@ function renderJobProgress(job) {
   const progress = $("jobProgress");
   progress.setAttribute("aria-valuenow", String(pct));
   $("jobProgressBar").style.width = `${pct}%`;
+  const counter = Number.isFinite(job.stage_current) &&
+    Number.isFinite(job.stage_total) && job.stage_total > 0
+    ? ` · 当前阶段 ${job.stage_current}/${job.stage_total}` : "";
   $("jobProgressText").textContent = pct >= 100
     ? "已完成"
-    : `阶段进度（估算）${pct}%`;
-  $("jobEstimate").textContent = job.duration_hint
-    ? `${job.duration_hint} · 可复制任务链接稍后回来`
-    : "正在估算耗时，请耐心等待";
+    : `总体进度（估算）${pct}%${counter}`;
+  let estimate = job.duration_hint || "正在估算耗时，请耐心等待";
+  if (job.eta && Number.isFinite(job.eta.low_s) && Number.isFinite(job.eta.high_s)) {
+    const low = fmtDuration(Math.max(0, job.eta.low_s));
+    const high = fmtDuration(Math.max(job.eta.low_s, job.eta.high_s));
+    estimate = `预计还需 ${low}–${high}`;
+  }
+  if (Number.isFinite(job.last_heartbeat_age_s)) {
+    estimate += ` · 节点 ${Math.round(job.last_heartbeat_age_s)} 秒前更新`;
+  } else {
+    estimate += " · 可复制任务链接稍后回来";
+  }
+  $("jobEstimate").textContent = estimate;
 }
 
 async function pollJob() {
   if (!state.job) return;
   try {
     const j = await fetchJSON(`/api/jobs/${state.job.id}`);
+    state.jobPollFailures = 0;
     $("jobElapsed").textContent = fmtDuration(j.elapsed_s);
     renderJobProgress(j);
     // 运行日志不外露；只展示友好状态，失败时显示归类后的异常提示
@@ -1677,7 +1690,8 @@ async function pollJob() {
     if (j.status === "pending") {
       const queueText = j.queue_position
         ? `当前队列第 ${j.queue_position} 位` : "等待计算节点接单";
-      $("jobStatus").textContent = `⏳ 排队中 · ${queueText}`;
+      const retryText = j.retry_count ? ` · 已自动重试 ${j.retry_count} 次` : "";
+      $("jobStatus").textContent = `⏳ 排队中 · ${queueText}${retryText}`;
       $("jobStatus").className = "pill";
       $("jobStage").textContent = state.account
         ? "任务已保存到账号，可以关闭页面稍后回来"
@@ -1686,9 +1700,16 @@ async function pollJob() {
       return;
     }
     if (j.status === "running") {
-      $("jobStatus").textContent = "⏳ 正在生成，请耐心等待…";
+      const connectionText = j.worker_connection === "healthy"
+        ? "计算节点在线"
+        : (j.worker_connection === "delayed"
+          ? "节点更新稍慢"
+          : (j.worker_connection === "reconnecting" ? "正在恢复计算节点" : "正在计算"));
+      $("jobStatus").textContent = `⏳ 正在生成 · ${connectionText}`;
       $("jobStatus").className = "pill";
-      $("jobStage").textContent = j.stage_label || "正在构建地图图层与模型几何";
+      const detail = j.stage_detail ? ` · ${j.stage_detail}` : "";
+      $("jobStage").textContent =
+        (j.stage_label || "正在构建地图图层与模型几何") + detail;
       setTimeout(pollJob, 2500);
       return;
     }
@@ -1749,9 +1770,13 @@ async function pollJob() {
     }
     if (j.status === "done") { await refreshArtifacts(city); persistState(); }
   } catch (err) {
-    $("jobStatus").textContent = "轮询中断: " + err.message;
-    state.job = null;
-    setBusy(false);
+    // A transient Wi-Fi/API interruption must not detach the browser from a
+    // long-running job. Keep the token and resume with bounded backoff.
+    state.jobPollFailures = (state.jobPollFailures || 0) + 1;
+    $("jobStatus").textContent = "网络波动 · 正在重新连接任务";
+    $("jobStage").textContent = "任务仍保存在服务器，不需要重新提交";
+    const retryMs = Math.min(15000, 2000 * state.jobPollFailures);
+    setTimeout(pollJob, retryMs);
   }
 }
 
