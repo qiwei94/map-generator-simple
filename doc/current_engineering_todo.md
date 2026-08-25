@@ -17,6 +17,11 @@ Completed foundations on `agent/web-premium-studio`:
 
 Still open:
 
+- [x] Restore bounded OSM mid-frequency road structure behind the AMap-backed
+  primary skeleton.  `print-road-roles-v13.0` selects only complete existing
+  corridors that add a bridge, crosslink, loop or frame axis; it rejects
+  one-ended and near-parallel candidates and keeps additions visually quiet.
+  Cross-city evidence: `doc/mid_frequency_corridors_v13.md`.
 - [ ] Data-quality-aware `block-base-mode auto` policy and cross-region A/B acceptance.
 - [ ] DesignSpec coverage for every 3MF-producing entry and explicit exact-vs-snap measurement scope.
 - [ ] Remaining selective geometry backports: exact terrain interpolation, road footprint clipping,
