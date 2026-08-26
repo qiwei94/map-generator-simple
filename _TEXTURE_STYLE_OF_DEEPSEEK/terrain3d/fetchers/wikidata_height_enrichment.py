@@ -360,8 +360,12 @@ def load_wikidata_heights(
 
     os.makedirs(cache_dir, exist_ok=True)
     store = BuildingHeightStore(os.path.join(cache_dir, _STORE_FILENAME))
-    row_qids = buildings_gdf["wikidata"].apply(_qid)
-    qids = sorted({qid for qid in row_qids if qid})
+    row_qids = pd.Series(
+        [_qid(value) for value in buildings_gdf["wikidata"]],
+        index=buildings_gdf.index,
+        dtype=object,
+    )
+    qids = sorted({qid for qid in row_qids if isinstance(qid, str)})
     cached = store.get_landmarks(qids)
     missing = [qid for qid in qids if qid not in cached]
 
@@ -374,7 +378,7 @@ def load_wikidata_heights(
             qids, cache_dir=cache_dir, session=session)
 
     for idx, qid in row_qids.items():
-        if not qid:
+        if not isinstance(qid, str):
             continue
         record = cached.get(qid)
         if not record or record.get("status") != "ok":
