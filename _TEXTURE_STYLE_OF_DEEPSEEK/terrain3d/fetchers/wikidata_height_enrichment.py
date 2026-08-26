@@ -37,8 +37,15 @@ _UNIT_TO_METERS = {
 
 
 def _qid(value) -> Optional[str]:
-    if value is None or (isinstance(value, float) and np.isnan(value)):
+    if value is None:
         return None
+    try:
+        if bool(pd.isna(value)):
+            return None
+    except (TypeError, ValueError):
+        # Array-like values are invalid QIDs; string parsing below safely
+        # rejects them without making pandas-version behavior a dependency.
+        pass
     match = _QID_RE.search(str(value))
     return match.group(0).upper() if match else None
 

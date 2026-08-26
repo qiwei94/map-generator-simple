@@ -1,4 +1,6 @@
 import geopandas as gpd
+import numpy as np
+import pandas as pd
 from shapely.geometry import box
 
 from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers import (
@@ -74,6 +76,14 @@ def test_wikidata_height_and_negative_result_are_both_cached(tmp_path):
 def test_wikidata_height_units_are_normalized_to_meters():
     assert wikidata._height_from_entity(_entity(1000, unit="Q174728")) == 10
     assert wikidata._height_from_entity(_entity(100, unit="Q3710")) == 30.48
+
+
+def test_qid_parser_rejects_cross_pandas_missing_scalars():
+    assert wikidata._qid(None) is None
+    assert wikidata._qid(float("nan")) is None
+    assert wikidata._qid(np.float64("nan")) is None
+    assert wikidata._qid(pd.NA) is None
+    assert wikidata._qid("entity Q123 label") == "Q123"
 
 
 def test_prefetch_batches_queries_and_reuses_negative_cache(tmp_path):
