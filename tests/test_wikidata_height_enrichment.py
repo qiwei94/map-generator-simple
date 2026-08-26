@@ -74,3 +74,51 @@ def test_wikidata_height_and_negative_result_are_both_cached(tmp_path):
 def test_wikidata_height_units_are_normalized_to_meters():
     assert wikidata._height_from_entity(_entity(1000, unit="Q174728")) == 10
     assert wikidata._height_from_entity(_entity(100, unit="Q3710")) == 30.48
+
+
+def test_prefetch_batches_queries_and_reuses_negative_cache(tmp_path):
+    payload = {"entities": {
+        f"Q{index}": _entity(index if index % 2 else None)
+        for index in range(1, 53)
+    }}
+    first = _Session(payload)
+    summary, records = wikidata.prefetch_wikidata_landmarks(
+        [f"Q{index}" for index in range(1, 53)],
+        cache_dir=str(tmp_path), session=first)
+
+    assert first.calls == 2
+    assert summary["api_batches"] == 2
+    assert summary["height_hits"] == 26
+    assert summary["negative_cached"] == 26
+    assert len(records) == 52
+
+    second = _Session({"entities": {}})
+    cached, _ = wikidata.prefetch_wikidata_landmarks(
+        ["Q1", "Q2"], cache_dir=str(tmp_path), session=second)
+    assert second.calls == 0
+    assert cached["cached_before"] == 2
+
+
+def test_sparql_discovery_hydrates_only_height_hits(tmp_path):
+    class RoutingSession:
+        def __init__(self):
+            self.urls = []
+
+        def get(self, url, **_kwargs):
+            self.urls.append(url)
+            if "sparql" in url:
+                return _Response({"results": {"bindings": [{
+                    "item": {"value": "http://www.wikidata.org/entity/Q1"},
+                    "height": {"value": "88"},
+                }]}})
+            return _Response({"entities": {"Q1": _entity(88, label="命中塔")}})
+
+    session = RoutingSession()
+    summary, records = wikidata.prefetch_wikidata_landmarks_sparql(
+        ["Q1", "Q2"], cache_dir=str(tmp_path), session=session, delay_s=0)
+
+    assert session.urls == [wikidata._SPARQL_URL, wikidata._API_URL]
+    assert summary["entity_qids"] == 1
+    assert records["Q1"]["height_m"] == 88
+    assert records["Q1"]["label"] == "命中塔"
+    assert records["Q2"]["status"] == "missing"

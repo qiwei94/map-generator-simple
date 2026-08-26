@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "cities": [
+    {
+      "key": "honolulu_diamond_head",
+      "title": "檀香山 · 钻石头山",
+      "center": [21.278, -157.82],
+      "size_km": 25,
+      "pbf": "hawaii-latest.osm.pbf"
+    }
+  ]
+}

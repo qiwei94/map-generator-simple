@@ -97,6 +97,34 @@ python tools/building_height_cache.py backup /safe/path/building_heights.sqlite3
 python tools/building_height_cache.py export /safe/path/building_heights.parquet
 ```
 
+### 为已生成城市预热地标高度
+
+先从现有 PBF 的 25 km 成品取景框中筛出已经带 `wikidata=Q...` 身份的建筑。
+这一步只读取本地 PBF，不下载地图数据：
+
+```bash
+python tools/collect_showcase_landmarks.py \
+  --pbf-dir pbf_cache --size-km 25 \
+  --output data/height_cache/showcase_landmarks.json
+```
+
+不同数据节点生成的清单可以一起传给预热命令。默认先跳过已有 OSM `height` 或
+`building:levels` 的 QID，再用紧凑 SPARQL 批次发现真正含 `P2048` 的地标，最后
+只对命中项查询完整实体。这样避免为上万个无高度实体下载全部 claims。成功高度、
+无高度负结果、请求元数据和原始响应都会写入 SQLite：
+
+```bash
+python tools/prefetch_landmark_heights.py \
+  data/height_cache/showcase_landmarks*.json
+```
+
+同时保留便于人工检查的 `showcase_landmarks_enriched.json` 和
+`showcase_landmark_heights.csv`。生成时 OSM 明确高度仍然优先于 Wikidata。
+
+需要审计标签而不考虑流量时可显式使用 `--query-policy all`；常规预热不得启用。
+若完整实体接口返回 429，紧凑 SPARQL 高度仍会先落库，实体补全按最多 50 个一批
+延后重试，不会重复扫描已经缓存的负结果。
+
 ## 诊断与验收
 
 正式 3MF 的 `design_spec.json` 使用 schema 1.2，在
