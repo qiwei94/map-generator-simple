@@ -4,6 +4,8 @@ Validates the exported 3MF file by re-parsing it and checking geometry
 against the Urban Series reference model parameters.
 """
 
+import json
+import hashlib
 import os
 import re
 import zipfile
@@ -30,6 +32,14 @@ def _read_3mf_text(zf: zipfile.ZipFile, path: str) -> str:
         return zf.read(path).decode("utf-8", errors="replace")
     except KeyError:
         return ""
+
+
+def _sha256_file(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _parse_vertices(xml: str) -> Optional[np.ndarray]:
@@ -527,10 +537,106 @@ def validate_3mf(filepath: str) -> Dict[str, any]:
         "detail": v13_detail,
     })
 
+    # ---- V14: Post-transform structural road clearance is proven ----
+    # The proof cannot be reconstructed from the 3MF alone because the source
+    # road centre-lines are not embedded in the archive.  New full-generation
+    # artifacts therefore persist the measured cut evidence in DesignSpec.
+    design_spec_path = os.path.join(
+        os.path.dirname(os.path.abspath(filepath)), "design_spec.json")
+    design_spec = None
+    design_spec_error = None
+    if os.path.isfile(design_spec_path):
+        try:
+            with open(design_spec_path, encoding="utf-8") as handle:
+                design_spec = json.load(handle)
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            design_spec_error = exc
+
+    has_block_base = bool(
+        block_base_obj and len(block_base_obj["faces"]) > 0)
+    declared_block_mode = str(
+        ((design_spec or {}).get("block_base") or {}).get(
+            "resolved_mode", ""))
+    if not has_block_base:
+        if declared_block_mode and declared_block_mode != "off":
+            v14_ok = False
+            v14_detail = (
+                f"design_spec declares block_base={declared_block_mode!r} "
+                "but the 3MF has no block_base mesh")
+        else:
+            v14_ok = True
+            v14_detail = "not applicable (no block_base mesh)"
+    elif not os.path.isfile(design_spec_path):
+        # Standalone/legacy fixtures remain valid under the geometry-only
+        # contract.  Production acceptance separately requires DesignSpec.
+        v14_ok = True
+        v14_detail = "not recorded (legacy artifact without design_spec.json)"
+    elif design_spec_error is not None:
+        v14_ok = False
+        v14_detail = f"invalid final-clearance evidence: {design_spec_error}"
+    else:
+        try:
+            block_spec = design_spec.get("block_base") or {}
+            clearance = block_spec.get("final_clearance") or {}
+            printer = ((design_spec.get("printability") or {})
+                       .get("printer_profile") or {})
+            configured_gap = float(clearance.get(
+                "configured_min_gap_mm", printer.get("min_gap_mm", 0.0)))
+            extrusion_width = float(clearance.get(
+                "extrusion_width_mm", printer.get("extrusion_width_mm", 0.0)))
+            target_gap = float(clearance.get("target_gap_mm", 0.0))
+            verified_gap = float(clearance.get("verified_min_gap_mm", 0.0))
+            required_gap = max(configured_gap, 2.0 * extrusion_width)
+            cutters = int(clearance.get("cutter_features", 0))
+            post_intrusion = float(clearance.get(
+                "post_clip_intrusion_area_m2", float("inf")))
+            tolerance = float(clearance.get("measurement_tolerance_m2", 1e-6))
+            artifact_claim = design_spec.get("artifact") or {}
+            artifact_name = str(artifact_claim.get("filename", ""))
+            artifact_sha256 = str(artifact_claim.get("sha256", ""))
+            artifact_matches = bool(
+                artifact_name == os.path.basename(filepath)
+                and len(artifact_sha256) == 64
+                and artifact_sha256 == _sha256_file(filepath)
+            )
+            numeric_evidence_ok = bool(np.isfinite([
+                configured_gap, extrusion_width, target_gap, verified_gap,
+                required_gap, post_intrusion, tolerance,
+            ]).all())
+            v14_ok = bool(
+                clearance.get("status") == "checked"
+                and clearance.get("passed") is True
+                and cutters > 0
+                and numeric_evidence_ok
+                and required_gap > 0
+                and target_gap + 1e-9 >= required_gap
+                and verified_gap + 1e-9 >= required_gap
+                and post_intrusion <= tolerance
+                and artifact_matches
+            )
+            v14_detail = (
+                f"target={target_gap:.3f}mm, verified={verified_gap:.3f}mm, "
+                f"required={required_gap:.3f}mm, "
+                f"cutters={cutters}, post_intrusion={post_intrusion:.6g}m2, "
+                f"tolerance={tolerance:.6g}m2, "
+                f"numeric={numeric_evidence_ok}, "
+                f"artifact_matches={artifact_matches}"
+            )
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            v14_ok = False
+            v14_detail = f"invalid final-clearance evidence: {exc}"
+    results["rules"].append({
+        "id": "V14",
+        "name": "Block base preserves post-transform structural road clearance",
+        "passed": v14_ok,
+        "detail": v14_detail,
+    })
+
     # Aggregate results
     for rule in results["rules"]:
         if not rule["passed"]:
-            if rule["id"] in ("V2", "V4", "V8", "V9", "V10", "V13"):
+            if rule["id"] in (
+                    "V2", "V4", "V8", "V9", "V10", "V13", "V14"):
                 results["errors"].append(f"{rule['id']}: {rule['name']}")
             else:
                 results["warnings"].append(f"{rule['id']}: {rule['name']}")

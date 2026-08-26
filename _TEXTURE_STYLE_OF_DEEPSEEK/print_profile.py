@@ -63,6 +63,17 @@ class PrinterProfile:
     def min_surface_height_mm(self) -> float:
         return self.layer_height_mm * self.min_surface_layers
 
+    @property
+    def final_block_base_gap_mm(self) -> float:
+        """Minimum final road seam after all block-base deformations.
+
+        A nominal single-line gap can disappear after polygon rotation,
+        translation, slicer compensation, and first-layer squish.  Requiring
+        two extrusion widths gives the structural road seam a printable
+        two-line clearance while still respecting stricter custom profiles.
+        """
+        return max(self.min_gap_mm, 2.0 * self.extrusion_width_mm)
+
     def to_dict(self) -> dict:
         return asdict(self)
 

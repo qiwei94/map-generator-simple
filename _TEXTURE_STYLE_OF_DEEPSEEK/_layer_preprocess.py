@@ -109,6 +109,7 @@ from _TEXTURE_STYLE_OF_DEEPSEEK.water_roles import (
 # effect at all.
 PREPROCESS_POLICY_VERSION = (
     f"roads={ROAD_ROLE_POLICY_VERSION}|water={WATER_ROLE_POLICY_VERSION}"
+    "|block_base_clearance=post-transform-v1"
 )
 
 
@@ -128,6 +129,10 @@ class LayerPolygons:
     WO: List[Polygon] = field(default_factory=list)
     block_base: List[Polygon] = field(default_factory=list)  # PNG layer 1.5 暖米色城市底
     block_base_classes: List[str] = field(default_factory=list)  # semantic class per block_base polygon
+    # Structural centre-lines retained for a second, post-transform clearance
+    # cut in the block-base builder.  The first cut happens before brick
+    # rotation/shift and is therefore not sufficient proof of final clearance.
+    block_base_cut_lines: List = field(default_factory=list)
     roads_lines: List[Tuple] = field(default_factory=list)
     road_roles: Dict = field(default_factory=dict)
     water_roles: Dict = field(default_factory=dict)
@@ -1806,6 +1811,10 @@ def preprocess_layers(
         WO=filtered["WO"],
         block_base=block_base_polys,
         block_base_classes=block_base_classes,
+        block_base_cut_lines=(
+            list(road_roles.structural.geometry)
+            if len(road_roles.structural) > 0 else []
+        ),
         roads_lines=roads_lines,
         road_roles=road_role_evidence,
         water_roles=water_role_evidence,

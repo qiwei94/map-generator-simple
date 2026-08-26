@@ -274,6 +274,8 @@ def test_preprocess_records_separate_road_roles_and_printable_seam_width():
     assert layers.road_roles["structural_gap_model_mm"] == pytest.approx(0.55)
     assert layers.road_roles["structural_gap_real_m"] == pytest.approx(
         0.55 / scale)
+    assert len(layers.block_base_cut_lines) == 1
+    assert layers.block_base_cut_lines[0].equals(roads.geometry.iloc[0])
 
 
 def test_water_holes_require_a_full_nozzle_width_to_survive():

@@ -41,13 +41,17 @@ from _TEXTURE_STYLE_OF_DEEPSEEK.roads import build_deepseek_roads, build_deepsee
 from _TEXTURE_STYLE_OF_DEEPSEEK.water import build_deepseek_water, build_deepseek_water_v3
 from _TEXTURE_STYLE_OF_DEEPSEEK.vegetation_exclusion import build_deepseek_vegetation_v3
 from _TEXTURE_STYLE_OF_DEEPSEEK.block_base import build_deepseek_block_base_v3
-from _TEXTURE_STYLE_OF_DEEPSEEK._layer_preprocess import preprocess_layers
+from _TEXTURE_STYLE_OF_DEEPSEEK._layer_preprocess import (
+    PREPROCESS_POLICY_VERSION,
+    preprocess_layers,
+)
 from _TEXTURE_STYLE_OF_DEEPSEEK._pipeline_cache import PipelineCache
 from _TEXTURE_STYLE_OF_DEEPSEEK._process_lock import acquire_lock
 from _TEXTURE_STYLE_OF_DEEPSEEK.exporter import export_deepseek_3mf, split_terrain_mesh
 from _TEXTURE_STYLE_OF_DEEPSEEK import config as _cfg
 from _TEXTURE_STYLE_OF_DEEPSEEK.config import compute_scale, WATERWAY_WIDTHS, TERRAIN_GRID, get_area_class, BUILDING_V2_HOTSPOT_RELAX
 from _TEXTURE_STYLE_OF_DEEPSEEK.water_roles import retain_continuous_water_source
+from _TEXTURE_STYLE_OF_DEEPSEEK.print_profile import DEFAULT_PRINTER_PROFILE
 
 # ---------------------------------------------------------------------------
 # 城市预设
@@ -650,6 +654,7 @@ def main():
         'aesthetic': sorted(_aes_overrides.items()),
         'height_max_mm': float(getattr(_cfg, 'BUILDING_HEIGHT_MAX_MM', 0.0)),
         'simplify_tol_m': float(getattr(_cfg, 'BUILDING_SIMPLIFY_TOL_M', 0.0)),
+        'preprocess_policy': PREPROCESS_POLICY_VERSION,
     }
 
     def _compute_preprocess():
@@ -843,7 +848,9 @@ def main():
             block_base_mesh = build_deepseek_block_base_v3(
                 merged_polys, terrain_solid, scale,
                 bbox_local=bbox_local, thickness_mm=merge_thickness,
-                block_classes=merged_classes)
+                block_classes=merged_classes,
+                clearance_lines=layers.block_base_cut_lines,
+                final_clearance_mm=DEFAULT_PRINTER_PROFILE.final_block_base_gap_mm)
             if block_base_mesh is not None:
                 print(f"  BlockBase faces: {len(block_base_mesh.faces):,}")
             else:

@@ -17,6 +17,13 @@ Completed foundations on `agent/web-premium-studio`:
 
 Still open:
 
+- [x] Re-cut structural road corridors after all Block base rotation, shift,
+  edge noise, and clipping. The final seam is derived from the printer profile
+  as `max(min_gap_mm, 2 × extrusion_width_mm)` (0.84 mm for the default 0.4 mm
+  profile), with measured intrusion evidence persisted in `design_spec.json`
+  and enforced by validator rule V14. Historical 3MF files without the new
+  evidence remain identifiable as legacy rather than being misreported as
+  measured.
 - [x] Restore bounded OSM mid-frequency road structure behind the AMap-backed
   primary skeleton.  `print-road-roles-v13.0` selects only complete existing
   corridors that add a bridge, crosslink, loop or frame axis; it rejects

@@ -534,6 +534,59 @@ class TestBlockBaseV3:
         assert result.is_watertight
         assert result.is_winding_consistent
 
+    def test_post_transform_clearance_reopens_printable_road_seam(self):
+        from shapely.geometry import LineString, box
+        from _TEXTURE_STYLE_OF_DEEPSEEK.block_base import (
+            enforce_final_block_base_clearance,
+        )
+
+        # Simulate a transformed block that has drifted back across a road
+        # centre-line.  At scale=1 the source metre and model mm are equal.
+        polys, classes, evidence = enforce_final_block_base_clearance(
+            [box(-10, -10, 10, 10)],
+            ["residential"],
+            [LineString([(0, -20), (0, 20)])],
+            scale=1.0,
+            clearance_mm=0.84,
+            min_piece_area_m2=0.0,
+        )
+
+        assert len(polys) == 2
+        assert classes == ["residential", "residential"]
+        left, right = sorted(polys, key=lambda poly: poly.centroid.x)
+        assert right.bounds[0] - left.bounds[2] == pytest.approx(0.84)
+        assert evidence["pre_clip_intrusion_area_m2"] > 0
+        assert evidence["post_clip_intrusion_area_m2"] == pytest.approx(0.0)
+        assert evidence["passed"] is True
+
+    def test_builder_applies_clearance_after_brick_transform(self, monkeypatch):
+        from shapely.geometry import LineString, box
+        from _TEXTURE_STYLE_OF_DEEPSEEK import _brick_transform, block_base
+
+        # The input already has a seam.  The mocked brick transform closes it;
+        # evidence > 0 proves the builder's final cut runs after that transform.
+        input_polys = [box(-10, -10, -0.5, 10), box(0.5, -10, 10, 10)]
+        monkeypatch.setattr(
+            _brick_transform,
+            "brick_transform_batch",
+            lambda *args, **kwargs: [box(-10, -10, 10, 10)],
+        )
+        monkeypatch.setattr(block_base, "_build_flat", lambda *args: "mesh")
+
+        mesh, evidence = block_base.build_deepseek_block_base_v3(
+            input_polys,
+            _make_flat_terrain_mesh(),
+            scale=1.0,
+            brick_style=True,
+            clearance_lines=[LineString([(0, -20), (0, 20)])],
+            final_clearance_mm=0.84,
+            return_clearance_evidence=True,
+        )
+
+        assert mesh == "mesh"
+        assert evidence["pre_clip_intrusion_area_m2"] > 0
+        assert evidence["post_clip_intrusion_area_m2"] == pytest.approx(0.0)
+
 
 class TestBlockBaseEdgeFilter:
     def test_retreat_removes_edge_and_filters_transition_by_occupancy(self):

@@ -34,6 +34,7 @@ from _TEXTURE_STYLE_OF_DEEPSEEK.roads import build_deepseek_roads, build_deepsee
 from _TEXTURE_STYLE_OF_DEEPSEEK.water import build_deepseek_water, build_deepseek_water_v3
 from _TEXTURE_STYLE_OF_DEEPSEEK.vegetation_exclusion import build_deepseek_vegetation_v3
 from _TEXTURE_STYLE_OF_DEEPSEEK.block_base import build_deepseek_block_base_v3
+from _TEXTURE_STYLE_OF_DEEPSEEK.print_profile import DEFAULT_PRINTER_PROFILE
 from _TEXTURE_STYLE_OF_DEEPSEEK._layer_preprocess import preprocess_layers
 from _TEXTURE_STYLE_OF_DEEPSEEK.exporter import (
     export_deepseek_3mf,
@@ -320,7 +321,9 @@ def run(lat1: float, lon1: float, lat2: float, lon2: float,
 
     if layers.block_base:
         block_base_mesh = build_deepseek_block_base_v3(
-            layers.block_base, terrain_solid, scale)
+            layers.block_base, terrain_solid, scale,
+            clearance_lines=layers.block_base_cut_lines,
+            final_clearance_mm=DEFAULT_PRINTER_PROFILE.final_block_base_gap_mm)
         if block_base_mesh is not None:
             print(f"  BlockBase faces: {len(block_base_mesh.faces):,}")
         else:

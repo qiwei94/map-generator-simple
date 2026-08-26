@@ -39,6 +39,15 @@ def test_default_profile_matches_existing_nozzle_assumption():
         old_formula)
 
 
+def test_final_block_base_gap_reserves_two_extrusion_lines():
+    assert DEFAULT_PRINTER_PROFILE.final_block_base_gap_mm == pytest.approx(0.84)
+    custom = PrinterProfile(
+        profile_id="wide-gap",
+        min_gap_mm=1.1,
+    )
+    assert custom.final_block_base_gap_mm == pytest.approx(1.1)
+
+
 @pytest.mark.parametrize(
     ("value", "mode", "expected"),
     [(0.4, "ceil", 0.48),

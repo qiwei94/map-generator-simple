@@ -1,5 +1,7 @@
 """Tests for validator.py — XML parsers, face normals, validate_3mf."""
 
+import json
+import hashlib
 import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -212,3 +214,63 @@ class TestValidate3mf:
         assert "boundary_edges=3" in v13["detail"]
         assert any(error.startswith("V13:") for error in result["errors"])
         assert result["passed"] is False
+
+    @pytest.mark.parametrize(
+        ("target_gap", "passed"),
+        [(0.84, True), (0.55, False)],
+    )
+    def test_final_block_base_clearance_evidence_is_strict(
+        self, tmp_path, target_gap, passed,
+    ):
+        from _TEXTURE_STYLE_OF_DEEPSEEK.exporter import export_deepseek_3mf
+
+        terrain = trimesh.creation.box(extents=[196, 176, 4])
+        block_base = trimesh.creation.box(extents=[20, 20, 0.5])
+        out = str(tmp_path / "clearance.3mf")
+        export_deepseek_3mf(
+            {"terrain": terrain, "block_base": block_base}, out)
+        spec = {
+            "artifact": {
+                "filename": os.path.basename(out),
+                "sha256": hashlib.sha256(
+                    (tmp_path / "clearance.3mf").read_bytes()).hexdigest(),
+            },
+            "block_base": {
+                "resolved_mode": "textured",
+                "final_clearance": {
+                    "status": "checked",
+                    "passed": True,
+                    "configured_min_gap_mm": 0.55,
+                    "extrusion_width_mm": 0.42,
+                    "target_gap_mm": target_gap,
+                    "verified_min_gap_mm": target_gap,
+                    "cutter_features": 3,
+                    "post_clip_intrusion_area_m2": 0.0,
+                    "measurement_tolerance_m2": 1e-6,
+                },
+            },
+        }
+        (tmp_path / "design_spec.json").write_text(
+            json.dumps(spec), encoding="utf-8")
+
+        result = validate_3mf(out)
+        v14 = next(rule for rule in result["rules"] if rule["id"] == "V14")
+        assert bool(v14["passed"]) is passed
+        assert any(error.startswith("V14:") for error in result["errors"]) is (not passed)
+
+    def test_declared_block_base_cannot_be_silently_missing(self, tmp_path):
+        from _TEXTURE_STYLE_OF_DEEPSEEK.exporter import export_deepseek_3mf
+
+        terrain = trimesh.creation.box(extents=[196, 176, 4])
+        out = str(tmp_path / "missing-block-base.3mf")
+        export_deepseek_3mf({"terrain": terrain}, out)
+        (tmp_path / "design_spec.json").write_text(json.dumps({
+            "artifact": {"filename": os.path.basename(out)},
+            "block_base": {"resolved_mode": "textured"},
+        }), encoding="utf-8")
+
+        result = validate_3mf(out)
+        v14 = next(rule for rule in result["rules"] if rule["id"] == "V14")
+        assert not bool(v14["passed"])
+        assert "no block_base mesh" in v14["detail"]
+        assert any(error.startswith("V14:") for error in result["errors"])

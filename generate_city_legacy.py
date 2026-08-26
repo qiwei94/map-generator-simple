@@ -1448,6 +1448,7 @@ def main():
     t85 = time.time()
 
     block_base_mesh = None
+    block_base_clearance_evidence = None
     if not ENABLE_BLOCK_BASE:
         print(f"  BlockBase DISABLED via --no-block-base")
     elif layers.block_base:
@@ -1462,16 +1463,30 @@ def main():
                 merge_thickness = 0.625
                 print(f"  MERGE: block_base({len(layers.block_base)}) + BO({len(layers.BO)}) "
                       f"= {len(merged_polys)} polys, thickness={merge_thickness}mm")
-            block_base_mesh = build_deepseek_block_base_v3(
+            block_base_mesh, block_base_clearance_evidence = build_deepseek_block_base_v3(
                 merged_polys, terrain_solid, scale,
                 bbox_local=bbox_local, thickness_mm=merge_thickness,
-                block_classes=merged_classes)
+                block_classes=merged_classes,
+                clearance_lines=layers.block_base_cut_lines,
+                final_clearance_mm=printer_profile.final_block_base_gap_mm,
+                return_clearance_evidence=True)
+            if block_base_clearance_evidence is not None:
+                block_base_clearance_evidence.update({
+                    "printer_profile_id": printer_profile.profile_id,
+                    "configured_min_gap_mm": printer_profile.min_gap_mm,
+                    "extrusion_width_mm": printer_profile.extrusion_width_mm,
+                    "derivation": "max(min_gap_mm, 2 * extrusion_width_mm)",
+                })
             if block_base_mesh is not None:
                 print(f"  BlockBase faces: {len(block_base_mesh.faces):,}")
             else:
                 print(f"  No block_base mesh generated")
         except Exception as e:
-            print(f"  BlockBase processing failed (skipping): {e}")
+            print(f"  BlockBase processing failed; aborting formal artifact: {e}")
+            # A requested formal Block base without a proven final road seam
+            # is not a successful artifact.  Do not silently export a model
+            # whose DesignSpec would claim a layer that is absent.
+            raise
     else:
         print(f"  No block_base polygons available")
     print(f"  Time: {time.time() - t85:.1f}s")
@@ -1580,6 +1595,7 @@ def main():
                 "building_density_per_km2": _profile.get("building_density"),
             },
             "thresholds": {},
+            "final_clearance": block_base_clearance_evidence,
         },
         printability=build_printability_report(
             printer_profile,

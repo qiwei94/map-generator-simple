@@ -601,6 +601,29 @@ P2.3 路廊级连续性恢复（2026-08-24）：人工复核 v10 后发现，严
 - 只有在代表城市无系统性退化、3MF 验证器 0 errors / 0 warnings 后，
   才切换 Web 默认策略。
 
+### Block base 最终道路缝验收（2026-08-26）
+
+预处理阶段的道路退避不是最终可打印性证据：Block base 随后还会发生圆角、旋转、
+平移、边缘噪声与画幅裁切，名义 0.55 mm 缝可能被重新侵入。正式管线现在保留
+structural 道路中心线，在上述变形全部完成后执行第二次确定性裁切。
+
+- 最终完整缝宽为 `max(profile.min_gap_mm, 2 × extrusion_width_mm)`；默认
+  0.4 mm 喷嘴、0.42 mm 挤出线宽对应 0.84 mm；
+- 裁切半径使用 `final_gap_mm / scale / 2` 换算回源坐标米制，不让视觉参数直接控制
+  mesh、全局 Z 或布尔策略；
+- `design_spec.json.block_base.final_clearance` 保存 cutter 数、裁切前/后侵入面积、
+  目标模型缝宽、源坐标半径、容差与通过状态；
+- 验证器 V14 要求目标值不小于打印配置推导值、最终侵入面积不大于容差、artifact
+  身份匹配。缺少该证据的旧成品会明确显示为 legacy，不能充当本规则的实测证据。
+
+确定性夹具位于 `tools/build_block_base_clearance_fixture.py`。它输出真实 3MF、俯视图
+和 DesignSpec；项目验证器 V1–V14 为 0 errors / 0 warnings。该 3MF 另以 Bambu
+Studio 2.8.2.60、A1 0.4 mm 喷嘴、0.20 mm Standard 配置生成 G-code，顶面
+Z=4.2/4.4 mm 两层的左右外墙中心均为 127.37/128.63 mm、线宽 0.42 mm，
+`tools/inspect_gcode_seam.py` 扣除实际挤出线宽后测得两层净空均为 0.84 mm。
+这证明切片器未把校准缝合并；真实芝加哥 25 km 成品仍须用新分支重新生成，旧 3MF
+不会被追溯性宣称为已修复。
+
 ## 5. 第一阶段不做的事
 
 - 不重写现有全部 mesh builder；

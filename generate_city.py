@@ -48,6 +48,7 @@ from _TEXTURE_STYLE_OF_DEEPSEEK._process_lock import acquire_lock
 from _TEXTURE_STYLE_OF_DEEPSEEK.exporter import export_deepseek_3mf, split_terrain_mesh
 from _TEXTURE_STYLE_OF_DEEPSEEK.config import compute_scale, WATERWAY_WIDTHS, TERRAIN_GRID, get_area_class, BUILDING_V2_HOTSPOT_RELAX
 from _TEXTURE_STYLE_OF_DEEPSEEK.water_roles import retain_continuous_water_source
+from _TEXTURE_STYLE_OF_DEEPSEEK.print_profile import DEFAULT_PRINTER_PROFILE
 
 
 def build_parser():
@@ -898,7 +899,9 @@ if __name__ == "__main__":
                 brick_style=(BLOCK_BASE_MODE == 'textured'),
                 block_classes=(
                     merged_classes if BLOCK_BASE_MODE == 'textured' else None
-                ))
+                ),
+                clearance_lines=layers.block_base_cut_lines,
+                final_clearance_mm=DEFAULT_PRINTER_PROFILE.final_block_base_gap_mm)
             if block_base_mesh is not None:
                 print(
                     f"  BlockBase mode={BLOCK_BASE_MODE}: "

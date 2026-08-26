@@ -115,6 +115,137 @@ def filter_block_base_edges(
     return kept, kept_indices, stats
 
 
+def _polygon_parts(geometry) -> List[Polygon]:
+    """Return non-empty polygon parts from an arbitrary Shapely result."""
+    if geometry is None or geometry.is_empty:
+        return []
+    if isinstance(geometry, Polygon):
+        return [geometry]
+    if isinstance(geometry, MultiPolygon):
+        return [part for part in geometry.geoms if not part.is_empty]
+    if hasattr(geometry, "geoms"):
+        parts: List[Polygon] = []
+        for child in geometry.geoms:
+            parts.extend(_polygon_parts(child))
+        return parts
+    return []
+
+
+def enforce_final_block_base_clearance(
+    polys: List[Polygon],
+    block_classes: "List[str] | None",
+    clearance_lines: "List | None",
+    scale: float,
+    clearance_mm: float,
+    min_piece_area_m2: float = 10.0,
+) -> Tuple[List[Polygon], "List[str] | None", Dict]:
+    """Re-cut structural road seams after every block-base deformation.
+
+    ``polys`` and ``clearance_lines`` use source metres.  ``clearance_mm`` is
+    the required *full* printable seam in model millimetres.  Each centre-line
+    is therefore buffered by half that value before subtracting it from the
+    transformed blocks.  The returned evidence is numeric so it can be
+    persisted in DesignSpec and checked by the strict validator.
+    """
+    from shapely.ops import unary_union
+    from shapely.strtree import STRtree
+
+    if scale <= 0:
+        raise ValueError("scale must be positive")
+    if clearance_mm <= 0:
+        raise ValueError("clearance_mm must be positive")
+    if block_classes is not None and len(block_classes) != len(polys):
+        raise ValueError("block_classes must stay parallel to polys")
+
+    lines = [
+        line for line in (clearance_lines or [])
+        if line is not None and not line.is_empty
+        and line.geom_type in ("LineString", "MultiLineString")
+    ]
+    radius_m = clearance_mm / scale / 2.0
+    cutters = [
+        line.buffer(radius_m, cap_style=2, join_style=2)
+        for line in lines
+    ]
+    cutters = [cutter for cutter in cutters if not cutter.is_empty]
+    evidence = {
+        "policy_version": "post-transform-structural-clearance-v1",
+        "status": "checked" if cutters else "not_applicable",
+        "target_gap_mm": round(float(clearance_mm), 6),
+        "verified_min_gap_mm": 0.0,
+        "target_half_gap_real_m": round(float(radius_m), 6),
+        "cutter_features": len(cutters),
+        "input_polygons": len(polys),
+        "output_polygons": len(polys),
+        "pre_clip_intrusion_area_m2": 0.0,
+        "post_clip_intrusion_area_m2": 0.0,
+        "removed_area_m2": 0.0,
+        "measurement_tolerance_m2": 1e-6,
+        "passed": bool(cutters),
+    }
+    if not polys or not cutters:
+        return list(polys), (list(block_classes)
+                             if block_classes is not None else None), evidence
+
+    tree = STRtree(cutters)
+    output: List[Polygon] = []
+    output_classes: "List[str] | None" = [] if block_classes is not None else None
+    pre_intrusion = 0.0
+    post_intrusion = 0.0
+    removed_area = 0.0
+
+    for index, poly in enumerate(polys):
+        if not isinstance(poly, Polygon) or poly.is_empty:
+            continue
+        matches = tree.query(poly, predicate="intersects")
+        if len(matches) == 0:
+            parts = [poly]
+        else:
+            # Shapely 2 returns integer indices; retain a compatibility path
+            # for older STRtree implementations that return geometries.
+            first = matches[0]
+            if isinstance(first, (int, np.integer)):
+                local_cutters = [cutters[int(i)] for i in matches]
+            else:
+                local_cutters = list(matches)
+            local_exclusion = unary_union(local_cutters)
+            intrusion = poly.intersection(local_exclusion).area
+            pre_intrusion += float(intrusion)
+            if intrusion <= 0:
+                parts = [poly]
+            else:
+                cut = poly.difference(local_exclusion)
+                if not cut.is_valid:
+                    cut = cut.buffer(0)
+                parts = _polygon_parts(cut)
+                removed_area += max(0.0, poly.area - sum(p.area for p in parts))
+
+            for part in parts:
+                post_intrusion += float(part.intersection(local_exclusion).area)
+
+        for part in parts:
+            if part.area < min_piece_area_m2:
+                removed_area += float(part.area)
+                continue
+            output.append(part)
+            if output_classes is not None:
+                output_classes.append(block_classes[index])
+
+    tolerance = float(evidence["measurement_tolerance_m2"])
+    evidence.update({
+        "output_polygons": len(output),
+        "pre_clip_intrusion_area_m2": round(pre_intrusion, 6),
+        "post_clip_intrusion_area_m2": round(post_intrusion, 9),
+        "removed_area_m2": round(removed_area, 6),
+        "verified_min_gap_mm": (
+            round(float(clearance_mm), 6)
+            if post_intrusion <= tolerance else 0.0
+        ),
+        "passed": bool(post_intrusion <= tolerance),
+    })
+    return output, output_classes, evidence
+
+
 def _polygon_to_manifold(poly: Polygon, scale: float, z_base: float,
                          thickness_mm: float = None) -> manifold3d.Manifold:
     """Legacy flat extrusion path (no texture)."""
@@ -309,7 +440,10 @@ def build_deepseek_block_base_v3(
     block_classes: "List[str] | None" = None,
     grid_step_mm: float = 0.5,
     amp_scale: float = 2.0,
-) -> Optional[trimesh.Trimesh]:
+    clearance_lines: "List | None" = None,
+    final_clearance_mm: "float | None" = None,
+    return_clearance_evidence: bool = False,
+):
     """V3 block_base builder with optional Z-texture displacement.
 
     If block_classes is provided, uses textured mesh path.
@@ -318,7 +452,7 @@ def build_deepseek_block_base_v3(
     from shapely.geometry import box as shapely_box
 
     if not polys:
-        return None
+        return (None, None) if return_clearance_evidence else None
 
     if brick_style:
         import time as _time
@@ -344,13 +478,34 @@ def build_deepseek_block_base_v3(
         if block_classes is not None and len(block_classes) != len(polys):
             block_classes = None
 
+    clearance_evidence = None
+    if final_clearance_mm is not None:
+        polys, block_classes, clearance_evidence = enforce_final_block_base_clearance(
+            polys, block_classes, clearance_lines, scale, final_clearance_mm)
+        print(
+            "  BlockBase final clearance: "
+            f"{clearance_evidence['target_gap_mm']:.2f}mm, "
+            f"cutters={clearance_evidence['cutter_features']}, "
+            f"polys={clearance_evidence['input_polygons']}→"
+            f"{clearance_evidence['output_polygons']}, "
+            f"post_intrusion={clearance_evidence['post_clip_intrusion_area_m2']:.6g}m²"
+        )
+        if not clearance_evidence["passed"]:
+            raise ValueError("final block-base structural clearance check failed")
+
+    if not polys:
+        return ((None, clearance_evidence) if return_clearance_evidence else None)
+
     use_texture = block_classes is not None and len(block_classes) == len(polys)
 
     if use_texture:
-        return _build_textured(polys, terrain_mesh, scale, block_classes,
+        mesh = _build_textured(polys, terrain_mesh, scale, block_classes,
                                thickness_mm, grid_step_mm, amp_scale)
     else:
-        return _build_flat(polys, terrain_mesh, scale, thickness_mm)
+        mesh = _build_flat(polys, terrain_mesh, scale, thickness_mm)
+    if return_clearance_evidence:
+        return mesh, clearance_evidence
+    return mesh
 
 
 # ---------------------------------------------------------------------------
