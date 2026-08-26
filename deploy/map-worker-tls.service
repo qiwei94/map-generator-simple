@@ -1,0 +1,17 @@
+[Unit]
+Description=Map Generator worker-only TLS ingress
+After=network-online.target studio.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStartPre=/usr/sbin/nginx -t -c /etc/nginx/map-worker-tls.conf
+ExecStart=/usr/sbin/nginx -g "daemon off;" -c /etc/nginx/map-worker-tls.conf
+ExecReload=/bin/kill -HUP $MAINPID
+KillSignal=SIGQUIT
+TimeoutStopSec=10
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

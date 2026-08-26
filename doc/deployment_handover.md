@@ -39,7 +39,8 @@
   - **本地模式（默认/all-in-one）**：`/api/generate` 直接起 `generate_city_legacy.py` 子进程在本机算。单机部署用这个。
   - **Worker 模式（`WORKER_MODE=1`）**：只入队，由独立 `tools/cloud_worker.py` 拉取计算（跨机拆分用）。
 - Web 通用管线：`generate_city_legacy.py` + `_TEXTURE_STYLE_OF_DEEPSEEK/`（单线程，内存峰值：draft≈1G，full 甜区≈3.4G，full 西湖≈5.7G）。正式西湖 25KM 3MF 入口为 `generate_city.py`。
-- 任务令牌：生成后前端显示 job 令牌 + 复制链接（`?job=xxx`），可找回任务（`/api/jobs/{id}` 持久化在 `tmp/webapp_jobs/_jobs.json`）。
+- 任务令牌：生成后前端显示 job 令牌 + 复制链接（`?job=xxx`），可找回任务（`/api/jobs/{id}`）。任务与租约以 SQLite WAL 持久化在 `tmp/webapp_jobs/_jobs.sqlite3`；`_jobs.json` 暂时作为滚动回退快照。
+- 远程算力与进度协议见 [`worker_progress_architecture.md`](worker_progress_architecture.md)：worker 出站 HTTPS 拉取、能力匹配、15 秒心跳、可恢复事件与 SHA256 产物上传。
 - 会话持久化：localStorage + 云端 `/api/session/{id}`（`?s=xxx` 跨设备恢复）。
 - 测试：`pytest tests/ -m "not slow"`（约 223 passed）。
 
@@ -96,7 +97,11 @@ export PATH=/root/map-generator-simple/tools:$PATH
 systemctl status studio ; systemctl restart studio ; tail -f /var/log/studio.log
 # 看任务队列与结果
 ls /root/map-generator-simple/tmp/webapp_jobs/
-cat /root/map-generator-simple/tmp/webapp_jobs/_jobs.json
+python3 - <<'PY'
+import sqlite3
+db = sqlite3.connect('/root/map-generator-simple/tmp/webapp_jobs/_jobs.sqlite3')
+print(db.execute('select status, count(*) from jobs group by status').fetchall())
+PY
 # 机器健康（CPU/内存/磁盘）
 uptime ; free -h ; df -h /
 ```
