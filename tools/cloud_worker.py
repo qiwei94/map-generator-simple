@@ -54,6 +54,22 @@ def sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
+def _resolve_token(token: str = "", token_file: str = "") -> str:
+    """Resolve a credential without requiring it in the process list."""
+    if token_file:
+        path = Path(token_file).expanduser()
+        try:
+            value = path.read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            raise ValueError(f"worker token 文件不可读: {path}") from exc
+        if not value:
+            raise ValueError(f"worker token 文件为空: {path}")
+        return value
+    if token:
+        return token
+    raise ValueError("缺少 worker token；请设置 WORKER_TOKEN_FILE 或 WORKER_TOKEN")
+
+
 def _memory_mb() -> int:
     try:
         pages = os.sysconf("SC_PHYS_PAGES")
@@ -165,11 +181,12 @@ def run_task(spec: dict, dry_run: bool = False, heartbeat=None,
         + [env.get("PATH", "")])
 
     if dry_run:
-        # dry-run：不真跑管线，生成一个假产物验证回路
+        # dry-run：不真跑管线，生成假产物验证回路。必须与正式 output
+        # 隔离，否则同名 canary 会覆盖真实 GLB/PNG。
         city = cmd[cmd.index("--city") + 1] if "--city" in cmd else "dryrun"
         slug = cmd[cmd.index("--slug") + 1] if "--slug" in cmd else ""
         output_root = Path(os.environ.get(
-            "STUDIO_OUTPUT_DIR", Path(cwd) / "output"))
+            "WORKER_DRY_RUN_OUTPUT_DIR", Path(cwd) / "tmp" / "worker_dry_run"))
         out_dir = (output_root / "style_gallery" / slug
                    if slug else output_root / city)
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -303,6 +320,9 @@ def main():
     ap.add_argument("--server", required=True, help="云端 server URL")
     ap.add_argument("--token", default=os.environ.get("WORKER_TOKEN", ""),
                     help="WORKER_TOKEN（默认读取同名环境变量）")
+    ap.add_argument("--token-file", default=os.environ.get(
+        "WORKER_TOKEN_FILE", ""),
+                    help="worker token 文件（推荐；凭据不进入进程参数）")
     ap.add_argument("--poll-interval", type=int, default=5,
                     help="无任务时轮询间隔秒数（默认 5）")
     ap.add_argument("--dry-run", action="store_true",
@@ -320,15 +340,17 @@ def main():
                     help="完成指定数量后退出；0 表示持续轮询")
     args = ap.parse_args()
 
-    if not args.token:
-        ap.error("缺少 worker token；请设置 WORKER_TOKEN 或传入 --token")
+    try:
+        token = _resolve_token(args.token, args.token_file)
+    except ValueError as exc:
+        ap.error(str(exc))
 
     server = args.server.rstrip("/")
     print(f"[worker] 连接 {server}，轮询间隔 {args.poll_interval}s"
           f"{'（DRY-RUN）' if args.dry_run else ''}")
 
     session = requests.Session()
-    session.headers.update({"Authorization": f"Bearer {args.token}"})
+    session.headers.update({"Authorization": f"Bearer {token}"})
     if args.ca_cert:
         ca_cert = Path(args.ca_cert).expanduser()
         if not ca_cert.is_file():

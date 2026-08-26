@@ -891,6 +891,8 @@ def _env(name: str, default: str = "") -> str:
 
 WORKER_MODE = _env("WORKER_MODE") in ("1", "true", "yes", "on")
 WORKER_TOKEN = _env("WORKER_TOKEN")
+WORKER_TOKEN_HASH_FILE = Path(_env(
+    "WORKER_TOKEN_HASH_FILE", "/etc/map-generator/worker-token-hashes.json"))
 WORKER_LEASE_SECONDS = max(30, int(_env("WORKER_LEASE_SECONDS", "90")))
 WORKER_REQUIRE_CAPABILITIES = _env(
     "WORKER_REQUIRE_CAPABILITIES", "0").lower() in ("1", "true", "yes", "on")
@@ -999,10 +1001,33 @@ def _load_jobs():
         _save_jobs()
 
 
-def _check_worker_token(token: str):
-    if not WORKER_TOKEN:
+def _worker_token_hashes() -> dict[str, str]:
+    """Load independently revocable, node-bound worker-token digests."""
+    try:
+        data = json.loads(WORKER_TOKEN_HASH_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {
+        str(worker_id): str(digest).lower()
+        for worker_id, digest in data.items()
+        if (isinstance(worker_id, str) and isinstance(digest, str)
+            and re.fullmatch(r"[0-9a-fA-F]{64}", digest))
+    }
+
+
+def _check_worker_token(token: str, worker_id: str = ""):
+    token_hashes = _worker_token_hashes()
+    if not WORKER_TOKEN and not token_hashes:
         raise HTTPException(503, "worker 协议未启用（未配置 WORKER_TOKEN）")
-    if not secrets.compare_digest(token or "", WORKER_TOKEN):
+    supplied = token or ""
+    if WORKER_TOKEN and secrets.compare_digest(supplied, WORKER_TOKEN):
+        return
+    expected_hash = token_hashes.get((worker_id or "").strip())
+    supplied_hash = hashlib.sha256(supplied.encode("utf-8")).hexdigest()
+    if not expected_hash or not secrets.compare_digest(
+            supplied_hash, expected_hash):
         raise HTTPException(401, "worker token 无效")
 
 
@@ -2250,10 +2275,10 @@ def _worker_request_token(request: Request | None, fallback: str = "") -> str:
 
 @app.post("/api/worker/register")
 def worker_register(req: WorkerRegister, request: Request = None):
-    _check_worker_token(_worker_request_token(request, req.token))
     worker_id = req.worker_id.strip()
     if not worker_id or len(worker_id) > 80:
         raise HTTPException(400, "非法 worker_id")
+    _check_worker_token(_worker_request_token(request, req.token), worker_id)
     capabilities = dict(req.capabilities or {})
     capabilities["protocol_version"] = int(
         capabilities.get("protocol_version") or 1)
@@ -2307,8 +2332,8 @@ def worker_next(token: str = "", worker_id: str = "legacy-worker",
                 request: Request = None):
     """Lease one queued task; expired leases are safely made available again."""
     global _LAST_WORKER_OWNER
-    _check_worker_token(_worker_request_token(request, token))
     worker_id = worker_id.strip() or "legacy-worker"
+    _check_worker_token(_worker_request_token(request, token), worker_id)
     with JOBS_LOCK:
         # Submissions already persist.  This upsert also protects embedded
         # callers/tests that create a job directly in the compatibility map.
@@ -2335,7 +2360,8 @@ def worker_next(token: str = "", worker_id: str = "legacy-worker",
 
 @app.post("/api/worker/heartbeat")
 def worker_heartbeat(req: WorkerHeartbeat, request: Request = None):
-    _check_worker_token(_worker_request_token(request, req.token))
+    _check_worker_token(
+        _worker_request_token(request, req.token), req.worker_id)
     with JOBS_LOCK:
         job = JOBS.get(req.job_id)
         if not job:
@@ -2387,7 +2413,7 @@ async def worker_upload(token: str = "", job_id: str = "",
                         file: UploadFile = File(...),
                         request: Request = None):
     """Worker 上传产物文件（.part 隔离 + sha256 校验）。"""
-    _check_worker_token(_worker_request_token(request, token))
+    _check_worker_token(_worker_request_token(request, token), worker_id)
     if not job_id or not filename:
         raise HTTPException(400, "缺 job_id 或 filename")
     with JOBS_LOCK:
@@ -2434,7 +2460,8 @@ def worker_finish(req: WorkerFinish, request: Request = None):
     - .part → 正式名（原子 rename）
     - 全部通过后才改 status=done
     """
-    _check_worker_token(_worker_request_token(request, req.token))
+    _check_worker_token(
+        _worker_request_token(request, req.token), req.worker_id)
     with JOBS_LOCK:
         job = JOBS.get(req.job_id)
     if not job:

@@ -16,6 +16,11 @@ administration, but is not required by the queue protocol.  Worker requests use
 `Authorization: Bearer ...`; query-string tokens are supported only during the
 rolling migration and must not be used by new worker services.
 
+Permanent workers read their credential from a mode-0600 token file through
+`WORKER_TOKEN_FILE`/`--token-file`.  The API accepts node-bound SHA-256 digests
+from `WORKER_TOKEN_HASH_FILE`; it does not need a copy of each node's plaintext
+token.  The legacy shared `WORKER_TOKEN` remains valid during rolling migration.
+
 When the public site has no trusted domain certificate, expose a worker-only
 TLS listener and install only its public CA/server certificate on each worker.
 Pass that path through `WORKER_CA_CERT` or `--ca-cert`.  Never use `verify=False`
@@ -102,6 +107,9 @@ worker registration, job lease, progress, artifact checksum, and final status.
 - Windows WSL is on `agent/durable-worker-progress-v16`; protocol tests pass and
   16 PBF files are visible.  Its permanent worker remains intentionally stopped
   until the worker-only TLS listener is explicitly approved and verified.
-- [`../deploy/nginx-worker-tls.conf`](../deploy/nginx-worker-tls.conf) is staged
-  but not activated.  The current public endpoint is HTTP and must not carry a
-  remote worker token.
+- The worker-only listener uses a dedicated nginx process and systemd unit
+  ([`nginx-worker-tls-main.conf`](../deploy/nginx-worker-tls-main.conf),
+  [`map-worker-tls.service`](../deploy/map-worker-tls.service)).  It must not
+  include the distribution nginx configuration because the studio process owns
+  port 80.  Only port 443 and `/api/worker/*` belong to this listener; every
+  other path returns 404.

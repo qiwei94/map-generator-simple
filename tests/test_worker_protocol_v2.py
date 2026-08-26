@@ -1,5 +1,7 @@
 """Capability-aware SQLite leases and user-visible progress protocol."""
 from concurrent.futures import ThreadPoolExecutor
+import hashlib
+import json
 from pathlib import Path
 import sys
 import time
@@ -15,7 +17,11 @@ if str(WEBAPP) not in sys.path:
 from job_store import JobStore, worker_can_run  # noqa: E402
 from progress_protocol import progress_from_log  # noqa: E402
 import server  # noqa: E402
-from tools.cloud_worker import _prepare_command  # noqa: E402
+from tools.cloud_worker import (  # noqa: E402
+    _prepare_command,
+    _resolve_token,
+    run_task,
+)
 
 
 def _job(job_id="job1", pbf="illinois-latest.osm.pbf"):
@@ -132,6 +138,58 @@ def test_inline_params_are_materialized_and_path_rewritten():
     finally:
         assert temp_dir is not None
         temp_dir.cleanup()
+
+
+def test_worker_token_file_takes_precedence(tmp_path):
+    token_file = tmp_path / "worker.token"
+    token_file.write_text("node-secret\n", encoding="utf-8")
+
+    assert _resolve_token("legacy-secret", str(token_file)) == "node-secret"
+
+
+def test_worker_token_file_rejects_empty_file(tmp_path):
+    token_file = tmp_path / "worker.token"
+    token_file.write_text("\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="为空"):
+        _resolve_token("", str(token_file))
+
+
+def test_dry_run_artifacts_are_isolated_from_production_output(
+        monkeypatch, tmp_path):
+    dry_root = tmp_path / "worker-dry-run"
+    production_root = tmp_path / "production"
+    monkeypatch.setenv("WORKER_DRY_RUN_OUTPUT_DIR", str(dry_root))
+    monkeypatch.setenv("STUDIO_OUTPUT_DIR", str(production_root))
+
+    ok, error, files = run_task({"task": {
+        "entrypoint": "generate_city_legacy.py",
+        "args": ["--city", "westlake"],
+    }}, dry_run=True)
+
+    assert ok is True
+    assert error == ""
+    assert files
+    assert all(path.is_relative_to(dry_root) for path in files)
+    assert not production_root.exists()
+
+
+def test_server_accepts_only_digest_bound_to_worker(monkeypatch, tmp_path):
+    token_hashes = tmp_path / "worker-token-hashes.json"
+    token_hashes.write_text(json.dumps({
+        "windows-primary": hashlib.sha256(
+            b"windows-secret").hexdigest(),
+    }), encoding="utf-8")
+    monkeypatch.setattr(server, "WORKER_TOKEN", "")
+    monkeypatch.setattr(server, "WORKER_TOKEN_HASH_FILE", token_hashes)
+
+    server._check_worker_token("windows-secret", "windows-primary")
+    with pytest.raises(server.HTTPException) as wrong_worker:
+        server._check_worker_token("windows-secret", "controller")
+    assert wrong_worker.value.status_code == 401
+    with pytest.raises(server.HTTPException) as wrong_token:
+        server._check_worker_token("wrong", "windows-primary")
+    assert wrong_token.value.status_code == 401
 
 
 def test_public_status_exposes_heartbeat_and_eta(monkeypatch, tmp_path):
