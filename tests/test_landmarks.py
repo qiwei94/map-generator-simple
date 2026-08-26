@@ -79,13 +79,22 @@ class TestLandmarkSearch:
         r = api.api_landmarks(q="巴黎")
         assert len(r["landmarks"]) >= 5
 
-    def test_availability_flag(self, api):
+    def test_availability_flag(self, api, monkeypatch, tmp_path):
+        # Availability is a property of the active worker's local dataset.
+        # Build an explicit miniature PBF directory so the test is stable on
+        # both sparse developer machines and the fully populated Windows node.
+        monkeypatch.setattr(api, "PBF_DIR", tmp_path)
+        westlake = next(
+            item for item in api._load_landmarks() if item["id"] == "westlake")
+        westlake_region = api._match_regions(westlake["bbox"])[0]
+        (tmp_path / westlake_region["file"]).touch()
+
         r = api.api_landmarks(q="西湖")
         wl = next(x for x in r["landmarks"] if x["id"] == "westlake")
-        assert wl["available"] is True          # 浙江 PBF 在本地
+        assert wl["available"] is True
         r2 = api.api_landmarks(q="悉尼")
         so = next(x for x in r2["landmarks"] if x["id"] == "sydney_opera")
-        assert so["available"] is False         # 无澳洲数据
+        assert so["available"] is False
 
     def test_empty_query_available_first(self, api):
         r = api.api_landmarks(q="")
