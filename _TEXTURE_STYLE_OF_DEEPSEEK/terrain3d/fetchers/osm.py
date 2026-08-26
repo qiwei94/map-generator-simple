@@ -542,6 +542,24 @@ def _save_tile_cache(
 # Public API functions
 # ===========================================================================
 
+def _building_height_cache_key() -> str:
+    """Version final building tiles by geometry-affecting height evidence."""
+    try:
+        from _TEXTURE_STYLE_OF_DEEPSEEK.config import OVERTURE_CACHE_DIR
+        from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.building_height_store import (
+            height_store_identity,
+        )
+
+        cache_dir = OVERTURE_CACHE_DIR
+        if not os.path.isabs(cache_dir):
+            cache_dir = os.path.join(_project_root, cache_dir)
+        identity = height_store_identity(
+            os.path.join(cache_dir, "building_heights.sqlite3"))
+        return f"building_height_v3_{identity['fingerprint']}"
+    except Exception as exc:
+        logger.warning("Height store identity unavailable; using empty key: %s", exc)
+        return "building_height_v3_none"
+
 def fetch_buildings(
     south: float,
     west: float,
@@ -564,10 +582,10 @@ def fetch_buildings(
     pbf_path = _resolve_pbf_path()
 
     # Check tile cache
-    # Height source semantics changed in v2 (persistent Wikidata/Overture and
-    # nDSM demotion).  Do not reuse old final building tiles that already
-    # contain stale est_height/height_source columns.
-    building_cache_key = "building_height_v2"
+    # The normalized evidence store is independent from rendered tiles.  Its
+    # stable fingerprint invalidates only final tiles whose resolved height or
+    # landmark metadata could have changed.
+    building_cache_key = _building_height_cache_key()
     cached = _check_tile_cache(building_cache_key, south, west, north, east)
     if cached is not None:
         return cached

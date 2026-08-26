@@ -14,9 +14,10 @@ PRINT_LIMIT 的物理意义: 0.4mm 喷嘴 × scale (~0.0078mm/m) ≈ 51m 实地�
 from __future__ import annotations
 
 import time
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
+import pandas as pd
 import trimesh
 import manifold3d
 from shapely.geometry import (
@@ -85,7 +86,72 @@ ROAD_TIERS = {
 }
 
 
-def _compress_height(est_height_m: float, area_m2: float) -> float:
+HEIGHT_MAPPING_POLICY_VERSION = "city-relative-log-layer-v1"
+_VERIFIED_HEIGHT_SOURCES = {"osm_height", "osm_levels", "wikidata", "overture"}
+
+
+def building_height_mapping_context(buildings_gdf) -> dict:
+    """Resolve a robust city-relative ceiling for printable landmark Z.
+
+    A fixed 150 m ceiling makes every skyscraper look equally tall.  The
+    99.5th percentile retains the city's own vertical character while keeping
+    isolated bad values from controlling the complete model.  Small samples
+    use their maximum because those rows are usually explicitly identified
+    landmarks rather than a statistical building survey.
+    """
+    empty = {
+        "policy_version": HEIGHT_MAPPING_POLICY_VERSION,
+        "verified_height_count": 0,
+        "height_ceiling_m": float(BUILDING_HEIGHT_OSM_MAX_M),
+        "height_p50_m": None,
+        "height_p95_m": None,
+        "height_p99_5_m": None,
+        "source_counts": {},
+    }
+    if buildings_gdf is None or len(buildings_gdf) == 0:
+        return empty
+
+    sources = (buildings_gdf["height_source"].fillna("unknown").astype(str)
+               if "height_source" in buildings_gdf.columns
+               else None)
+    source_counts = (sources.value_counts().sort_index().to_dict()
+                     if sources is not None else {})
+    if "est_height" not in buildings_gdf.columns:
+        return {**empty, "source_counts": {
+            str(key): int(value) for key, value in source_counts.items()}}
+
+    heights = np.asarray(pd.to_numeric(
+        buildings_gdf["est_height"], errors="coerce"), dtype=float)
+    valid = np.isfinite(heights) & (heights > 0) & (heights <= 1200)
+    if sources is not None:
+        valid &= sources.isin(_VERIFIED_HEIGHT_SOURCES).to_numpy()
+    values = heights[valid]
+    if len(values) == 0:
+        return {**empty, "source_counts": {
+            str(key): int(value) for key, value in source_counts.items()}}
+
+    p50, p95, p99_5 = np.percentile(values, [50, 95, 99.5])
+    statistical_ceiling = float(values.max() if len(values) < 20 else p99_5)
+    ceiling = min(1200.0, max(float(BUILDING_HEIGHT_OSM_MAX_M),
+                              statistical_ceiling))
+    return {
+        "policy_version": HEIGHT_MAPPING_POLICY_VERSION,
+        "verified_height_count": int(len(values)),
+        "height_ceiling_m": round(ceiling, 3),
+        "height_p50_m": round(float(p50), 3),
+        "height_p95_m": round(float(p95), 3),
+        "height_p99_5_m": round(float(p99_5), 3),
+        "source_counts": {
+            str(key): int(value) for key, value in source_counts.items()},
+    }
+
+
+def _compress_height(
+    est_height_m: float,
+    area_m2: float,
+    *,
+    height_ceiling_m: Optional[float] = None,
+) -> float:
     """压缩建筑高度到 model mm 范围 (BUILDING_HEIGHT_MIN_MM..MAX_MM)。
 
     当高度为默认回退值(10m)时，改用面积估算以区分大小建筑，
@@ -105,12 +171,25 @@ def _compress_height(est_height_m: float, area_m2: float) -> float:
     else:
         effective = est_height_m
     h_min = BUILDING_HEIGHT_OSM_MIN_M
-    h_max = BUILDING_HEIGHT_OSM_MAX_M
+    h_max = max(
+        float(BUILDING_HEIGHT_OSM_MAX_M),
+        min(1200.0, float(height_ceiling_m or BUILDING_HEIGHT_OSM_MAX_M)),
+    )
     m_min = BUILDING_HEIGHT_MIN_MM
     m_max = BUILDING_HEIGHT_MAX_MM
     clamped = max(h_min, min(h_max, effective))
     t = (math.log(clamped) - math.log(h_min)) / (math.log(h_max) - math.log(h_min))
     return m_min + t * (m_max - m_min)
+
+
+def _quantize_height_mm(height_mm: float, layer_height_mm: float) -> float:
+    """Round a positive model height up to a complete printable layer."""
+    import math
+
+    layer = float(layer_height_mm)
+    if not math.isfinite(layer) or layer <= 0:
+        return float(height_mm)
+    return round(math.ceil(float(height_mm) / layer - 1e-9) * layer, 10)
 
 
 def _narrow_building_penalty(poly, h_mm: float,

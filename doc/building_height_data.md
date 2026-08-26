@@ -71,6 +71,23 @@ OSM height
 nDSM 已降到 Overture 之后。所有来源只提供建筑高度证据；最终模型 Z 值仍由
 确定性的高度压缩、地标策略、打印层高和稳定性规则计算。
 
+## 从真实高度到模型 Z
+
+高度库只保存来源观测，不保存某次模型的毫米高度。生成时使用
+`city-relative-log-layer-v1`：
+
+1. 只用 OSM 明确高度、OSM 楼层、Wikidata 和通过门禁的 Overture 计算城市高度
+   分布；nDSM 和默认值不能抬高整座城市的上限；
+2. 少于 20 条可信高度时用可信样本最大值，样本足够时使用 P99.5，并把 150 m
+   作为最低上限、1200 m 作为异常保护；
+3. 在城市上限内做对数压缩，避免 269 m 与 468 m 地标都被旧的固定 150 m 上限
+   压成同一高度；
+4. 最终毫米高度向上取整到完整的打印层高，避免切片时被舍入掉半层特征。
+
+因此数据和渲染策略可以分别演进：同一份高度证据能用于不同模型尺寸、喷嘴与
+层高。高度库的稳定指纹进入 building tile 和 pipeline layer 缓存键；仅刷新相同
+原始响应不会触发重算，归一化高度或匹配证据发生变化才会失效。
+
 ## 运维命令
 
 查看来源数量、覆盖范围、地标正/负缓存、RTree 和 SQLite 完整性：
@@ -96,6 +113,18 @@ python tools/building_height_cache.py backup /safe/path/building_heights.sqlite3
 ```bash
 python tools/building_height_cache.py export /safe/path/building_heights.parquet
 ```
+
+从 Windows 金库恢复已经通过在线备份得到的独立 SQLite 到 WSL 热工作区：
+
+```bash
+bash tools/install_height_cache_snapshot.sh \
+  /mnt/f/map-generator-vault/incoming/height-cache-20260826.tar.gz \
+  /home/mapworker/map-generator-simple
+```
+
+安装器先做 SQLite 完整性和正高度数量校验；若热库已存在，会复制到
+`data/height_cache/backups/` 后再原子替换。安装完成会输出实际证据指纹，不能只
+以命令退出码作为成功依据。
 
 ### 为已生成城市预热地标高度
 
@@ -127,7 +156,7 @@ python tools/prefetch_landmark_heights.py \
 
 ## 诊断与验收
 
-正式 3MF 的 `design_spec.json` 使用 schema 1.2，在
+正式 3MF 的 `design_spec.json` 使用 schema 1.3，在
 `evidence.building_height_sources` 记录本次实际采用的来源数量，例如：
 
 ```json
@@ -140,6 +169,11 @@ python tools/prefetch_landmark_heights.py \
   "default": 17560
 }
 ```
+
+`evidence.building_height.store` 还记录规范化库指纹、观测/正负缓存数量；
+`evidence.building_height.mapping` 记录城市高度分位数、映射上限、打印层高和最终
+可打印地标的模型高度范围。由此可以回答某个 3MF 到底用了哪批高度证据、为什么
+形成当前 Z，而不是仅证明数据库文件存在。
 
 “缓存存在”不是验收结果；必须同时检查实际匹配数、默认高度占比和高度来源分布。
 

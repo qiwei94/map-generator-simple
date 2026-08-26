@@ -21,7 +21,7 @@ import sqlite3
 from typing import Iterable, Mapping, Optional, Sequence, Tuple
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def _utcnow() -> str:
@@ -40,6 +40,138 @@ def _bbox_tuple(bbox: Sequence[float]) -> Tuple[float, float, float, float]:
     if south > north or west > east:
         raise ValueError("invalid bbox ordering")
     return south, west, north, east
+
+
+def height_store_identity(path: str) -> dict:
+    """Return a stable identity for geometry-affecting height evidence.
+
+    Retrieval timestamps and request audit rows are deliberately excluded:
+    fetching the same evidence again must not invalidate every materialized
+    building cache.  Heights, labels, footprint observations and coverage do
+    participate because each can change matching, landmark classification or
+    model Z.
+    """
+    absolute = os.path.abspath(path)
+    empty = {
+        "path": absolute,
+        "exists": False,
+        "schema_version": None,
+        "fingerprint": "none",
+        "observation_count": 0,
+        "landmark_height_count": 0,
+        "negative_landmark_count": 0,
+        "sources": {},
+    }
+    if not os.path.isfile(absolute):
+        return empty
+
+    digest = hashlib.sha256()
+
+    def add(value) -> None:
+        if isinstance(value, bytes):
+            digest.update(value)
+        else:
+            digest.update(str(value if value is not None else "").encode(
+                "utf-8"))
+        digest.update(b"\0")
+
+    conn = None
+    try:
+        conn = sqlite3.connect(absolute, timeout=10.0)
+        conn.row_factory = sqlite3.Row
+        meta = {row[0]: row[1] for row in conn.execute(
+            "SELECT key, value FROM store_meta WHERE key IN "
+            "('schema_version', 'evidence_seed', 'evidence_revision')"
+        )}
+        schema_row = meta.get("schema_version")
+        schema_version = schema_row if schema_row is not None else "unknown"
+        seed = meta.get("evidence_seed")
+        revision = meta.get("evidence_revision")
+        add(("schema", schema_version))
+
+        sources = {}
+        if seed is not None and revision is not None:
+            # Schema v2 maintains a content-change revision with SQL triggers.
+            # Identity stays O(source-count), not O(all footprint WKB), even
+            # after millions of Overture observations are imported.
+            add(("seed", seed))
+            add(("revision", revision))
+            for row in conn.execute(
+                "SELECT source, COUNT(*) AS count FROM height_observations "
+                "GROUP BY source ORDER BY source"
+            ):
+                sources[row["source"]] = int(row["count"])
+            observation_count = sum(sources.values())
+        else:
+            # Legacy stores receive a deterministic one-time identity without
+            # mutating a read-only inspection.  Opening BuildingHeightStore
+            # migrates them to the constant-time revision path.
+            observation_count = 0
+            for row in conn.execute(
+                """
+                SELECT source, source_feature_id, source_release, height_m,
+                       num_floors, height_kind, confidence, name, geom_wkb,
+                       minx, miny, maxx, maxy
+                FROM height_observations
+                ORDER BY source, source_release, source_feature_id
+                """
+            ):
+                observation_count += 1
+                sources[row["source"]] = sources.get(row["source"], 0) + 1
+                for value in row:
+                    add(value)
+
+        landmark_height_count = 0
+        negative_landmark_count = 0
+        for row in conn.execute(
+            """
+            SELECT qid, status, height_m, label, confidence
+            FROM landmark_heights ORDER BY qid
+            """
+        ):
+            if row["status"] == "ok" and row["height_m"] is not None:
+                landmark_height_count += 1
+            elif row["status"] == "missing":
+                negative_landmark_count += 1
+            if seed is None or revision is None:
+                for value in row:
+                    add(value)
+
+        if seed is None or revision is None:
+            for row in conn.execute(
+                """
+                SELECT source, source_release, south, west, north, east,
+                       observation_count, raw_sha256
+                FROM source_coverage
+                ORDER BY source, source_release, south, west, north, east
+                """
+            ):
+                for value in row:
+                    add(value)
+    except sqlite3.DatabaseError as exc:
+        stat = os.stat(absolute)
+        return {
+            **empty,
+            "exists": True,
+            "fingerprint": hashlib.sha256(
+                f"invalid:{stat.st_size}:{stat.st_mtime_ns}".encode("ascii")
+            ).hexdigest()[:16],
+            "error": str(exc),
+        }
+    finally:
+        if conn is not None:
+            conn.close()
+
+    return {
+        "path": absolute,
+        "exists": True,
+        "schema_version": str(schema_version),
+        "fingerprint": digest.hexdigest()[:16],
+        "observation_count": observation_count,
+        "landmark_height_count": landmark_height_count,
+        "negative_landmark_count": negative_landmark_count,
+        "sources": dict(sorted(sources.items())),
+    }
 
 
 class BuildingHeightStore:
@@ -142,6 +274,89 @@ class BuildingHeightStore:
                     error TEXT,
                     PRIMARY KEY(source, request_key)
                 );
+
+                INSERT OR IGNORE INTO store_meta(key, value)
+                    VALUES('evidence_seed', lower(hex(randomblob(8))));
+                INSERT OR IGNORE INTO store_meta(key, value)
+                    VALUES('evidence_revision', '0');
+
+                CREATE TRIGGER IF NOT EXISTS height_observation_evidence_insert
+                AFTER INSERT ON height_observations BEGIN
+                    UPDATE store_meta
+                    SET value=CAST(value AS INTEGER) + 1
+                    WHERE key='evidence_revision';
+                END;
+                CREATE TRIGGER IF NOT EXISTS height_observation_evidence_delete
+                AFTER DELETE ON height_observations BEGIN
+                    UPDATE store_meta
+                    SET value=CAST(value AS INTEGER) + 1
+                    WHERE key='evidence_revision';
+                END;
+                CREATE TRIGGER IF NOT EXISTS height_observation_evidence_update
+                AFTER UPDATE ON height_observations
+                WHEN OLD.height_m IS NOT NEW.height_m
+                  OR OLD.num_floors IS NOT NEW.num_floors
+                  OR OLD.height_kind IS NOT NEW.height_kind
+                  OR OLD.confidence IS NOT NEW.confidence
+                  OR OLD.name IS NOT NEW.name
+                  OR OLD.geom_wkb IS NOT NEW.geom_wkb
+                  OR OLD.minx IS NOT NEW.minx OR OLD.miny IS NOT NEW.miny
+                  OR OLD.maxx IS NOT NEW.maxx OR OLD.maxy IS NOT NEW.maxy
+                BEGIN
+                    UPDATE store_meta
+                    SET value=CAST(value AS INTEGER) + 1
+                    WHERE key='evidence_revision';
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS landmark_height_evidence_insert
+                AFTER INSERT ON landmark_heights BEGIN
+                    UPDATE store_meta
+                    SET value=CAST(value AS INTEGER) + 1
+                    WHERE key='evidence_revision';
+                END;
+                CREATE TRIGGER IF NOT EXISTS landmark_height_evidence_delete
+                AFTER DELETE ON landmark_heights BEGIN
+                    UPDATE store_meta
+                    SET value=CAST(value AS INTEGER) + 1
+                    WHERE key='evidence_revision';
+                END;
+                CREATE TRIGGER IF NOT EXISTS landmark_height_evidence_update
+                AFTER UPDATE ON landmark_heights
+                WHEN OLD.status IS NOT NEW.status
+                  OR OLD.height_m IS NOT NEW.height_m
+                  OR OLD.label IS NOT NEW.label
+                  OR OLD.confidence IS NOT NEW.confidence
+                BEGIN
+                    UPDATE store_meta
+                    SET value=CAST(value AS INTEGER) + 1
+                    WHERE key='evidence_revision';
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS source_coverage_evidence_insert
+                AFTER INSERT ON source_coverage BEGIN
+                    UPDATE store_meta
+                    SET value=CAST(value AS INTEGER) + 1
+                    WHERE key='evidence_revision';
+                END;
+                CREATE TRIGGER IF NOT EXISTS source_coverage_evidence_delete
+                AFTER DELETE ON source_coverage BEGIN
+                    UPDATE store_meta
+                    SET value=CAST(value AS INTEGER) + 1
+                    WHERE key='evidence_revision';
+                END;
+                CREATE TRIGGER IF NOT EXISTS source_coverage_evidence_update
+                AFTER UPDATE ON source_coverage
+                WHEN OLD.source IS NOT NEW.source
+                  OR OLD.source_release IS NOT NEW.source_release
+                  OR OLD.south IS NOT NEW.south OR OLD.west IS NOT NEW.west
+                  OR OLD.north IS NOT NEW.north OR OLD.east IS NOT NEW.east
+                  OR OLD.observation_count IS NOT NEW.observation_count
+                  OR OLD.raw_sha256 IS NOT NEW.raw_sha256
+                BEGIN
+                    UPDATE store_meta
+                    SET value=CAST(value AS INTEGER) + 1
+                    WHERE key='evidence_revision';
+                END;
                 """
             )
             conn.execute(

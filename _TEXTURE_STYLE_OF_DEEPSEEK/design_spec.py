@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
 
 
-SCHEMA_VERSION = "1.2"
+SCHEMA_VERSION = "1.3"
 
 
 def _json_value(value: Any) -> Any:
@@ -96,6 +96,7 @@ def build_design_spec(
     source_features: Optional[Mapping[str, int]] = None,
     printable_features: Optional[Mapping[str, int]] = None,
     height_sources: Optional[Mapping[str, int]] = None,
+    height_evidence: Optional[Mapping] = None,
     block_base: Optional[Mapping] = None,
     printability: Optional[Mapping] = None,
     road_roles: Optional[Mapping] = None,
@@ -138,6 +139,7 @@ def build_design_spec(
             "source_features": source,
             "printable_features": printable,
             "building_height_sources": heights,
+            "building_height": _json_value(height_evidence or {}),
         },
     }
 

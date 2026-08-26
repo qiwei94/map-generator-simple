@@ -76,11 +76,14 @@ from _TEXTURE_STYLE_OF_DEEPSEEK.config import (
     LANDMARK_EXCLUSION_BUFFER_M,
 )
 from _TEXTURE_STYLE_OF_DEEPSEEK.buildings import (
+    HEIGHT_MAPPING_POLICY_VERSION,
     _build_city_blocks,
     _aggregate_in_blocks,
     _convex_quadrilateral,
     _compress_height,
     _narrow_building_penalty,
+    _quantize_height_mm,
+    building_height_mapping_context,
 )
 from _TEXTURE_STYLE_OF_DEEPSEEK.print_profile import (
     DEFAULT_PRINTER_PROFILE,
@@ -110,6 +113,7 @@ from _TEXTURE_STYLE_OF_DEEPSEEK.water_roles import (
 PREPROCESS_POLICY_VERSION = (
     f"roads={ROAD_ROLE_POLICY_VERSION}|water={WATER_ROLE_POLICY_VERSION}"
     "|block_base_clearance=post-transform-v1"
+    f"|building_height={HEIGHT_MAPPING_POLICY_VERSION}"
 )
 
 
@@ -136,6 +140,7 @@ class LayerPolygons:
     roads_lines: List[Tuple] = field(default_factory=list)
     road_roles: Dict = field(default_factory=dict)
     water_roles: Dict = field(default_factory=dict)
+    building_height_evidence: Dict = field(default_factory=dict)
     nozzle_real_m: float = 0.0
     min_area_m2: float = 0.0
 
@@ -294,10 +299,13 @@ def _extract_BL(
     height_mode: str = "height",
     narrow_threshold: float = 6.0,
     narrow_penalty_factor: float = 0.5,
+    height_ceiling_m: Optional[float] = None,
+    layer_height_mm: float = 0.12,
 ) -> Tuple[List[Tuple[Polygon, float]], List[Polygon], List]:
     """返回 (BL_with_heights, BO_input_smalls, BL_categories)。Dispatches to vectorized or legacy."""
     args = (buildings_gdf, city_blocks, enable_hotspot, hotspot_relax,
-            height_mode, narrow_threshold, narrow_penalty_factor)
+            height_mode, narrow_threshold, narrow_penalty_factor,
+            height_ceiling_m, layer_height_mm)
 
     if _VERIFY_EXTRACT_BL:
         t0 = time.time()
@@ -332,6 +340,8 @@ def _extract_BL_vectorized(
     height_mode: str = "height",
     narrow_threshold: float = 6.0,
     narrow_penalty_factor: float = 0.5,
+    height_ceiling_m: Optional[float] = None,
+    layer_height_mm: float = 0.12,
 ) -> Tuple[List[Tuple[Polygon, float]], List[Polygon], List]:
     """Vectorized version of _extract_BL using geopandas batch operations."""
     # Function-level import: allows runtime monkey-patch from auto-params
@@ -471,12 +481,14 @@ def _extract_BL_vectorized(
 
             params = LANDMARK_CATEGORY_PARAMS[effective_cat]
 
-            h_mm = _compress_height(est_height, area)
+            h_mm = _compress_height(
+                est_height, area, height_ceiling_m=height_ceiling_m)
             h_mm = _narrow_building_penalty(poly, h_mm,
                                             threshold=narrow_threshold,
                                             factor=narrow_penalty_factor)
             # Category-specific additive height offset + 2D expansion
-            h_mm = h_mm + params["height_add_mm"]
+            h_mm = _quantize_height_mm(
+                h_mm + params["height_add_mm"], layer_height_mm)
             if params["buffer_m"] > 0:
                 poly = poly.buffer(params["buffer_m"], join_style=2)
                 if poly.is_empty:
@@ -508,6 +520,8 @@ def _extract_BL_legacy(
     height_mode: str = "height",
     narrow_threshold: float = 6.0,
     narrow_penalty_factor: float = 0.5,
+    height_ceiling_m: Optional[float] = None,
+    layer_height_mm: float = 0.12,
 ) -> Tuple[List[Tuple[Polygon, float]], List[Polygon], List]:
     """Legacy iterrows-based implementation of _extract_BL."""
     # Function-level import: allows runtime monkey-patch from auto-params
@@ -642,12 +656,14 @@ def _extract_BL_legacy(
 
             params = LANDMARK_CATEGORY_PARAMS[effective_cat]
 
-            h_mm = _compress_height(est_height, area)
+            h_mm = _compress_height(
+                est_height, area, height_ceiling_m=height_ceiling_m)
             h_mm = _narrow_building_penalty(poly, h_mm,
                                             threshold=narrow_threshold,
                                             factor=narrow_penalty_factor)
             # Category-specific additive height offset + 2D expansion
-            h_mm = h_mm + params["height_add_mm"]
+            h_mm = _quantize_height_mm(
+                h_mm + params["height_add_mm"], layer_height_mm)
             if params["buffer_m"] > 0:
                 poly = poly.buffer(params["buffer_m"], join_style=2)
                 if poly.is_empty:
@@ -1648,6 +1664,13 @@ def preprocess_layers(
     print(f"[preprocess] height_quality: coverage={height_quality['coverage']:.1%}, "
           f"median_tagged={height_quality['median_tagged_m']:.1f}m → mode={height_mode}"
           f"{' (override)' if height_mode_override else ''}")
+    height_mapping = building_height_mapping_context(buildings_gdf)
+    height_mapping["layer_height_mm"] = effective_printer.layer_height_mm
+    print("[preprocess] height_mapping: "
+          f"policy={height_mapping['policy_version']}, "
+          f"verified={height_mapping['verified_height_count']}, "
+          f"ceiling={height_mapping['height_ceiling_m']:.1f}m, "
+          f"layer={effective_printer.layer_height_mm:.3f}mm")
 
     # ---- Step 2: city blocks ----
     t2 = time.time()
@@ -1709,7 +1732,9 @@ def preprocess_layers(
         buildings_gdf, city_blocks, enable_hotspot, hotspot_relax,
         height_mode=height_mode,
         narrow_threshold=narrow_threshold,
-        narrow_penalty_factor=narrow_penalty)
+        narrow_penalty_factor=narrow_penalty,
+        height_ceiling_m=height_mapping["height_ceiling_m"],
+        layer_height_mm=effective_printer.layer_height_mm)
     BL_polys = [p for p, _ in BL_with_heights]
     print(f"[preprocess] _extract_BL: {time.time() - t3:.1f}s")
 
@@ -1759,6 +1784,20 @@ def preprocess_layers(
     filtered = _apply_subtraction_and_filter(
         BL_with_heights, BL_categories, BO_polys, VL_polys, VO_polys,
         WL_polys, WO_polys, BO_filled_ids, min_area_m2)
+    printable_heights = np.asarray(
+        [height for _, height in filtered["BL"]], dtype=float)
+    height_mapping.update({
+        "printable_landmark_count": int(len(printable_heights)),
+        "model_height_min_mm": (
+            round(float(printable_heights.min()), 3)
+            if len(printable_heights) else None),
+        "model_height_p50_mm": (
+            round(float(np.percentile(printable_heights, 50)), 3)
+            if len(printable_heights) else None),
+        "model_height_max_mm": (
+            round(float(printable_heights.max()), 3)
+            if len(printable_heights) else None),
+    })
     print(f"[preprocess] subtraction+filter: {time.time() - t7:.1f}s")
 
     # ---- Step 8.5: block_base (与 PNG brick_render 对齐) ----
@@ -1820,6 +1859,7 @@ def preprocess_layers(
         roads_lines=roads_lines,
         road_roles=road_role_evidence,
         water_roles=water_role_evidence,
+        building_height_evidence=height_mapping,
         nozzle_real_m=nozzle_real_m,
         min_area_m2=min_area_m2,
     )

@@ -80,6 +80,22 @@ PRESETS = {
     },
 }
 
+
+def _height_store_evidence():
+    """Describe the offline height database without creating a missing one."""
+    from _TEXTURE_STYLE_OF_DEEPSEEK.config import OVERTURE_CACHE_DIR
+    from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.building_height_store import (
+        height_store_identity,
+    )
+
+    cache_dir = OVERTURE_CACHE_DIR
+    if not os.path.isabs(cache_dir):
+        cache_dir = os.path.join(_project_root, cache_dir)
+    evidence = height_store_identity(
+        os.path.join(cache_dir, "building_heights.sqlite3"))
+    evidence["path"] = os.path.relpath(evidence["path"], _project_root)
+    return evidence
+
 # ---------------------------------------------------------------------------
 # CLI 参数
 # ---------------------------------------------------------------------------
@@ -750,6 +766,12 @@ def main():
         print("  No building features found")
         buildings_gdf = None
 
+    height_store_evidence = _height_store_evidence()
+    print("  Height evidence: "
+          f"fingerprint={height_store_evidence['fingerprint']}, "
+          f"landmarks={height_store_evidence['landmark_height_count']}, "
+          f"observations={height_store_evidence['observation_count']}")
+
     # =====================================================================
     # Stage 3c: Fetch roads data (CLI only)
     # =====================================================================
@@ -1025,6 +1047,7 @@ def main():
             "merge": MERGE_BLOCK_LAYERS,
             "printer_profile": printer_profile.to_dict(),
             "preprocess_policy": PREPROCESS_POLICY_VERSION,
+            "height_store": height_store_evidence["fingerprint"],
             "amap_salience": _amap_salience_cache_fingerprint(
                 cli_args.amap_salience, _amap_evidence),
         }
@@ -1591,6 +1614,10 @@ def main():
         source_features=_source_features,
         printable_features=_printable_features,
         height_sources=_height_sources,
+        height_evidence={
+            "store": height_store_evidence,
+            "mapping": getattr(layers, "building_height_evidence", {}) or {},
+        },
         block_base={
             "requested_mode": "textured" if _block_base_enabled else "off",
             "resolved_mode": "textured" if _block_base_enabled else "off",

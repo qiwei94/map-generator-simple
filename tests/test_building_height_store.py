@@ -2,6 +2,7 @@ from shapely.geometry import box
 
 from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.building_height_store import (
     BuildingHeightStore,
+    height_store_identity,
 )
 
 
@@ -82,3 +83,35 @@ def test_status_and_online_backup_are_readable(tmp_path):
     backup(store, destination)
     reopened = BuildingHeightStore(str(destination))
     assert len(reopened.query_bbox("osm", (-1, -1, 2, 2))) == 1
+
+
+def test_height_store_identity_tracks_evidence_not_refresh_time(tmp_path):
+    path = tmp_path / "heights.sqlite3"
+    store = BuildingHeightStore(str(path))
+    assert height_store_identity(str(path))["fingerprint"] != "none"
+
+    store.put_landmark(
+        "Q1", status="ok", height_m=88, label="Tower", confidence=1.0,
+        raw={"retrieval": 1},
+    )
+    first = height_store_identity(str(path))
+    assert first["landmark_height_count"] == 1
+
+    # Refreshing the same normalized evidence must not invalidate tiles.
+    store.put_landmark(
+        "Q1", status="ok", height_m=88, label="Tower", confidence=1.0,
+        raw={"retrieval": 2},
+    )
+    assert height_store_identity(str(path))["fingerprint"] == first["fingerprint"]
+
+    # A geometry-affecting height change must invalidate materialized output.
+    store.put_landmark(
+        "Q1", status="ok", height_m=101, label="Tower", confidence=1.0)
+    changed = height_store_identity(str(path))
+    assert changed["fingerprint"] != first["fingerprint"]
+
+
+def test_missing_height_store_has_stable_empty_identity(tmp_path):
+    identity = height_store_identity(str(tmp_path / "missing.sqlite3"))
+    assert identity["exists"] is False
+    assert identity["fingerprint"] == "none"

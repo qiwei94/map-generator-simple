@@ -76,6 +76,19 @@ sha256sum -c manifests/SHA256SUMS
 恢复不能只检查文件存在，还必须运行非慢速测试、对代表城市核对道路/水体/建筑
 数量，并生成真实 3MF 通过项目验证器。缓存只用于加速，不能代替来源和参数记录。
 
+高度证据恢复到 Windows WSL 热工作区时使用仓库脚本，避免把 WAL 状态中的运行库
+直接复制成损坏文件：
+
+```bash
+bash tools/install_height_cache_snapshot.sh \
+  /mnt/f/map-generator-vault/incoming/height-cache-20260826.tar.gz \
+  /home/mapworker/map-generator-simple
+python tools/building_height_cache.py status
+```
+
+恢复后必须核对 SQLite `integrity=ok`、正高度地标数和证据指纹；正式生成的
+`design_spec.json` schema 1.3 会携带同一指纹及模型 Z 映射证据。
+
 ## 后续约束
 
 - 每个新数据源必须记录 provider、版本/日期、空间范围、许可、原始 URL、校验和；
