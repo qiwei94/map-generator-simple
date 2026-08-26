@@ -61,8 +61,9 @@ staging_root="$vault_root/staging/$snapshot_id.partial"
   echo "snapshot already exists: $snapshot_root" >&2
   exit 4
 }
-[[ ! -e "$staging_root" ]] || {
+[[ ! -e "$staging_root" || "${MAP_GENERATOR_VAULT_RESUME:-0}" == "1" ]] || {
   echo "partial snapshot already exists; inspect it manually: $staging_root" >&2
+  echo "set MAP_GENERATOR_VAULT_RESUME=1 to resume it without deleting files" >&2
   exit 4
 }
 
@@ -91,19 +92,37 @@ fi
 mkdir -p "$staging_root/code" "$staging_root/runtime" \
   "$staging_root/evidence" "$staging_root/manifests"
 
-cp -p "$controller_bundle" "$staging_root/code/"
-cp -p "$height_archive" "$staging_root/evidence/"
+copy_immutable_input() {
+  local source="$1"
+  local destination="$2"
+  if [[ -e "$destination" ]]; then
+    cmp -s "$source" "$destination" || {
+      echo "partial snapshot input differs: $destination" >&2
+      exit 6
+    }
+    return
+  fi
+  cp -p "$source" "$destination"
+}
+
+copy_immutable_input \
+  "$controller_bundle" "$staging_root/code/$(basename "$controller_bundle")"
+copy_immutable_input \
+  "$height_archive" "$staging_root/evidence/$(basename "$height_archive")"
 
 # Preserve the exact working data used by the current Windows renderer. The
 # live copies stay on the WSL virtual SSD; this copy is disaster recovery.
 rsync -a "$pipeline_cache/" "$staging_root/runtime/pipeline_cache/"
 rsync -a "$pbf_cache/" "$staging_root/runtime/pbf_cache/"
 
-git -C "$repo" bundle create \
-  "$staging_root/code/windows-worktree-all-refs.bundle" --all
-git bundle verify "$staging_root/code/$(basename "$controller_bundle")" \
+windows_bundle="$staging_root/code/windows-worktree-all-refs.bundle"
+if [[ ! -e "$windows_bundle" ]]; then
+  git -C "$repo" bundle create "$windows_bundle" --all
+fi
+git -C "$repo" bundle verify \
+  "$staging_root/code/$(basename "$controller_bundle")" \
   >"$staging_root/manifests/controller-bundle-verify.txt" 2>&1
-git bundle verify "$staging_root/code/windows-worktree-all-refs.bundle" \
+git -C "$repo" bundle verify "$windows_bundle" \
   >"$staging_root/manifests/windows-bundle-verify.txt" 2>&1
 
 {

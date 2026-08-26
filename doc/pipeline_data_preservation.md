@@ -37,7 +37,8 @@ Windows 是主计算节点兼大容量冷归档节点，但两种用途必须分
 ```
 
 `snapshots/` 中已有名字禁止覆盖。发生失败时保留 `staging/*.partial` 供人工检查，
-脚本不会自行删除数据。
+脚本不会自行删除数据。修复失败原因后可设置 `MAP_GENERATOR_VAULT_RESUME=1`
+继续同一 partial；脚本会拒绝内容不同的输入文件，并用 `rsync` 校验已有副本。
 
 ## 创建里程碑快照
 
@@ -82,4 +83,3 @@ sha256sum -c manifests/SHA256SUMS
 - 重要人工选择和城市地标匹配应进入结构化配置，不只存在聊天或图片标题中；
 - 金库不能成为唯一副本：代码继续推 Git，关键 SQLite/清单同步到 `cloud-data`；
 - 不自动将 Windows 注册为无限并发 worker，直到队列具备能力匹配与事务租约。
-
