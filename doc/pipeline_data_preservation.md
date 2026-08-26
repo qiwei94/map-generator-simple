@@ -83,3 +83,15 @@ sha256sum -c manifests/SHA256SUMS
 - 重要人工选择和城市地标匹配应进入结构化配置，不只存在聊天或图片标题中；
 - 金库不能成为唯一副本：代码继续推 Git，关键 SQLite/清单同步到 `cloud-data`；
 - 不自动将 Windows 注册为无限并发 worker，直到队列具备能力匹配与事务租约。
+
+## 首份验收快照（2026-08-26）
+
+- 路径：`/mnt/f/map-generator-vault/snapshots/20260826-54cbd15-pipeline-evidence`
+- 大小：9.6 GB；SHA-256 清单 119 项，回读通过 119 项；
+- 代码：controller 全量 Git bundle 包含 45 refs，目标提交 `54cbd15`；
+- 热数据备份：17 个 PBF、92 个 pipeline cache 文件；
+- 高度证据：地标 SQLite、正/负缓存、JSON/CSV 清单及安全备份；
+- 既有 F 盘数据：约 167 GB，已生成逐文件目录和两级规模清单，未重复复制；
+- Windows 工作区随后快进到 `337bb1f`，非慢速测试结果为
+  `552 passed, 2 skipped, 11 deselected`；该提交已推送 GitHub，增量 bundle 保存在
+  金库 `incoming/`。
