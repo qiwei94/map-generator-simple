@@ -547,6 +547,34 @@ class OsmiumCLIFetcher:
             grid, s, w, n, e = ndsm_cache
             ndsm_heights = sample_building_heights_from_ndsm(
                 gdf, grid, s, w, n, e)
+        wikidata_heights = None
+        try:
+            from _TEXTURE_STYLE_OF_DEEPSEEK.config import (
+                OVERTURE_CACHE_DIR,
+                WIKIDATA_HEIGHT_AUTO_FETCH,
+                WIKIDATA_HEIGHT_ENABLED,
+            )
+            if WIKIDATA_HEIGHT_ENABLED:
+                from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.wikidata_height_enrichment import (
+                    load_wikidata_heights,
+                )
+                _height_cache = OVERTURE_CACHE_DIR
+                if not os.path.isabs(_height_cache):
+                    _project_root = os.path.dirname(os.path.dirname(os.path.dirname(
+                        os.path.dirname(os.path.abspath(__file__)))))
+                    _height_cache = os.path.join(_project_root, _height_cache)
+                wikidata_heights, wikidata_names = load_wikidata_heights(
+                    gdf, cache_dir=_height_cache,
+                    auto_fetch=WIKIDATA_HEIGHT_AUTO_FETCH,
+                )
+                if "name" in gdf.columns:
+                    fill_name = (
+                        (gdf["name"].isna() | (gdf["name"] == ""))
+                        & wikidata_names.notna()
+                    )
+                    gdf.loc[fill_name, "name"] = wikidata_names[fill_name]
+        except Exception:
+            pass
         overture_heights = None
         from _TEXTURE_STYLE_OF_DEEPSEEK.config import (
             OVERTURE_AUTO_DOWNLOAD,
@@ -570,7 +598,22 @@ class OsmiumCLIFetcher:
             except Exception:
                 pass
         gdf["est_height"] = _estimate_building_heights(
-            gdf, ndsm_heights, overture_heights)
+            gdf, ndsm_heights, overture_heights,
+            wikidata_heights=wikidata_heights)
+        try:
+            from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.height_enrichment import (
+                persist_osm_height_tags,
+            )
+            from _TEXTURE_STYLE_OF_DEEPSEEK.config import OVERTURE_CACHE_DIR
+            _persist_cache = OVERTURE_CACHE_DIR
+            if not os.path.isabs(_persist_cache):
+                _project_root = os.path.dirname(os.path.dirname(os.path.dirname(
+                    os.path.dirname(os.path.abspath(__file__)))))
+                _persist_cache = os.path.join(_project_root, _persist_cache)
+            persist_osm_height_tags(
+                gdf, (south, west, north, east), cache_dir=_persist_cache)
+        except Exception:
+            pass
         return gdf
 
     # ==================================================================

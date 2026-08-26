@@ -63,3 +63,22 @@ def test_missing_landmark_is_persisted_as_negative_cache(tmp_path):
     assert rows["Q123"]["status"] == "missing"
     assert "Q999" not in rows
 
+
+def test_status_and_online_backup_are_readable(tmp_path):
+    from tools.building_height_cache import backup, status
+
+    store = BuildingHeightStore(str(tmp_path / "heights.sqlite3"))
+    store.put_observations(
+        [{"source_feature_id": "one", "height_m": 12,
+          "geometry": box(0, 0, 1, 1)}],
+        source="osm", source_release="test",
+    )
+    report = status(store)
+    assert report["integrity"] == "ok"
+    assert report["missing_rtree_rows"] == 0
+    assert report["observations"][0]["count"] == 1
+
+    destination = tmp_path / "backup.sqlite3"
+    backup(store, destination)
+    reopened = BuildingHeightStore(str(destination))
+    assert len(reopened.query_bbox("osm", (-1, -1, 2, 2))) == 1

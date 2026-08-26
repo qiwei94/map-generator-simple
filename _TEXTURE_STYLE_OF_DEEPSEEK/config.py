@@ -221,6 +221,8 @@ LANDMARK_EXCLUSION_BUFFER_M = 8.0       # fallback for empty categories list
 OVERTURE_ENABLED = True                 # [TOGGLE] 启用 Overture AI 高度注入
 OVERTURE_CACHE_DIR = "data/height_cache"  # 离线 Parquet 缓存目录
 OVERTURE_AUTO_DOWNLOAD = False          # 缓存未命中时是否自动下载
+WIKIDATA_HEIGHT_ENABLED = True          # 读取 OSM wikidata 标记的地标高度缓存
+WIKIDATA_HEIGHT_AUTO_FETCH = False      # 缺失 QID 是否访问 Wikibase API；默认离线
 
 BUILDING_VERIFIED_HEIGHT_ONLY = True    # [TOGGLE] True=只保留有真实高度的建筑(osm_height/osm_levels/overture)，跳过默认10m推测
 

@@ -345,7 +345,8 @@ def _extract_BL_vectorized(
 
     # ---- 动态高度覆盖率：替代写死的 BUILDING_VERIFIED_HEIGHT_ONLY ----
     if "height_source" in buildings_gdf.columns:
-        _n_verified = (buildings_gdf["height_source"] == "overture").sum()
+        _verified_sources = {"osm_height", "osm_levels", "wikidata", "overture"}
+        _n_verified = buildings_gdf["height_source"].isin(_verified_sources).sum()
         _height_coverage = _n_verified / max(len(buildings_gdf), 1)
     else:
         _height_coverage = 0.0
@@ -437,7 +438,7 @@ def _extract_BL_vectorized(
         # (replaces hardcoded BUILDING_VERIFIED_HEIGHT_ONLY=True)
         if _height_coverage >= 0.30:
             h_source = row.get("height_source", "default")
-            if h_source != "overture":
+            if h_source not in _verified_sources:
                 continue
 
         # 4-category classification
@@ -572,7 +573,8 @@ def _extract_BL_legacy(
 
     # ---- 动态高度覆盖率：替代写死的 BUILDING_VERIFIED_HEIGHT_ONLY ----
     if "height_source" in buildings_gdf.columns:
-        _n_verified = (buildings_gdf["height_source"] == "overture").sum()
+        _verified_sources = {"osm_height", "osm_levels", "wikidata", "overture"}
+        _n_verified = buildings_gdf["height_source"].isin(_verified_sources).sum()
         _height_coverage = _n_verified / max(len(buildings_gdf), 1)
     else:
         _height_coverage = 0.0
@@ -608,7 +610,7 @@ def _extract_BL_legacy(
         # (replaces hardcoded BUILDING_VERIFIED_HEIGHT_ONLY=True)
         if _height_coverage >= 0.30:
             h_source = row.get("height_source", "default")
-            if h_source != "overture":
+            if h_source not in _verified_sources:
                 continue
 
         # 4-category classification

@@ -325,6 +325,13 @@ class BuildingHeightStore:
                 "name": row["name"],
                 "geometry": wkb.loads(row["geom_wkb"]),
             })
+        if not records:
+            return gpd.GeoDataFrame(
+                columns=["source_feature_id", "source_release", "height",
+                         "num_floors", "height_kind", "confidence", "name",
+                         "geometry"],
+                geometry="geometry", crs="EPSG:4326",
+            )
         return gpd.GeoDataFrame(records, geometry="geometry", crs="EPSG:4326")
 
     def put_landmark(
@@ -401,4 +408,3 @@ class BuildingHeightStore:
                  _json(response_json) if response_json is not None else None,
                  response_path, _utcnow(), expires_at, error),
             )
-

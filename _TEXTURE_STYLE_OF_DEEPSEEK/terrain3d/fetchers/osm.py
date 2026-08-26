@@ -564,7 +564,11 @@ def fetch_buildings(
     pbf_path = _resolve_pbf_path()
 
     # Check tile cache
-    cached = _check_tile_cache("building", south, west, north, east)
+    # Height source semantics changed in v2 (persistent Wikidata/Overture and
+    # nDSM demotion).  Do not reuse old final building tiles that already
+    # contain stale est_height/height_source columns.
+    building_cache_key = "building_height_v2"
+    cached = _check_tile_cache(building_cache_key, south, west, north, east)
     if cached is not None:
         return cached
 
@@ -605,7 +609,35 @@ def fetch_buildings(
                 result, grid, s, w, n, e
             )
 
-        # Overture Maps height enrichment (priority 4, between nDSM and default)
+        # Cached Wikidata heights are only considered for OSM-tagged landmarks.
+        wikidata_heights = None
+        try:
+            from _TEXTURE_STYLE_OF_DEEPSEEK.config import (
+                OVERTURE_CACHE_DIR,
+                WIKIDATA_HEIGHT_AUTO_FETCH,
+                WIKIDATA_HEIGHT_ENABLED,
+            )
+            if WIKIDATA_HEIGHT_ENABLED:
+                from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.wikidata_height_enrichment import (
+                    load_wikidata_heights,
+                )
+                _height_cache = OVERTURE_CACHE_DIR
+                if not os.path.isabs(_height_cache):
+                    _height_cache = os.path.join(_project_root, _height_cache)
+                wikidata_heights, wikidata_names = load_wikidata_heights(
+                    result, cache_dir=_height_cache,
+                    auto_fetch=WIKIDATA_HEIGHT_AUTO_FETCH,
+                )
+                if "name" in result.columns:
+                    fill_name = (
+                        (result["name"].isna() | (result["name"] == ""))
+                        & wikidata_names.notna()
+                    )
+                    result.loc[fill_name, "name"] = wikidata_names[fill_name]
+        except Exception as e:
+            logger.warning("Wikidata height enrichment failed: %s", e)
+
+        # Overture Maps height enrichment.
         overture_heights = None
         from _TEXTURE_STYLE_OF_DEEPSEEK.config import (
             OVERTURE_AUTO_DOWNLOAD,
@@ -640,11 +672,23 @@ def fetch_buildings(
                 logging.getLogger(__name__).warning(f"Overture enrichment failed: {e}")
 
         result["est_height"] = _estimate_building_heights(
-            result, ndsm_heights, overture_heights)
+            result, ndsm_heights, overture_heights,
+            wikidata_heights=wikidata_heights)
+        try:
+            from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.height_enrichment import (
+                persist_osm_height_tags,
+            )
+            _height_cache = OVERTURE_CACHE_DIR
+            if not os.path.isabs(_height_cache):
+                _height_cache = os.path.join(_project_root, _height_cache)
+            persist_osm_height_tags(
+                result, (south, west, north, east), cache_dir=_height_cache)
+        except Exception as e:
+            logger.warning("Persisting OSM building heights failed: %s", e)
 
     # Save to tile cache
     if not result.empty:
-        _save_tile_cache("building", south, west, north, east, result)
+        _save_tile_cache(building_cache_key, south, west, north, east, result)
 
     return result
 
@@ -863,23 +907,26 @@ def get_ndsm_grid():
 
 def _estimate_building_heights(gdf: gpd.GeoDataFrame,
                                 ndsm_heights: "pd.Series | None" = None,
-                                overture_heights: "pd.Series | None" = None) -> pd.Series:
-    """Estimate building heights from OSM tags + optional nDSM + Overture.
+                                overture_heights: "pd.Series | None" = None,
+                                wikidata_heights: "pd.Series | None" = None) -> pd.Series:
+    """Estimate heights from tagged, cached vector data plus raster fallback.
 
     Priority:
         1. height tag (direct value in meters)
         2. building:levels * BUILDING_LEVEL_HEIGHT_M
-        3. nDSM satellite-derived height (if provided)
-        4. Overture Maps AI-estimated height (if provided)
-        5. BUILDING_DEFAULT_HEIGHT_M fallback
+        3. Wikidata height for identified landmarks (if cached/provided)
+        4. Overture building height (if matched with sufficient overlap)
+        5. nDSM satellite-derived height (last-resort raster evidence)
+        6. BUILDING_DEFAULT_HEIGHT_M fallback
 
     Also sets gdf["height_source"] column to track provenance:
-        'osm_height', 'osm_levels', 'ndsm', 'overture', 'default'
+        'osm_height', 'osm_levels', 'wikidata', 'overture', 'ndsm', 'default'
 
     Args:
         gdf: Building GeoDataFrame.
         ndsm_heights: Optional Series of nDSM-derived heights (NaN = unavailable).
         overture_heights: Optional Series of Overture AI heights (NaN = unavailable).
+        wikidata_heights: Optional landmark height Series (NaN = unavailable).
 
     Returns:
         Series of estimated heights in meters.
@@ -889,7 +936,9 @@ def _estimate_building_heights(gdf: gpd.GeoDataFrame,
         BUILDING_LEVEL_HEIGHT_M,
     )
 
-    MAX_HEIGHT_M = 800
+    # Tall landmarks such as Burj Khalifa exceed the old 800 m parser cap.
+    # Model-space compression still applies a much lower visual ceiling.
+    MAX_HEIGHT_M = 1200
     heights = pd.Series(BUILDING_DEFAULT_HEIGHT_M, index=gdf.index)
     sources = pd.Series("default", index=gdf.index)
 
@@ -913,21 +962,35 @@ def _estimate_building_heights(gdf: gpd.GeoDataFrame,
         ).clip(upper=MAX_HEIGHT_M)
         sources[valid_levels] = "osm_levels"
 
-    # Priority 3: nDSM — fill buildings still at default
-    if ndsm_heights is not None:
+    # Priority 3: Wikidata — only OSM-tagged landmark rows can have values.
+    if wikidata_heights is not None:
         at_default = heights.eq(BUILDING_DEFAULT_HEIGHT_M)
-        valid_ndsm = ndsm_heights.notna() & (ndsm_heights > 0)
-        use_ndsm = at_default & valid_ndsm
-        heights[use_ndsm] = ndsm_heights[use_ndsm]
-        sources[use_ndsm] = "ndsm"
+        valid_wd = (
+            wikidata_heights.notna() & (wikidata_heights > 0)
+            & (wikidata_heights <= MAX_HEIGHT_M)
+        )
+        use_wd = at_default & valid_wd
+        heights[use_wd] = wikidata_heights[use_wd]
+        sources[use_wd] = "wikidata"
 
-    # Priority 4: Overture Maps — fill buildings still at default
+    # Priority 4: Overture Maps — fill buildings still at default.
     if overture_heights is not None:
         at_default = heights.eq(BUILDING_DEFAULT_HEIGHT_M)
         valid_ov = overture_heights.notna() & (overture_heights > 0) & (overture_heights <= MAX_HEIGHT_M)
         use_ov = at_default & valid_ov
         heights[use_ov] = overture_heights[use_ov]
         sources[use_ov] = "overture"
+
+    # Priority 5: nDSM — retained only as the final raster fallback.
+    if ndsm_heights is not None:
+        at_default = heights.eq(BUILDING_DEFAULT_HEIGHT_M)
+        valid_ndsm = (
+            ndsm_heights.notna() & (ndsm_heights > 0)
+            & (ndsm_heights <= MAX_HEIGHT_M)
+        )
+        use_ndsm = at_default & valid_ndsm
+        heights[use_ndsm] = ndsm_heights[use_ndsm]
+        sources[use_ndsm] = "ndsm"
 
     # Track provenance in the GeoDataFrame
     gdf["height_source"] = sources
