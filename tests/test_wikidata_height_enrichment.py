@@ -74,4 +74,3 @@ def test_wikidata_height_and_negative_result_are_both_cached(tmp_path):
 def test_wikidata_height_units_are_normalized_to_meters():
     assert wikidata._height_from_entity(_entity(1000, unit="Q174728")) == 10
     assert wikidata._height_from_entity(_entity(100, unit="Q3710")) == 30.48
-
