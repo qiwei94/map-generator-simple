@@ -97,6 +97,12 @@ pyosmium 回退。建筑高度补强还可安装 Overture 官方 CLI（macOS：
 管线需要 OSM 的 `.osm.pbf` 与高程 DEM。本地 `pbf_cache/` 放对应区域 PBF 即可生成。
 项目支持**三态数据可用性**：本地就绪 / 远端可拉取 / 无数据。配置一台数据源服务器后，缺失区域可在页面一键 `scp` 拉取（拉一次永久复用）。
 
+建筑高度采用“原始文件 + SQLite/RTree 标准化库”双层持久缓存。OSM 显式高度、
+楼层数、Overture 匹配结果以及 Wikidata 地标的成功/无高度结果都会保存在
+`data/height_cache/`，后续取景直接复用。默认生成不主动访问远端；缓存检查、
+备份、GeoParquet 导出及数据来源优先级见
+[`doc/building_height_data.md`](doc/building_height_data.md)。
+
 中国区域的高德无标注瓦片只作为可选水面补强。离线 worker 或正式回归应关闭
 实时抓取，避免缓存未命中时把数百个串行 HTTP 请求塞进生成关键路径：
 

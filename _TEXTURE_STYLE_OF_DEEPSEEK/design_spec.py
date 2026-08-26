@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
 
 
-SCHEMA_VERSION = "1.1"
+SCHEMA_VERSION = "1.2"
 
 
 def _json_value(value: Any) -> Any:
@@ -95,6 +95,7 @@ def build_design_spec(
     profile: Optional[Mapping] = None,
     source_features: Optional[Mapping[str, int]] = None,
     printable_features: Optional[Mapping[str, int]] = None,
+    height_sources: Optional[Mapping[str, int]] = None,
     block_base: Optional[Mapping] = None,
     printability: Optional[Mapping] = None,
     road_roles: Optional[Mapping] = None,
@@ -112,7 +113,10 @@ def build_design_spec(
               for key, value in (source_features or {}).items()}
     printable = {str(key): int(value)
                  for key, value in (printable_features or {}).items()}
-    if any(value < 0 for value in (*source.values(), *printable.values())):
+    heights = {str(key): int(value)
+               for key, value in (height_sources or {}).items()}
+    if any(value < 0 for value in (
+            *source.values(), *printable.values(), *heights.values())):
         raise ValueError("feature counts must be non-negative")
 
     return {
@@ -133,6 +137,7 @@ def build_design_spec(
         "evidence": {
             "source_features": source,
             "printable_features": printable,
+            "building_height_sources": heights,
         },
     }
 

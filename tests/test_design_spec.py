@@ -26,6 +26,7 @@ def test_full_design_spec_records_artifact_and_feature_evidence(tmp_path):
         decisions={"road_tier": "large area printability cap"},
         source_features={"roads": 253628, "water": 1224},
         printable_features=layer_evidence(layers),
+        height_sources={"osm_height": 12, "default": 88},
         block_base={"requested_mode": "textured", "resolved_mode": "textured"},
         road_roles={"policy_version": "print-road-roles-v1",
                     "visible_segments": 5},
@@ -35,7 +36,7 @@ def test_full_design_spec_records_artifact_and_feature_evidence(tmp_path):
     path = write_design_spec(tmp_path, spec)
     saved = json.loads(open(path, encoding="utf-8").read())
 
-    assert saved["schema_version"] == "1.1"
+    assert saved["schema_version"] == "1.2"
     assert saved["artifact"]["filename"] == "model.3mf"
     assert saved["artifact"]["size_bytes"] == len(b"real-3mf-fixture")
     assert len(saved["artifact"]["sha256"]) == 64
@@ -45,6 +46,8 @@ def test_full_design_spec_records_artifact_and_feature_evidence(tmp_path):
     assert saved["road_roles"]["policy_version"] == "print-road-roles-v1"
     assert saved["water_roles"]["policy_version"] == "print-water-roles-v1"
     assert saved["evidence"]["printable_features"]["water_selected_groups"] == 2
+    assert saved["evidence"]["building_height_sources"] == {
+        "default": 88, "osm_height": 12}
 
 
 def test_design_spec_serializes_printability_report(tmp_path):

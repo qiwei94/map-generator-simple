@@ -1573,6 +1573,13 @@ def main():
         "water_relief_shells": len(water_relief["surface_levels_mm"]),
         "water_carved_terrain_vertices": water_relief["carved_vertex_count"],
     })
+    _height_sources = {}
+    if buildings_gdf is not None and "height_source" in buildings_gdf.columns:
+        _height_sources = {
+            str(source): int(count)
+            for source, count in buildings_gdf["height_source"].value_counts(
+                dropna=False).items()
+        }
     _design_spec = build_design_spec(
         city=CITY_NAME,
         bbox_wgs84=(south, west, north, east),
@@ -1583,6 +1590,7 @@ def main():
         profile=_profile,
         source_features=_source_features,
         printable_features=_printable_features,
+        height_sources=_height_sources,
         block_base={
             "requested_mode": "textured" if _block_base_enabled else "off",
             "resolved_mode": "textured" if _block_base_enabled else "off",
