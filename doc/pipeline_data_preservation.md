@@ -108,3 +108,16 @@ python tools/building_height_cache.py status
 - Windows 工作区随后快进到 `337bb1f`，非慢速测试结果为
   `552 passed, 2 skipped, 11 deselected`；该提交已推送 GitHub，增量 bundle 保存在
   金库 `incoming/`。
+
+## 高度入模验收增量（2026-08-26）
+
+- Windows 工作区：`2971683`，Python 3.12 非慢速测试
+  `562 passed, 2 skipped, 11 deselected`；
+- 正式芝加哥 25 km 3MF：V1–V14、0 errors、0 warnings；
+- 成品归档：
+  `/mnt/f/map-generator-vault/artifacts/height_v18_chicago_25km-2971683/`；
+- 高度库安全备份：
+  `/mnt/f/map-generator-vault/incoming/building_heights_20260826_chicago-v18.sqlite3`，
+  `integrity=ok`，含 314,198 条 OSM 观测与 207 条 Wikidata 正高度；
+- 完整证据和限制见
+  [`building_height_pipeline_validation_20260826.md`](building_height_pipeline_validation_20260826.md)。
