@@ -38,6 +38,10 @@ from _TEXTURE_STYLE_OF_DEEPSEEK._landmark import (
     is_tag_landmark,
     classify_landmark,
     LandmarkCategory,
+    LANDMARK_BUILDING_TYPES,
+    LANDMARK_TOURISM,
+    LANDMARK_AMENITY,
+    LANDMARK_MAN_MADE,
     is_vegetation_landmark,
     is_water_landmark,
     compute_top_percent_threshold,
@@ -114,7 +118,12 @@ PREPROCESS_POLICY_VERSION = (
     f"roads={ROAD_ROLE_POLICY_VERSION}|water={WATER_ROLE_POLICY_VERSION}"
     "|block_base_clearance=post-transform-v1"
     f"|building_height={HEIGHT_MAPPING_POLICY_VERSION}"
+    "|building_height_roles=identity-anchor-background-v2"
 )
+
+BUILDING_HEIGHT_ROLE_POLICY_VERSION = "identity-anchor-background-v2"
+_STRONG_EXACT_HEIGHT_SOURCES = {"osm_height", "wikidata", "overture"}
+_IDENTITY_EXACT_HEIGHT_SOURCES = _STRONG_EXACT_HEIGHT_SOURCES | {"osm_levels"}
 
 
 # ---------------------------------------------------------------------------
@@ -282,6 +291,116 @@ def _flat_mode_height(area_m2: float) -> float:
         return BUILDING_FLAT_HEIGHT_LOW_MM
 
 
+def _resolve_building_height_role(
+    row: pd.Series,
+    poly: Polygon,
+    *,
+    area_m2: float,
+    est_height_m: float,
+    height_top_thr: float,
+    category: LandmarkCategory,
+    hotspot: bool,
+    height_ceiling_m: Optional[float],
+    layer_height_mm: float,
+    narrow_threshold: float,
+    narrow_penalty_factor: float,
+) -> Tuple[float, str]:
+    """Resolve deterministic landmark Z semantics.
+
+    Exact source heights are reserved for buildings that carry city identity
+    or are reliable vertical outliers.  Other individually retained
+    footprints stay in a quiet, layer-aligned background band: their geometry
+    still contributes urban density, but noisy levels/area estimates cannot
+    turn anonymous buildings into false landmarks.
+    """
+    from _TEXTURE_STYLE_OF_DEEPSEEK.config import (
+        BUILDING_HEIGHT_MIN_MM,
+        BUILDING_HEIGHT_MAX_MM,
+    )
+
+    raw_source = row.get("height_source", "default")
+    source = (str(raw_source) if pd.notna(raw_source) else "default")
+    try:
+        numeric_height = float(est_height_m)
+    except (TypeError, ValueError):
+        numeric_height = float("nan")
+    has_height = (
+        math.isfinite(numeric_height)
+        and numeric_height > 0
+        and numeric_height != float(BUILDING_DEFAULT_HEIGHT_M)
+    )
+    def _present(key: str) -> bool:
+        value = row.get(key)
+        return pd.notna(value) and str(value).strip() not in {"", "nan", "None"}
+
+    # is_tag_landmark deliberately includes named commercial buildings for
+    # footprint retention.  That is too broad for exact Z: identity height is
+    # restricted to explicit knowledge/history/type signals or a curated
+    # semantic category, so an ordinary named office cannot become a false
+    # hero building merely because building:levels exists.
+    building_kind = row.get("building")
+    tourism_kind = row.get("tourism")
+    amenity_kind = row.get("amenity")
+    man_made_kind = row.get("man_made")
+    identity_signal = (
+        category in {
+            LandmarkCategory.SPIRITUAL,
+            LandmarkCategory.URBAN_HUB,
+            LandmarkCategory.SEMANTIC,
+        }
+        or any(_present(key) for key in (
+            "wikidata", "wikipedia", "historic", "heritage",
+            "tower:type", "religion", "government", "military", "museum",
+        ))
+        or (pd.notna(building_kind)
+            and building_kind in LANDMARK_BUILDING_TYPES)
+        or (pd.notna(tourism_kind) and tourism_kind in LANDMARK_TOURISM)
+        or (pd.notna(amenity_kind) and amenity_kind in LANDMARK_AMENITY)
+        or (pd.notna(man_made_kind) and man_made_kind in LANDMARK_MAN_MADE)
+    )
+    identity_exact = (
+        identity_signal
+        and has_height
+        and source in _IDENTITY_EXACT_HEIGHT_SOURCES
+    )
+    visual_anchor_exact = (
+        not identity_signal
+        and has_height
+        and source in _STRONG_EXACT_HEIGHT_SOURCES
+        and math.isfinite(float(height_top_thr))
+        and numeric_height >= float(height_top_thr)
+    )
+
+    params = LANDMARK_CATEGORY_PARAMS[category]
+    if identity_exact or visual_anchor_exact:
+        role = "identity_exact" if identity_exact else "visual_anchor_exact"
+        height_mm = _compress_height(
+            est_height_m, area_m2, height_ceiling_m=height_ceiling_m)
+        height_mm = _narrow_building_penalty(
+            poly, height_mm,
+            threshold=narrow_threshold,
+            factor=narrow_penalty_factor,
+        )
+        height_mm += params["height_add_mm"]
+    elif identity_signal:
+        # No trustworthy absolute height: make the identity building visible,
+        # but do not pretend an area-derived estimate is precise evidence.
+        role = "identity_stylized"
+        model_span = max(0.0, BUILDING_HEIGHT_MAX_MM - BUILDING_HEIGHT_MIN_MM)
+        height_mm = (
+            BUILDING_HEIGHT_MIN_MM
+            + model_span * 0.35
+            + params["height_add_mm"]
+        )
+    else:
+        role = "background_stylized"
+        # Two complete layers above the BL floor gives a physical distinction
+        # from block fill while keeping anonymous buildings visually quiet.
+        height_mm = BUILDING_HEIGHT_MIN_MM + 2.0 * layer_height_mm
+
+    return _quantize_height_mm(height_mm, layer_height_mm), role
+
+
 # ---------------------------------------------------------------------------
 # B.1.4.2: 提取建筑地标 + 计算高度
 # ---------------------------------------------------------------------------
@@ -301,18 +420,18 @@ def _extract_BL(
     narrow_penalty_factor: float = 0.5,
     height_ceiling_m: Optional[float] = None,
     layer_height_mm: float = 0.12,
-) -> Tuple[List[Tuple[Polygon, float]], List[Polygon], List]:
-    """返回 (BL_with_heights, BO_input_smalls, BL_categories)。Dispatches to vectorized or legacy."""
+) -> Tuple[List[Tuple[Polygon, float]], List[Polygon], List, List[str]]:
+    """Return BL, BO candidates, categories and parallel height roles."""
     args = (buildings_gdf, city_blocks, enable_hotspot, hotspot_relax,
             height_mode, narrow_threshold, narrow_penalty_factor,
             height_ceiling_m, layer_height_mm)
 
     if _VERIFY_EXTRACT_BL:
         t0 = time.time()
-        bl_leg, bo_leg, cat_leg = _extract_BL_legacy(*args)
+        bl_leg, bo_leg, cat_leg, role_leg = _extract_BL_legacy(*args)
         t_leg = time.time() - t0
         t0 = time.time()
-        bl_vec, bo_vec, cat_vec = _extract_BL_vectorized(*args)
+        bl_vec, bo_vec, cat_vec, role_vec = _extract_BL_vectorized(*args)
         t_vec = time.time() - t0
         # Compare
         areas_leg = sorted([p.area for p, _ in bl_leg])
@@ -324,8 +443,8 @@ def _extract_BL(
         print(f"  [verify] time: legacy={t_leg:.1f}s, vec={t_vec:.1f}s, speedup={t_leg/max(t_vec,0.01):.1f}x")
         if not bl_match or not bo_match:
             print(f"  [verify] WARNING: mismatch! Using legacy result.")
-            return bl_leg, bo_leg, cat_leg
-        return bl_vec, bo_vec, cat_vec
+            return bl_leg, bo_leg, cat_leg, role_leg
+        return bl_vec, bo_vec, cat_vec, role_vec
 
     if _USE_VECTORIZED_BL:
         return _extract_BL_vectorized(*args)
@@ -342,14 +461,14 @@ def _extract_BL_vectorized(
     narrow_penalty_factor: float = 0.5,
     height_ceiling_m: Optional[float] = None,
     layer_height_mm: float = 0.12,
-) -> Tuple[List[Tuple[Polygon, float]], List[Polygon], List]:
+) -> Tuple[List[Tuple[Polygon, float]], List[Polygon], List, List[str]]:
     """Vectorized version of _extract_BL using geopandas batch operations."""
     # Function-level import: allows runtime monkey-patch from auto-params
     from _TEXTURE_STYLE_OF_DEEPSEEK.config import (
         BUILDING_SIMPLIFY_TOL_M, BUILDING_V2_LANDMARK_TOP_PERCENT,
     )
     if buildings_gdf is None or len(buildings_gdf) == 0:
-        return [], [], []
+        return [], [], [], []
 
     use_landmark_tags = BUILDING_V2_USE_LANDMARK_TAGS
 
@@ -366,12 +485,12 @@ def _extract_BL_vectorized(
     gdf = buildings_gdf[buildings_gdf.geometry.notnull()].copy()
     gdf = gdf[gdf.geometry.type.isin(['Polygon', 'MultiPolygon'])]
     if len(gdf) == 0:
-        return [], [], []
+        return [], [], [], []
 
     exploded = gdf.explode(index_parts=False)
     exploded = exploded[exploded.geometry.area >= 1.0]
     if len(exploded) == 0:
-        return [], [], []
+        return [], [], [], []
 
     exploded = exploded.copy()
     exploded['geometry'] = exploded.geometry.simplify(BUILDING_SIMPLIFY_TOL_M)
@@ -379,7 +498,7 @@ def _extract_BL_vectorized(
     valid = (~exploded.geometry.is_empty) & (exploded.geometry.area >= 1.0)
     exploded = exploded[valid]
     if len(exploded) == 0:
-        return [], [], []
+        return [], [], [], []
 
     mp_mask = exploded.geometry.type == 'MultiPolygon'
     if mp_mask.any():
@@ -388,7 +507,7 @@ def _extract_BL_vectorized(
     exploded = exploded[exploded.geometry.type == 'Polygon']
     exploded = exploded[~exploded.geometry.is_empty]
     if len(exploded) == 0:
-        return [], [], []
+        return [], [], [], []
 
     # ---- Step 2: Top percentile thresholds ----
     all_areas = exploded.geometry.area.values
@@ -427,6 +546,7 @@ def _extract_BL_vectorized(
     # ---- Step 3: Classify ----
     BL_with_heights: List[Tuple[Polygon, float]] = []
     BL_categories: List[LandmarkCategory] = []
+    BL_height_roles: List[str] = []
     BO_input_smalls: List[Polygon] = []
     n_lm_cat = {c.name: 0 for c in LandmarkCategory if c != LandmarkCategory.NONE}
     n_lm_other = 0
@@ -481,16 +601,25 @@ def _extract_BL_vectorized(
 
             params = LANDMARK_CATEGORY_PARAMS[effective_cat]
 
-            h_mm = _compress_height(
-                est_height, area, height_ceiling_m=height_ceiling_m)
-            h_mm = _narrow_building_penalty(poly, h_mm,
-                                            threshold=narrow_threshold,
-                                            factor=narrow_penalty_factor)
-            # Category-specific additive height offset + 2D expansion
-            h_mm = _quantize_height_mm(
-                h_mm + params["height_add_mm"], layer_height_mm)
-            if params["buffer_m"] > 0:
-                poly = poly.buffer(params["buffer_m"], join_style=2)
+            h_mm, height_role = _resolve_building_height_role(
+                row, poly,
+                area_m2=area,
+                est_height_m=est_height,
+                height_top_thr=height_top_thr,
+                category=effective_cat,
+                hotspot=is_hotspot,
+                height_ceiling_m=height_ceiling_m,
+                layer_height_mm=layer_height_mm,
+                narrow_threshold=narrow_threshold,
+                narrow_penalty_factor=narrow_penalty_factor,
+            )
+            # Anonymous background buildings keep their source footprint.  A
+            # landmark-style buffer would make them conspicuous even with a
+            # quiet Z value.
+            buffer_m = (params["buffer_m"]
+                        if height_role != "background_stylized" else 0.0)
+            if buffer_m > 0:
+                poly = poly.buffer(buffer_m, join_style=2)
                 if poly.is_empty:
                     continue
                 if isinstance(poly, MultiPolygon):
@@ -499,6 +628,7 @@ def _extract_BL_vectorized(
                     continue
             BL_with_heights.append((poly, h_mm))
             BL_categories.append(effective_cat)
+            BL_height_roles.append(height_role)
         else:
             BO_input_smalls.append(poly)
 
@@ -509,7 +639,7 @@ def _extract_BL_vectorized(
           f"{len(BO_input_smalls)} smalls, "
           f"hotspot_blocks={len(hotspot_blocks)}")
 
-    return BL_with_heights, BO_input_smalls, BL_categories
+    return BL_with_heights, BO_input_smalls, BL_categories, BL_height_roles
 
 
 def _extract_BL_legacy(
@@ -522,14 +652,14 @@ def _extract_BL_legacy(
     narrow_penalty_factor: float = 0.5,
     height_ceiling_m: Optional[float] = None,
     layer_height_mm: float = 0.12,
-) -> Tuple[List[Tuple[Polygon, float]], List[Polygon], List]:
+) -> Tuple[List[Tuple[Polygon, float]], List[Polygon], List, List[str]]:
     """Legacy iterrows-based implementation of _extract_BL."""
     # Function-level import: allows runtime monkey-patch from auto-params
     from _TEXTURE_STYLE_OF_DEEPSEEK.config import (
         BUILDING_SIMPLIFY_TOL_M, BUILDING_V2_LANDMARK_TOP_PERCENT,
     )
     if buildings_gdf is None or len(buildings_gdf) == 0:
-        return [], [], []
+        return [], [], [], []
 
     use_landmark_tags = BUILDING_V2_USE_LANDMARK_TAGS
 
@@ -556,7 +686,7 @@ def _extract_BL_legacy(
             all_areas.append(simplified.area)
 
     if not all_simplified:
-        return [], [], []
+        return [], [], [], []
 
     # ---- Top percentile thresholds ----
     if BUILDING_V2_LANDMARK_TOP_PERCENT > 0:
@@ -602,6 +732,7 @@ def _extract_BL_legacy(
     # ---- Second pass: classify ----
     BL_with_heights: List[Tuple[Polygon, float]] = []
     BL_categories: List[LandmarkCategory] = []
+    BL_height_roles: List[str] = []
     BO_input_smalls: List[Polygon] = []
     n_lm_cat = {c.name: 0 for c in LandmarkCategory if c != LandmarkCategory.NONE}
     n_lm_other = 0
@@ -656,16 +787,22 @@ def _extract_BL_legacy(
 
             params = LANDMARK_CATEGORY_PARAMS[effective_cat]
 
-            h_mm = _compress_height(
-                est_height, area, height_ceiling_m=height_ceiling_m)
-            h_mm = _narrow_building_penalty(poly, h_mm,
-                                            threshold=narrow_threshold,
-                                            factor=narrow_penalty_factor)
-            # Category-specific additive height offset + 2D expansion
-            h_mm = _quantize_height_mm(
-                h_mm + params["height_add_mm"], layer_height_mm)
-            if params["buffer_m"] > 0:
-                poly = poly.buffer(params["buffer_m"], join_style=2)
+            h_mm, height_role = _resolve_building_height_role(
+                row, poly,
+                area_m2=area,
+                est_height_m=est_height,
+                height_top_thr=height_top_thr,
+                category=effective_cat,
+                hotspot=is_hotspot,
+                height_ceiling_m=height_ceiling_m,
+                layer_height_mm=layer_height_mm,
+                narrow_threshold=narrow_threshold,
+                narrow_penalty_factor=narrow_penalty_factor,
+            )
+            buffer_m = (params["buffer_m"]
+                        if height_role != "background_stylized" else 0.0)
+            if buffer_m > 0:
+                poly = poly.buffer(buffer_m, join_style=2)
                 if poly.is_empty:
                     continue
                 if isinstance(poly, MultiPolygon):
@@ -674,6 +811,7 @@ def _extract_BL_legacy(
                     continue
             BL_with_heights.append((poly, h_mm))
             BL_categories.append(effective_cat)
+            BL_height_roles.append(height_role)
         else:
             BO_input_smalls.append(poly)
 
@@ -684,7 +822,7 @@ def _extract_BL_legacy(
           f"{len(BO_input_smalls)} smalls, "
           f"hotspot_blocks={len(hotspot_blocks)}")
 
-    return BL_with_heights, BO_input_smalls, BL_categories
+    return BL_with_heights, BO_input_smalls, BL_categories, BL_height_roles
 
 
 # ---------------------------------------------------------------------------
@@ -1247,6 +1385,8 @@ def _apply_subtraction_and_filter(
     WO: List[Polygon],
     BO_filled_ids: set,
     min_area_m2: float,
+    *,
+    BL_height_roles: Optional[List[str]] = None,
 ) -> Dict:
     """应用 5 步减法（与 PNG spec 一致）：
 
@@ -1265,7 +1405,14 @@ def _apply_subtraction_and_filter(
     BL_exclusion = []
     for i, p in enumerate(BL_polys):
         # Determine exclusion radius from category
-        if BL_categories and i < len(BL_categories):
+        height_role = (BL_height_roles[i]
+                       if BL_height_roles and i < len(BL_height_roles)
+                       else "legacy_unspecified")
+        if height_role == "background_stylized":
+            # Background buildings should not carve a landmark plaza into the
+            # surrounding urban fabric.
+            excl_m = 0.0
+        elif BL_categories and i < len(BL_categories):
             cat = BL_categories[i]
             params = LANDMARK_CATEGORY_PARAMS.get(cat, {})
             excl_m = params.get("exclusion_buffer_m", default_excl)
@@ -1331,8 +1478,21 @@ def _apply_subtraction_and_filter(
     print(f"  Step 4: VL {len(VL)} → {len(VL_clean)} (VL − BL)")
 
     # Step 5: Precision filter
-    BL_clean = [(p, h) for (p, h) in BL
-                if isinstance(p, Polygon) and not p.is_empty and p.area >= min_area_m2 * 0.5]
+    bl_keep_indexes = [
+        i for i, (p, _h) in enumerate(BL)
+        if isinstance(p, Polygon)
+        and not p.is_empty
+        and p.area >= min_area_m2 * 0.5
+    ]
+    BL_clean = [BL[i] for i in bl_keep_indexes]
+    BL_categories_clean = (
+        [BL_categories[i] for i in bl_keep_indexes]
+        if BL_categories and len(BL_categories) == len(BL) else []
+    )
+    BL_height_roles_clean = (
+        [BL_height_roles[i] for i in bl_keep_indexes]
+        if BL_height_roles and len(BL_height_roles) == len(BL) else []
+    )
     BO_clean = _filter_by_area(BO_clean, min_area_m2 * 0.5)
     VL_clean_filt = _filter_by_area(VL_clean, min_area_m2 * 0.5)
     VO_clean_filt = _filter_by_area(VO_clean, min_area_m2 * 0.5)
@@ -1347,6 +1507,8 @@ def _apply_subtraction_and_filter(
 
     return {
         "BL": BL_clean,
+        "BL_categories": BL_categories_clean,
+        "BL_height_roles": BL_height_roles_clean,
         "BO": BO_clean,
         "VL": VL_clean_filt,
         "VO": VO_clean_filt,
@@ -1728,7 +1890,7 @@ def preprocess_layers(
 
     # ---- Step 3: BL ----
     t3 = time.time()
-    BL_with_heights, BO_input_smalls, BL_categories = _extract_BL(
+    BL_with_heights, BO_input_smalls, BL_categories, BL_height_roles = _extract_BL(
         buildings_gdf, city_blocks, enable_hotspot, hotspot_relax,
         height_mode=height_mode,
         narrow_threshold=narrow_threshold,
@@ -1783,10 +1945,20 @@ def preprocess_layers(
     t7 = time.time()
     filtered = _apply_subtraction_and_filter(
         BL_with_heights, BL_categories, BO_polys, VL_polys, VO_polys,
-        WL_polys, WO_polys, BO_filled_ids, min_area_m2)
+        WL_polys, WO_polys, BO_filled_ids, min_area_m2,
+        BL_height_roles=BL_height_roles)
+    BL_categories = filtered["BL_categories"]
+    BL_height_roles = filtered["BL_height_roles"]
     printable_heights = np.asarray(
         [height for _, height in filtered["BL"]], dtype=float)
+    from collections import Counter
+    printable_height_role_counts = {
+        str(role): int(count)
+        for role, count in sorted(Counter(BL_height_roles).items())
+    }
     height_mapping.update({
+        "height_role_policy_version": BUILDING_HEIGHT_ROLE_POLICY_VERSION,
+        "printable_height_role_counts": printable_height_role_counts,
         "printable_landmark_count": int(len(printable_heights)),
         "model_height_min_mm": (
             round(float(printable_heights.min()), 3)

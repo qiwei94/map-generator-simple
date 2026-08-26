@@ -8,7 +8,12 @@ from _TEXTURE_STYLE_OF_DEEPSEEK.print_profile import (
     build_printability_report,
     quantize_thickness_mm,
 )
+import generate_city_legacy
 from generate_city_legacy import _load_printer_profile
+
+
+def test_legacy_generator_config_is_available_without_auto_params():
+    assert generate_city_legacy._cfg.BUILDING_HEIGHT_MIN_MM > 0
 
 
 @pytest.mark.parametrize(

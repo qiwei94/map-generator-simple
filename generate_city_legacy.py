@@ -56,6 +56,7 @@ from _TEXTURE_STYLE_OF_DEEPSEEK.print_profile import (
     build_printability_report,
 )
 from _TEXTURE_STYLE_OF_DEEPSEEK.water_roles import retain_continuous_water_source
+from _TEXTURE_STYLE_OF_DEEPSEEK import config as _cfg
 from _TEXTURE_STYLE_OF_DEEPSEEK.config import compute_scale, WATERWAY_WIDTHS, TERRAIN_GRID, get_area_class, BUILDING_V2_HOTSPOT_RELAX
 from aesthetic.composition_spec import (
     build_composition_spec,
@@ -839,8 +840,6 @@ def main():
         )
         from _TEXTURE_STYLE_OF_DEEPSEEK.auto_params.ai_art_direction import ai_art_direction
         from _TEXTURE_STYLE_OF_DEEPSEEK.auto_params.preference_store import PreferenceStore
-        from _TEXTURE_STYLE_OF_DEEPSEEK import config as _cfg
-
         # snap 模式下 profile 用量化框数据：同一网格内不同请求得到完全
         # 一致的 auto 参数，保证 preprocess 缓存指纹稳定。
         profile_area_km2 = snap_info["area_km2"] if snap_active else area_km2

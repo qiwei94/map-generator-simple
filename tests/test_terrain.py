@@ -93,6 +93,8 @@ class TestBuildDeepseekTerrain:
         assert solid is not None
         assert isinstance(solid, trimesh.Trimesh)
         assert len(solid.faces) > 0
+        assert np.ptp(solid.vertices[:, 2]) == pytest.approx(
+            TERRAIN_THICKNESS_MM, abs=0.02)
 
     def test_relief_grid_z_range(self):
         from _TEXTURE_STYLE_OF_DEEPSEEK.terrain import build_deepseek_terrain

@@ -110,3 +110,38 @@ AMAP_WATER_AUTO_FETCH=0 \
   清单结果只证明证据可用。
 - OSM 高度观测已写入节点本地 SQLite；后续应实现节点增量合并，而不是让多个 worker
   直接并发写同一个网络 SQLite。
+
+## 身份—锚点—背景高度角色验收
+
+同日新增 `identity-anchor-background-v2`：准确高度只服务于有明确身份信号的建筑和
+少量可靠天际线锚点，普通无名个体建筑保留 footprint 密度但进入低对比高度带。
+本机使用已有 Illinois PBF、离线高度库和芝加哥成品参数档，关闭所有远端高度/高德
+自动请求，生成芝加哥中心 5 km（25 km²）真实 3MF：
+
+```bash
+WIKIDATA_HEIGHT_AUTO_FETCH=0 \
+OVERTURE_AUTO_DOWNLOAD=0 \
+AMAP_WATER_AUTO_FETCH=0 \
+.venv/bin/python generate_city_legacy.py \
+  --bbox 41.8601,-87.6528,41.9051,-87.5924 \
+  --pbf pbf_cache/illinois-latest.osm.pbf \
+  --city height_roles_v2_chicago_5km \
+  --params-json data/print_profiles/chicago_25km_dense_detail.json \
+  --review-png --base-thickness-mm 0.4
+```
+
+最终 `design_spec.json` 记录源建筑 89,108，打印个体建筑 351；高度角色为
+`background_stylized=183`、`identity_exact=166`、`visual_anchor_exact=2`，模型高度
+min/P50/max 为 3.12/3.12/7.20 mm。普通背景成为数量最多且统一的中位层，精确高度
+没有扩散到整座城市。道路 691、水体 9、block base 1,246，均非零。
+
+成品：
+`output/height_roles_v2_chicago_5km/full_height_roles_v2_chicago_5km_0826_1754.3mf`
+（6,824,044 bytes，SHA-256
+`a63b57e14a5fb4aac0c8300d8739a1ce8d349885b499e8b2b33fb8b6784c502f`）。项目验证器
+V1–V14 全部通过，`errors=[]`、`warnings=[]`、`strict_passed=true`。
+
+验收过程中还修复两项被真实生成暴露的问题：关闭 auto-params 时 `_cfg` 局部变量
+遮蔽会阻断 DesignSpec 导出；无 DEM 起伏时地形只生成配置厚度的一半。修复后平坦
+地形也保持完整 4 mm 结构厚度。上述 31.7 秒仅代表本机热缓存下这次 5 km 运行，
+不能外推为 25 km 或其他节点性能。

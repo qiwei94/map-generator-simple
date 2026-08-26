@@ -210,7 +210,11 @@ def build_deepseek_terrain(elevation_grid: np.ndarray,
         t = np.power(t, Z_GAMMA)            # power curve: <1 boosts low relief
         mesh.vertices[:, 2] = t * TERRAIN_THICKNESS_MM + terrain_base_z
     else:
-        mesh.vertices[:, 2] = TERRAIN_THICKNESS_MM / 2 + terrain_base_z
+        # TERRAIN_THICKNESS_MM is also the minimum structural slab thickness,
+        # not only the relief amplitude.  Placing a flat surface at half the
+        # configured value silently produced a 2 mm solid for a 4 mm profile
+        # and failed the formal 3MF validator whenever DEM was unavailable.
+        mesh.vertices[:, 2] = TERRAIN_THICKNESS_MM + terrain_base_z
 
     # Step 4: Build watertight solid (add walls + bottom in model mm)
     solid = _add_walls_and_bottom(mesh, terrain_base_z)
