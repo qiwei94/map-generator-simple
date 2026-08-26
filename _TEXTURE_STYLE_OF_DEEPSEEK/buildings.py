@@ -88,6 +88,7 @@ ROAD_TIERS = {
 
 HEIGHT_MAPPING_POLICY_VERSION = "city-relative-log-layer-v1"
 _VERIFIED_HEIGHT_SOURCES = {"osm_height", "osm_levels", "wikidata", "overture"}
+_CEILING_HEIGHT_SOURCES = {"osm_height", "wikidata", "overture"}
 
 
 def building_height_mapping_context(buildings_gdf) -> dict:
@@ -106,6 +107,9 @@ def building_height_mapping_context(buildings_gdf) -> dict:
         "height_p50_m": None,
         "height_p95_m": None,
         "height_p99_5_m": None,
+        "height_ceiling_sample_count": 0,
+        "height_ceiling_source_counts": {},
+        "identity_height_ceiling_m": None,
         "source_counts": {},
     }
     if buildings_gdf is None or len(buildings_gdf) == 0:
@@ -131,9 +135,31 @@ def building_height_mapping_context(buildings_gdf) -> dict:
             str(key): int(value) for key, value in source_counts.items()}}
 
     p50, p95, p99_5 = np.percentile(values, [50, 95, 99.5])
-    statistical_ceiling = float(values.max() if len(values) < 20 else p99_5)
+    ceiling_mask = valid
+    if sources is not None:
+        ceiling_mask = valid & sources.isin(_CEILING_HEIGHT_SOURCES).to_numpy()
+    ceiling_values = heights[ceiling_mask]
+    if len(ceiling_values) == 0:
+        ceiling_values = values
+    ceiling_p99_5 = float(np.percentile(ceiling_values, 99.5))
+    statistical_ceiling = float(
+        ceiling_values.max() if len(ceiling_values) < 20 else ceiling_p99_5)
+    identity_values = np.asarray([], dtype=float)
+    if sources is not None:
+        identity_mask = valid & sources.eq("wikidata").to_numpy()
+        identity_values = heights[identity_mask]
+    identity_ceiling = (float(identity_values.max())
+                        if len(identity_values) else None)
+    if identity_ceiling is not None:
+        statistical_ceiling = max(statistical_ceiling, identity_ceiling)
     ceiling = min(1200.0, max(float(BUILDING_HEIGHT_OSM_MAX_M),
                               statistical_ceiling))
+    ceiling_source_counts = {}
+    if sources is not None:
+        selected_sources = sources.iloc[np.flatnonzero(ceiling_mask)]
+        ceiling_source_counts = {
+            str(key): int(value) for key, value in
+            selected_sources.value_counts().sort_index().items()}
     return {
         "policy_version": HEIGHT_MAPPING_POLICY_VERSION,
         "verified_height_count": int(len(values)),
@@ -141,6 +167,11 @@ def building_height_mapping_context(buildings_gdf) -> dict:
         "height_p50_m": round(float(p50), 3),
         "height_p95_m": round(float(p95), 3),
         "height_p99_5_m": round(float(p99_5), 3),
+        "height_ceiling_sample_count": int(len(ceiling_values)),
+        "height_ceiling_source_counts": ceiling_source_counts,
+        "identity_height_ceiling_m": (
+            round(identity_ceiling, 3)
+            if identity_ceiling is not None else None),
         "source_counts": {
             str(key): int(value) for key, value in source_counts.items()},
     }

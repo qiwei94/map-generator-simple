@@ -76,10 +76,13 @@ nDSM 已降到 Overture 之后。所有来源只提供建筑高度证据；最�
 高度库只保存来源观测，不保存某次模型的毫米高度。生成时使用
 `city-relative-log-layer-v1`：
 
-1. 只用 OSM 明确高度、OSM 楼层、Wikidata 和通过门禁的 Overture 计算城市高度
-   分布；nDSM 和默认值不能抬高整座城市的上限；
-2. 少于 20 条可信高度时用可信样本最大值，样本足够时使用 P99.5，并把 150 m
-   作为最低上限、1200 m 作为异常保护；
+1. OSM 明确高度、OSM 楼层、Wikidata 和通过门禁的 Overture 共同描述城市高度
+   分布；nDSM 和默认值不进入可信分布；
+2. 天际线压缩上限只由 OSM 明确高度、Wikidata 和 Overture 的显式/测量高度上尾
+   决定，避免几十万条普通 `building:levels` 把摩天楼身份淹没；少于 20 条时取
+   样本最大值，样本足够时取 P99.5，并以 150 m/1200 m 作为下限/异常保护；
+   已缓存 Wikidata 身份地标的最高可信值始终参与上限，避免少量真正地标又被大量
+   普通显式高度的分位数压平；
 3. 在城市上限内做对数压缩，避免 269 m 与 468 m 地标都被旧的固定 150 m 上限
    压成同一高度；
 4. 最终毫米高度向上取整到完整的打印层高，避免切片时被舍入掉半层特征。
@@ -176,6 +179,19 @@ python tools/prefetch_landmark_heights.py \
 形成当前 Z，而不是仅证明数据库文件存在。
 
 “缓存存在”不是验收结果；必须同时检查实际匹配数、默认高度占比和高度来源分布。
+对已有、可信的 pipeline GDF 缓存可以先做轻量采用审计，不必为了检查高度重新生成
+道路、水体、DEM 和网格：
+
+```bash
+python tools/audit_city_height_usage.py \
+  cache/pipeline/showcase_chicago_25km_aesthetic/gdfs_v1_4bfeedffe027.pkl \
+  --city chicago \
+  --output output/height_audit/chicago.json
+```
+
+报告包含建筑总数、实际来源数量、QID 命中、城市高度分布上限和映射后的基础模型
+高度。它只读取项目自产的 pickle；不得对用户上传或来源不明的 pickle 使用该工具。
+最终能否进入可打印模型，仍以正式 3MF 的 DesignSpec 和验证器为准。
 
 ## 后续来源
 
