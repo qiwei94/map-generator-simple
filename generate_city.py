@@ -712,6 +712,7 @@ if __name__ == "__main__":
             city_name=CITY_NAME,
             water_gdf=water_gdf,
             landuse_gdf=landuse_gdf,
+            vegetation_enabled=ENABLE_VEGETATION,
         )
         png_outputs.append(diagnostic_path)
         print(f"  Diagnostic PNG: {diagnostic_path}")
@@ -728,6 +729,7 @@ if __name__ == "__main__":
             1.0,
             OUTPUT_DIR,
             CITY_NAME,
+            vegetation_enabled=ENABLE_VEGETATION,
         )
         for key in ("topdown", "height"):
             path = bundle.get(key)

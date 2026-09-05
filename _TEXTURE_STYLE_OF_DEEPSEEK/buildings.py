@@ -21,9 +21,10 @@ import pandas as pd
 import trimesh
 import manifold3d
 from shapely.geometry import (
-    GeometryCollection, LineString, MultiLineString, MultiPolygon, Polygon, box,
+    GeometryCollection, LineString, MultiLineString, MultiPoint, MultiPolygon,
+    Point, Polygon, box,
 )
-from shapely.ops import polygonize, unary_union
+from shapely.ops import polygonize, split, unary_union
 from shapely.strtree import STRtree
 from shapely import concave_hull as _shapely_concave_hull, make_valid
 from shapely.errors import GEOSException
@@ -368,9 +369,168 @@ def _build_city_blocks(roads_gdf: gpd.GeoDataFrame,
             elif isinstance(geom, LineString):
                 lines.append(geom)
 
+    # OSM ways are already split at ordinary road junctions.  Polygonize that
+    # pre-noded graph first instead of unconditionally re-noding the entire
+    # city with ``unary_union`` (14+ minutes for a Paris 25 km crop).  The
+    # direct result is accepted only when it demonstrably partitions the bbox;
+    # grade-separated crossings and malformed inputs still have the robust
+    # global-noding fallback below.
+    # Clip operations end many ways on an edge of the bbox, while the bbox
+    # ring itself has vertices only at its four corners.  Split just that ring
+    # at road endpoints so those already-noded ways can close the outer faces
+    # without a full city-wide union.
+    min_x, min_y, max_x, max_y = bbox_local
+    boundary_tolerance = max(max_x - min_x, max_y - min_y) * 1e-9
+    boundary_coordinates = set()
+    for line in lines[1:]:
+        coordinates = list(line.coords)
+        if not coordinates:
+            continue
+        for x, y in (coordinates[0], coordinates[-1]):
+            on_boundary = (
+                abs(x - min_x) <= boundary_tolerance
+                or abs(x - max_x) <= boundary_tolerance
+                or abs(y - min_y) <= boundary_tolerance
+                or abs(y - max_y) <= boundary_tolerance)
+            if on_boundary:
+                boundary_coordinates.add((float(x), float(y)))
+    direct_lines = list(lines[1:])
+    if boundary_coordinates:
+        try:
+            boundary_segments = list(split(
+                bbox_lines,
+                MultiPoint([Point(value) for value in boundary_coordinates]),
+            ).geoms)
+        except (GEOSException, ValueError):
+            boundary_segments = [bbox_lines]
+    else:
+        boundary_segments = [bbox_lines]
+    direct_lines[0:0] = boundary_segments
+    try:
+        direct_blocks = [
+            polygon for polygon in polygonize(direct_lines)
+            if isinstance(polygon, Polygon)
+            and not polygon.is_empty and polygon.area > 0
+        ]
+    except GEOSException:
+        direct_blocks = []
+    unique_blocks = {}
+    for polygon in direct_blocks:
+        try:
+            identity = polygon.normalize().wkb
+        except (AttributeError, GEOSException):
+            identity = polygon.wkb
+        unique_blocks.setdefault(identity, polygon)
+    direct_blocks = list(unique_blocks.values())
+    bbox_polygon = box(*bbox_local)
+    bbox_area = float(bbox_polygon.area)
+    direct_area = float(sum(polygon.area for polygon in direct_blocks))
+    coverage_ratio = direct_area / bbox_area if bbox_area > 0 else 0.0
+    minimum_faces = max(2, min(250, len(lines) // 100))
+    largest_fraction = (
+        max((polygon.area for polygon in direct_blocks), default=bbox_area)
+        / bbox_area if bbox_area > 0 else 1.0)
+    dense_partition_ok = (
+        len(lines) <= 1_000 or largest_fraction <= 0.50)
+    if (len(direct_blocks) >= minimum_faces
+            and 0.98 <= coverage_ratio <= 1.02
+            and dense_partition_ok):
+        print(
+            "[city_blocks] accepted pre-noded polygonize: "
+            f"faces={len(direct_blocks)}, coverage={coverage_ratio:.3f}, "
+            f"largest={largest_fraction:.3f}")
+        return direct_blocks
+
+    # A partly connected OSM graph commonly yields thousands of valid inner
+    # faces plus one outer bbox-sized shell, so the raw polygonized area is
+    # larger than 100%.  Keep the non-overlapping inner faces and derive the
+    # remainder from the bbox.  This is a face-partition operation over ~10k
+    # polygons, not a global line noding over ~75k roads.
+    inner_faces = [
+        polygon for polygon in direct_blocks
+        if polygon.area < bbox_area * 0.50
+        and bbox_polygon.covers(polygon.representative_point())
+    ]
+    overlap_ratio = 1.0
+    partition_ratio = 0.0
+    if len(inner_faces) >= minimum_faces:
+        try:
+            # Resolve overlapping/nested rings into atomic faces.  Noding the
+            # boundaries of ~10k already-closed faces is far cheaper and more
+            # stable than noding the original ~75k road network.
+            atomic_noded = unary_union(
+                [polygon.boundary for polygon in inner_faces])
+            atomic_faces = [
+                polygon for polygon in polygonize(atomic_noded)
+                if isinstance(polygon, Polygon)
+                and not polygon.is_empty and polygon.area > 0
+                and bbox_polygon.covers(polygon.representative_point())
+            ]
+            inner_faces = atomic_faces
+            inner_union = unary_union(inner_faces)
+            inner_area = float(sum(polygon.area for polygon in inner_faces))
+            overlap_ratio = max(
+                0.0, (inner_area - float(inner_union.area)) / bbox_area)
+            remainder = bbox_polygon.difference(inner_union)
+            remainder_parts = []
+            # The remainder can be one bbox-sized polygon with thousands of
+            # holes.  It is only an ownership container for building-mass
+            # processing; leaving it whole makes a later source union/buffer
+            # consume hundreds of thousands of buildings at once.  Split it
+            # into invisible work cells.  These grid edges are never exported
+            # as road cuts, so they cannot appear in the model.
+            width = max_x - min_x
+            height = max_y - min_y
+            work_cell_m = max(
+                500.0, min(1500.0, max(width, height) / 25.0))
+            x = min_x
+            while x < max_x:
+                next_x = min(max_x, x + work_cell_m)
+                y = min_y
+                while y < max_y:
+                    next_y = min(max_y, y + work_cell_m)
+                    try:
+                        clipped = remainder.intersection(
+                            box(x, y, next_x, next_y))
+                    except GEOSException:
+                        clipped = GeometryCollection()
+                    pending = [clipped]
+                    while pending:
+                        geometry = pending.pop()
+                        if isinstance(geometry, Polygon):
+                            if not geometry.is_empty and geometry.area > 0:
+                                remainder_parts.append(geometry)
+                        elif isinstance(
+                                geometry,
+                                (MultiPolygon, GeometryCollection)):
+                            pending.extend(list(geometry.geoms))
+                    y = next_y
+                x = next_x
+            partition = inner_faces + remainder_parts
+            partition_ratio = (
+                sum(polygon.area for polygon in partition) / bbox_area)
+        except GEOSException:
+            overlap_ratio = 1.0
+            partition_ratio = 0.0
+            partition = []
+        if (len(inner_faces) >= minimum_faces
+                and overlap_ratio <= 0.002
+                and 0.998 <= partition_ratio <= 1.002):
+            print(
+                "[city_blocks] accepted nested-face partition: "
+                f"inner={len(inner_faces)}, remainder={len(remainder_parts)}, "
+                f"coverage={partition_ratio:.3f}, "
+                f"overlap={overlap_ratio:.4f}")
+            return partition
+
+    print(
+        "[city_blocks] pre-noded graph incomplete; using global noding: "
+        f"faces={len(direct_blocks)}, coverage={coverage_ratio:.3f}, "
+        f"largest={largest_fraction:.3f}, "
+        f"inner={len(inner_faces)}, overlap={overlap_ratio:.4f}, "
+        f"partition={partition_ratio:.3f}")
     noded = unary_union(lines)
-    blocks = list(polygonize(noded))
-    return blocks
+    return list(polygonize(noded))
 
 
 def _aggregate_in_blocks(small_polys: List[Polygon],
@@ -743,6 +903,7 @@ def build_deepseek_buildings_v3(
     scale: float,
     brick_style: bool = True,
     bbox_local: Tuple[float, float, float, float] = None,
+    BO_heights: Optional[List[float]] = None,
 ) -> "Dict[str, Optional[trimesh.Trimesh]]":
     """V3 buildings builder — geometry 已在 preprocess 阶段去重，这里只负责 extrude。
 
@@ -753,6 +914,8 @@ def build_deepseek_buildings_v3(
         scale: mm/m
         brick_style: True 则对 BO + BL 做 brick 几何变换再 extrude
         bbox_local: (xmin, ymin, xmax, ymax) 裁剪边界，防止 brick 变换后超出地形
+        BO_heights: 可选的 BO 相对高度（mm），与 BO_polys 一一对应。
+            空值继续使用历史 BUILDING_AGGREGATE_HEIGHT_MM。
 
     Returns:
         {"landmarks": Trimesh|None, "buildings": Trimesh|None}
@@ -761,6 +924,14 @@ def build_deepseek_buildings_v3(
     from _TEXTURE_STYLE_OF_DEEPSEEK.config import (
         BRICK_CORNER_R_M, BRICK_ROT_DEG, BRICK_SHIFT_M,
         BRICK_PERLIN_AMP, BRICK_PERLIN_FREQ, BRICK_RESAMPLE_M,
+    )
+
+    if BO_heights is not None and len(BO_heights) != len(BO_polys):
+        raise ValueError("BO_heights must be parallel to BO_polys")
+    ambient_heights = (
+        [float(value) for value in BO_heights]
+        if BO_heights is not None and len(BO_heights) > 0
+        else [float(BUILDING_AGGREGATE_HEIGHT_MM)] * len(BO_polys)
     )
 
     if brick_style and (BL_with_heights or BO_polys):
@@ -776,9 +947,15 @@ def build_deepseek_buildings_v3(
                 resample_m=BRICK_RESAMPLE_M,
                 noise_seed=2026)
             if clip_box:
-                bo_transformed = [p.intersection(clip_box) for p in bo_transformed]
-                bo_transformed = [p for p in bo_transformed
-                                  if isinstance(p, Polygon) and not p.is_empty]
+                clipped_bo = []
+                clipped_heights = []
+                for polygon, height in zip(bo_transformed, ambient_heights):
+                    clipped = polygon.intersection(clip_box)
+                    if isinstance(clipped, Polygon) and not clipped.is_empty:
+                        clipped_bo.append(clipped)
+                        clipped_heights.append(height)
+                bo_transformed = clipped_bo
+                ambient_heights = clipped_heights
             BO_polys = bo_transformed
             print(f"  BO brick transform: {len(BO_polys)} polys in {time.time()-t0:.1f}s")
         if BL_with_heights:
@@ -807,8 +984,8 @@ def build_deepseek_buildings_v3(
     landmarks_mesh = _build_mesh_from_items(
         BL_with_heights, terrain_mesh, scale, label="Landmarks(v3)")
 
-    # Buildings (E1 灰) — 统一 BUILDING_AGGREGATE_HEIGHT_MM
-    ambient_items = [(p, BUILDING_AGGREGATE_HEIGHT_MM) for p in BO_polys]
+    # Buildings (E1 灰) — 历史统一高度，或可审计的双层城市质量高度。
+    ambient_items = list(zip(BO_polys, ambient_heights))
     ambient_mesh = _build_mesh_from_items(
         ambient_items, terrain_mesh, scale, label="Block-fill(v3)")
 

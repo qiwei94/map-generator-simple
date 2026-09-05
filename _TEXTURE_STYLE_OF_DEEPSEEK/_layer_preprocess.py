@@ -63,6 +63,8 @@ from _TEXTURE_STYLE_OF_DEEPSEEK.config import (
     BUILDING_AGGREGATE_HEIGHT_MM,
     BUILDING_DEFAULT_HEIGHT_M,
     BLOCK_BASE_MIN_AREA_M2,
+    BLOCK_BASE_MAX_AREA_M2,
+    BLOCK_BASE_MAX_FRAME_AREA_FRACTION,
     ROAD_FILTER,
     get_area_class,
     HEIGHT_QUALITY_COVERAGE_THRESHOLD,
@@ -81,6 +83,7 @@ from _TEXTURE_STYLE_OF_DEEPSEEK.config import (
 )
 from _TEXTURE_STYLE_OF_DEEPSEEK.buildings import (
     HEIGHT_MAPPING_POLICY_VERSION,
+    ROAD_TIERS,
     _build_city_blocks,
     _aggregate_in_blocks,
     _convex_quadrilateral,
@@ -108,6 +111,10 @@ from _TEXTURE_STYLE_OF_DEEPSEEK.water_roles import (
     water_identity,
     waterway_kind,
 )
+from aesthetic.scale_aware_topology import (
+    POLICY_VERSION as SCALE_AWARE_TOPOLOGY_POLICY_VERSION,
+    coarsen_city_blocks_for_print,
+)
 
 
 # Any materialized layer cache must be invalidated when the road or water
@@ -116,12 +123,16 @@ from _TEXTURE_STYLE_OF_DEEPSEEK.water_roles import (
 # effect at all.
 PREPROCESS_POLICY_VERSION = (
     f"roads={ROAD_ROLE_POLICY_VERSION}|water={WATER_ROLE_POLICY_VERSION}"
-    "|block_base_clearance=post-transform-v1"
+    "|water_frame_clip=v1"
+    "|block_base_clearance=hierarchical-structural-road-v3"
+    "|block_base_outer_face_guard=v2"
+    "|city_block_partition=prenoded-atomic-grid-v1"
     f"|building_height={HEIGHT_MAPPING_POLICY_VERSION}"
-    "|building_height_roles=identity-anchor-background-v2"
+    "|building_height_roles=identity-anchor-mass-v3"
+    f"|block_topology={SCALE_AWARE_TOPOLOGY_POLICY_VERSION}"
 )
 
-BUILDING_HEIGHT_ROLE_POLICY_VERSION = "identity-anchor-background-v2"
+BUILDING_HEIGHT_ROLE_POLICY_VERSION = "identity-anchor-mass-v3"
 _STRONG_EXACT_HEIGHT_SOURCES = {"osm_height", "wikidata", "overture"}
 _IDENTITY_EXACT_HEIGHT_SOURCES = _STRONG_EXACT_HEIGHT_SOURCES | {"osm_levels"}
 
@@ -135,7 +146,11 @@ class LayerPolygons:
     """7 类 polygon 集合 + 精度元信息。"""
     BL: List[Tuple[Polygon, float]] = field(default_factory=list)
     BL_categories: List = field(default_factory=list)  # List[LandmarkCategory], parallel to BL
+    BL_height_roles: List[str] = field(default_factory=list)  # parallel to BL
     BO: List[Polygon] = field(default_factory=list)
+    # Optional per-polygon relief for the two-tier city-mass grammar.  Empty
+    # means the historical BUILDING_AGGREGATE_HEIGHT_MM applies to every BO.
+    BO_heights: List[float] = field(default_factory=list)
     VL: List[Polygon] = field(default_factory=list)
     VO: List[Polygon] = field(default_factory=list)
     WL: List[Polygon] = field(default_factory=list)
@@ -146,6 +161,13 @@ class LayerPolygons:
     # cut in the block-base builder.  The first cut happens before brick
     # rotation/shift and is therefore not sufficient proof of final clearance.
     block_base_cut_lines: List = field(default_factory=list)
+    # Major arterials retain the conservative two-extrusion separation.  The
+    # complete local topology above uses the narrower printable surface-road
+    # reveal and remains physically supported by the terrain substrate.
+    block_base_major_cut_lines: List = field(default_factory=list)
+    # Scale-aware blocks retained so later building-mass activation uses the
+    # exact same topology as Block base instead of rebuilding a fixed road tier.
+    city_blocks: List[Polygon] = field(default_factory=list)
     roads_lines: List[Tuple] = field(default_factory=list)
     road_roles: Dict = field(default_factory=dict)
     water_roles: Dict = field(default_factory=dict)
@@ -253,6 +275,62 @@ def _filter_by_area(polys: List[Polygon], min_area: float) -> List[Polygon]:
     return [p for p in polys if isinstance(p, Polygon) and not p.is_empty and p.area >= min_area]
 
 
+def _clip_polygons_to_bbox(
+    polys: List[Polygon],
+    bbox_local: Tuple[float, float, float, float],
+) -> Tuple[List[Polygon], Dict]:
+    """Clip materialized polygons to the finished composition frame.
+
+    Source geometries are clipped before preprocessing, but buffering a line
+    on the frame edge and adding a cached water supplement can extend the
+    resulting polygon back outside that frame. Final LayerPolygons are a Stage
+    boundary: preview and formal builders must receive the same bounded
+    geometry instead of relying on their renderer viewport to hide overflow.
+    """
+
+    frame = box(*(float(value) for value in bbox_local))
+    output: List[Polygon] = []
+    changed = 0
+    dropped = 0
+    split_parts = 0
+    for polygon in polys:
+        if polygon is None or polygon.is_empty:
+            dropped += 1
+            continue
+        try:
+            clipped = polygon.intersection(frame)
+        except GEOSException:
+            try:
+                clipped = make_valid(polygon).intersection(frame)
+            except GEOSException:
+                dropped += 1
+                continue
+        if not clipped.equals(polygon):
+            changed += 1
+        if isinstance(clipped, Polygon):
+            parts = [clipped]
+        elif hasattr(clipped, "geoms"):
+            parts = [
+                part for part in clipped.geoms
+                if isinstance(part, Polygon) and not part.is_empty
+            ]
+        else:
+            parts = []
+        if not parts:
+            dropped += 1
+            continue
+        split_parts += max(0, len(parts) - 1)
+        output.extend(parts)
+    return output, {
+        "policy_version": "finished-frame-polygon-clip-v1",
+        "input_polygons": len(polys),
+        "output_polygons": len(output),
+        "changed_polygons": changed,
+        "dropped_polygons": dropped,
+        "additional_split_parts": split_parts,
+    }
+
+
 # ---------------------------------------------------------------------------
 # B.1.4.1b: 建筑高度数据质量评判
 # ---------------------------------------------------------------------------
@@ -304,6 +382,8 @@ def _resolve_building_height_role(
     layer_height_mm: float,
     narrow_threshold: float,
     narrow_penalty_factor: float,
+    scale_mm_per_m: Optional[float] = None,
+    maximum_height_to_width_ratio: float = 4.0,
 ) -> Tuple[float, str]:
     """Resolve deterministic landmark Z semantics.
 
@@ -398,7 +478,35 @@ def _resolve_building_height_role(
         # from block fill while keeping anonymous buildings visually quiet.
         height_mm = BUILDING_HEIGHT_MIN_MM + 2.0 * layer_height_mm
 
-    return _quantize_height_mm(height_mm, layer_height_mm), role
+    height_mm = _quantize_height_mm(height_mm, layer_height_mm)
+    if (scale_mm_per_m is not None
+            and math.isfinite(float(scale_mm_per_m))
+            and float(scale_mm_per_m) > 0
+            and math.isfinite(float(maximum_height_to_width_ratio))
+            and float(maximum_height_to_width_ratio) > 0):
+        try:
+            rectangle = poly.minimum_rotated_rectangle
+            coords = list(rectangle.exterior.coords)
+            edges = [
+                math.hypot(
+                    coords[index + 1][0] - coords[index][0],
+                    coords[index + 1][1] - coords[index][1],
+                )
+                for index in range(4)
+            ]
+            short_axis_mm = min(edges) * float(scale_mm_per_m)
+            maximum_height_mm = (
+                short_axis_mm * float(maximum_height_to_width_ratio))
+            maximum_layers = math.floor(
+                maximum_height_mm / float(layer_height_mm) + 1e-9)
+            if maximum_layers > 0:
+                height_mm = min(
+                    height_mm,
+                    round(maximum_layers * float(layer_height_mm), 10),
+                )
+        except (AttributeError, IndexError, TypeError, ValueError):
+            pass
+    return height_mm, role
 
 
 # ---------------------------------------------------------------------------
@@ -420,11 +528,15 @@ def _extract_BL(
     narrow_penalty_factor: float = 0.5,
     height_ceiling_m: Optional[float] = None,
     layer_height_mm: float = 0.12,
+    scale_mm_per_m: Optional[float] = None,
+    minimum_independent_width_mm: float = 0.0,
+    maximum_height_to_width_ratio: float = 4.0,
 ) -> Tuple[List[Tuple[Polygon, float]], List[Polygon], List, List[str]]:
     """Return BL, BO candidates, categories and parallel height roles."""
     args = (buildings_gdf, city_blocks, enable_hotspot, hotspot_relax,
             height_mode, narrow_threshold, narrow_penalty_factor,
-            height_ceiling_m, layer_height_mm)
+            height_ceiling_m, layer_height_mm, scale_mm_per_m,
+            minimum_independent_width_mm, maximum_height_to_width_ratio)
 
     if _VERIFY_EXTRACT_BL:
         t0 = time.time()
@@ -461,6 +573,9 @@ def _extract_BL_vectorized(
     narrow_penalty_factor: float = 0.5,
     height_ceiling_m: Optional[float] = None,
     layer_height_mm: float = 0.12,
+    scale_mm_per_m: Optional[float] = None,
+    minimum_independent_width_mm: float = 0.0,
+    maximum_height_to_width_ratio: float = 4.0,
 ) -> Tuple[List[Tuple[Polygon, float]], List[Polygon], List, List[str]]:
     """Vectorized version of _extract_BL using geopandas batch operations."""
     # Function-level import: allows runtime monkey-patch from auto-params
@@ -612,7 +727,38 @@ def _extract_BL_vectorized(
                 layer_height_mm=layer_height_mm,
                 narrow_threshold=narrow_threshold,
                 narrow_penalty_factor=narrow_penalty_factor,
+                scale_mm_per_m=scale_mm_per_m,
+                maximum_height_to_width_ratio=(
+                    maximum_height_to_width_ratio),
             )
+            # Large/upper-percentile anonymous footprints were historically
+            # retained as BL merely because their XY geometry was worth
+            # keeping.  The reference city-demo grammar shows that this does
+            # not make them vertical heroes: route them back into the same
+            # neighbourhood-mass path as other anonymous buildings.
+            if height_role == "background_stylized":
+                BO_input_smalls.append(poly)
+                continue
+
+            # A visual anchor that cannot carry the selected printer's
+            # minimum coloured strip is not an independent printable body.
+            # Preserve its source footprint through BO aggregation instead of
+            # emitting a tall needle or inventing a widened landmark.
+            if (height_role == "visual_anchor_exact"
+                    and scale_mm_per_m is not None
+                    and minimum_independent_width_mm > 0):
+                rectangle = poly.minimum_rotated_rectangle
+                coords = list(rectangle.exterior.coords)
+                short_axis_mm = min(
+                    math.hypot(
+                        coords[index + 1][0] - coords[index][0],
+                        coords[index + 1][1] - coords[index][1],
+                    )
+                    for index in range(4)
+                ) * float(scale_mm_per_m)
+                if short_axis_mm < float(minimum_independent_width_mm):
+                    BO_input_smalls.append(poly)
+                    continue
             # Anonymous background buildings keep their source footprint.  A
             # landmark-style buffer would make them conspicuous even with a
             # quiet Z value.
@@ -652,6 +798,9 @@ def _extract_BL_legacy(
     narrow_penalty_factor: float = 0.5,
     height_ceiling_m: Optional[float] = None,
     layer_height_mm: float = 0.12,
+    scale_mm_per_m: Optional[float] = None,
+    minimum_independent_width_mm: float = 0.0,
+    maximum_height_to_width_ratio: float = 4.0,
 ) -> Tuple[List[Tuple[Polygon, float]], List[Polygon], List, List[str]]:
     """Legacy iterrows-based implementation of _extract_BL."""
     # Function-level import: allows runtime monkey-patch from auto-params
@@ -798,7 +947,28 @@ def _extract_BL_legacy(
                 layer_height_mm=layer_height_mm,
                 narrow_threshold=narrow_threshold,
                 narrow_penalty_factor=narrow_penalty_factor,
+                scale_mm_per_m=scale_mm_per_m,
+                maximum_height_to_width_ratio=(
+                    maximum_height_to_width_ratio),
             )
+            if height_role == "background_stylized":
+                BO_input_smalls.append(poly)
+                continue
+            if (height_role == "visual_anchor_exact"
+                    and scale_mm_per_m is not None
+                    and minimum_independent_width_mm > 0):
+                rectangle = poly.minimum_rotated_rectangle
+                coords = list(rectangle.exterior.coords)
+                short_axis_mm = min(
+                    math.hypot(
+                        coords[index + 1][0] - coords[index][0],
+                        coords[index + 1][1] - coords[index][1],
+                    )
+                    for index in range(4)
+                ) * float(scale_mm_per_m)
+                if short_axis_mm < float(minimum_independent_width_mm):
+                    BO_input_smalls.append(poly)
+                    continue
             buffer_m = (params["buffer_m"]
                         if height_role != "background_stylized" else 0.0)
             if buffer_m > 0:
@@ -1664,6 +1834,9 @@ def _compute_block_base(
     road_inset: float = 25.0,
     max_area_m2: float = 0,
     min_buildings: int = 0,
+    bbox_local: "Tuple[float, float, float, float] | None" = None,
+    max_frame_area_fraction: float = 0,
+    evidence_out: "Dict | None" = None,
 ) -> List[Polygon]:
     """从 city_blocks 生成 block_base — 对齐 PNG brick_render 的行为。
 
@@ -1681,11 +1854,83 @@ def _compute_block_base(
         _filter_blocks_with_buildings,
     )
 
-    # --- area 过滤 ---
-    blocks_filt = [b for b in city_blocks
-                   if isinstance(b, Polygon) and not b.is_empty
-                   and b.area >= min_area_m2
-                   and (max_area_m2 <= 0 or b.area <= max_area_m2)]
+    # --- area + polygonize outer-face guard ---
+    # polygonize(bbox boundary + incomplete road graph) may emit the frame's
+    # exterior as one enormous polygon.  It can contain thousands of building
+    # centroids, so a building-count filter cannot distinguish it from a valid
+    # urban block.  Once extruded it becomes the large white sheet seen around
+    # Xixi Wetland.  Use a crop-relative cap, not a fixed km² threshold, so the
+    # same rule remains meaningful for 5/15/25 km products.
+    frame_area_m2 = 0.0
+    frame_bounds = None
+    if bbox_local is not None:
+        minx, miny, maxx, maxy = map(float, bbox_local)
+        if maxx > minx and maxy > miny:
+            frame_bounds = (minx, miny, maxx, maxy)
+            frame_area_m2 = (maxx - minx) * (maxy - miny)
+
+    guard_limit_m2 = 0.0
+    if frame_area_m2 > 0 and max_frame_area_fraction > 0:
+        guard_limit_m2 = frame_area_m2 * float(max_frame_area_fraction)
+
+    source_count = 0
+    rejected_below_min = 0
+    rejected_above_absolute = 0
+    rejected_above_frame_fraction = 0
+    rejected_frame_spanning = 0
+    blocks_filt: List[Polygon] = []
+    for block in city_blocks:
+        if not isinstance(block, Polygon) or block.is_empty:
+            continue
+        source_count += 1
+        area = float(block.area)
+        if area < min_area_m2:
+            rejected_below_min += 1
+            continue
+        frame_spanning = False
+        if frame_bounds is not None:
+            minx, miny, maxx, maxy = frame_bounds
+            width = maxx - minx
+            height = maxy - miny
+            tolerance = max(width, height) * 1e-7 + 1e-6
+            bminx, bminy, bmaxx, bmaxy = block.bounds
+            frame_spanning = (
+                bminx <= minx + tolerance
+                and bminy <= miny + tolerance
+                and bmaxx >= maxx - tolerance
+                and bmaxy >= maxy - tolerance
+            )
+
+        if guard_limit_m2 > 0 and area > guard_limit_m2:
+            rejected_above_frame_fraction += 1
+            if frame_spanning:
+                rejected_frame_spanning += 1
+            continue
+        if max_area_m2 > 0 and area > max_area_m2:
+            rejected_above_absolute += 1
+            continue
+        blocks_filt.append(block)
+
+    if evidence_out is not None:
+        evidence_out.update({
+            "policy_version": "block-base-outer-face-guard-v2",
+            "source_polygons": int(source_count),
+            "accepted_before_exclusions": int(len(blocks_filt)),
+            "rejected_below_min_area": int(rejected_below_min),
+            "rejected_above_absolute_area": int(rejected_above_absolute),
+            "rejected_above_frame_fraction": int(
+                rejected_above_frame_fraction),
+            "rejected_frame_spanning": int(rejected_frame_spanning),
+            "frame_area_m2": round(float(frame_area_m2), 3),
+            "max_frame_area_fraction": round(
+                float(max_frame_area_fraction), 6),
+            "absolute_max_area_m2": (
+                round(float(max_area_m2), 3)
+                if max_area_m2 > 0 else None),
+            "effective_max_area_m2": (
+                round(float(guard_limit_m2), 3)
+                if guard_limit_m2 > 0 else None),
+        })
     if not blocks_filt:
         return []
 
@@ -1855,6 +2100,8 @@ def preprocess_layers(
         scale_mm_per_m=scale,
         road_width_multiplier=effective_road_width_multiplier,
         min_colored_strip_mm=effective_printer.min_colored_strip_mm,
+        surface_road_gap_mm=effective_printer.surface_road_gap_mm,
+        major_road_gap_mm=effective_printer.final_block_base_gap_mm,
         visual_salience_guide=amap_salience_guide,
     )
     print("[preprocess] road_roles: "
@@ -1879,12 +2126,128 @@ def preprocess_layers(
               f"length={dangling_pruning.get('removed_length_m', 0.0):.1f}m, "
               f"limit={dangling_pruning.get('max_chain_length_m', 0.0):.1f}m")
     wgdf = water_gdf if water_gdf is not None and len(water_gdf) > 0 else None
-    if len(road_roles.topology) > 0:
-        city_blocks = _build_city_blocks(
-            road_roles.topology, wgdf, road_tier=effective_road_tier,
+    # Building ownership blocks are a mid-frequency structure.  Feeding the
+    # complete tier-4 surface network into polygonization couples every alley
+    # and service road to building aggregation and makes 25 km cities pay for
+    # a 100k+ line global noding operation.  Structural roads define the block
+    # grammar; the complete topology is preserved independently below as the
+    # supported lower-surface road texture.
+    block_structure_roads = (
+        road_roles.structural
+        if len(road_roles.structural) > 0 else road_roles.topology)
+    if len(block_structure_roads) > 0:
+        initial_city_blocks = _build_city_blocks(
+            block_structure_roads, wgdf, road_tier=effective_road_tier,
             bbox_local=bbox_local)
     else:
-        city_blocks = []
+        initial_city_blocks = []
+
+    # A fixed road tier is not a fixed visual granularity.  At a wider crop,
+    # the same real road interval occupies fewer model millimetres and may no
+    # longer leave a printable urban core.  Street-block topology and building
+    # mass deliberately use different targets: topology only enforces the
+    # printer's hard coloured-strip floor, while the 1.3--2.3 mm band remains
+    # a soft target for aggregated building components.  Reusing the building
+    # target here collapsed Chicago's fine grid before the mass stage saw it.
+    from aesthetic.building_mass_strategy import (
+        BuildingMassPolicy,
+        resolve_component_width_target,
+    )
+    model_span_mm = max(
+        float(bbox_local[2] - bbox_local[0]),
+        float(bbox_local[3] - bbox_local[1]),
+    ) * float(scale)
+    building_mass_policy = BuildingMassPolicy()
+    component_width_target = resolve_component_width_target(
+        building_mass_policy,
+        printer_profile=effective_printer,
+        scale_mm_per_m=scale,
+        model_span_mm=model_span_mm,
+    )
+    topology_core_target_model_mm = max(
+        float(effective_printer.extrusion_width_mm),
+        float(effective_printer.min_colored_strip_mm),
+    )
+    if "highway" in road_roles.topology.columns:
+        protected_major = road_roles.topology.loc[
+            road_roles.topology["highway"].isin(set(ROAD_TIERS[1]))]
+    else:
+        protected_major = road_roles.topology
+    major_cut_lines = []
+    _major_seen = set()
+    for _geometry in list(protected_major.geometry) + list(
+            road_roles.visible.geometry):
+        if _geometry is None or _geometry.is_empty:
+            continue
+        _key = _geometry.wkb
+        if _key in _major_seen:
+            continue
+        _major_seen.add(_key)
+        major_cut_lines.append(_geometry)
+    if (len(block_structure_roads) > 0 and initial_city_blocks
+            and buildings_gdf is not None and len(buildings_gdf) > 0):
+        protected_cut_lines = list(protected_major.geometry)
+        protected_cut_lines.extend(list(road_roles.visible.geometry))
+        city_blocks, eligible_structural_lines, topology_evidence = (
+            coarsen_city_blocks_for_print(
+                initial_city_blocks,
+                buildings=buildings_gdf,
+                cut_lines=block_structure_roads,
+                protected_cut_lines=protected_cut_lines,
+                water=wgdf,
+                scale_mm_per_m=scale,
+                target_min_model_mm=topology_core_target_model_mm,
+                hard_floor_model_mm=float(
+                    effective_printer.min_colored_strip_mm),
+                boundary_inset_model_mm=(
+                    effective_printer.surface_road_gap_mm / 2.0
+                    + effective_printer.nozzle_diameter_mm * (
+                        building_mass_policy.simplify_nozzles
+                        + building_mass_policy
+                        .boundary_clearance_safety_nozzles)),
+            )
+        )
+    else:
+        city_blocks = initial_city_blocks
+        eligible_structural_lines = (
+            list(road_roles.structural.geometry)
+            if len(road_roles.structural) > 0 else [])
+        topology_evidence = {
+            "policy_version": SCALE_AWARE_TOPOLOGY_POLICY_VERSION,
+            "status": "not_applied",
+            "reason": "roads, blocks or buildings unavailable",
+            "initial_blocks": len(initial_city_blocks),
+            "final_blocks": len(city_blocks),
+        }
+    topology_evidence.update({
+        "current_model_span_mm": round(float(model_span_mm), 5),
+        "component_width_target": component_width_target,
+        "topology_core_target_model_mm": round(
+            topology_core_target_model_mm, 5),
+        "target_separation": (
+            "street topology uses the printer hard floor; building mass "
+            "retains the separate soft component-width target"),
+        "initial_road_tier": int(effective_road_tier),
+        "protected_highway_tier": 1,
+        "block_structure_source": (
+            "structural" if len(road_roles.structural) > 0 else "topology"),
+        "block_structure_features": int(len(block_structure_roads)),
+        "surface_topology_features": int(len(road_roles.topology)),
+        "surface_road_source": (
+            "structural" if len(road_roles.structural) > 0 else "topology"),
+        "surface_road_features": int(len(block_structure_roads)),
+    })
+    eligible_structural_gdf = gpd.GeoDataFrame(
+        {"geometry": eligible_structural_lines},
+        geometry="geometry",
+        crs=getattr(roads_gdf, "crs", None),
+    )
+    print("[preprocess] scale_aware_topology: "
+          f"blocks={len(initial_city_blocks)}→{len(city_blocks)}, "
+          f"merges={topology_evidence.get('merged_blocks', 0)}, "
+          f"occupied_p50={topology_evidence.get('after', {}).get('occupied_core_short_axis_p50_model_mm')}mm, "
+          f"topology_target={topology_core_target_model_mm:.2f}mm, "
+          f"building_soft_target={component_width_target['target_min_model_mm']:.2f}mm")
     print(f"[preprocess] city_blocks: {len(city_blocks)} (road_tier={effective_road_tier}) "
           f"after {time.time() - t2:.1f}s")
 
@@ -1896,7 +2259,11 @@ def preprocess_layers(
         narrow_threshold=narrow_threshold,
         narrow_penalty_factor=narrow_penalty,
         height_ceiling_m=height_mapping["height_ceiling_m"],
-        layer_height_mm=effective_printer.layer_height_mm)
+        layer_height_mm=effective_printer.layer_height_mm,
+        scale_mm_per_m=scale,
+        minimum_independent_width_mm=(
+            effective_printer.min_colored_strip_mm),
+        maximum_height_to_width_ratio=4.0)
     BL_polys = [p for p, _ in BL_with_heights]
     print(f"[preprocess] _extract_BL: {time.time() - t3:.1f}s")
 
@@ -1941,6 +2308,22 @@ def preprocess_layers(
         except Exception as e:
             print(f"[preprocess] water_supplement failed (non-fatal): {e}")
 
+    # Buffering edge-connected water lines and adding cached supplements can
+    # reintroduce geometry outside the finished frame after the source GDF was
+    # clipped. Bound the Stage output once, here, so PNG/GLB/3MF all consume
+    # identical water geometry and no formal cap can enlarge the model XY span.
+    WL_polys, wl_frame_clip = _clip_polygons_to_bbox(WL_polys, bbox_local)
+    WO_polys, wo_frame_clip = _clip_polygons_to_bbox(WO_polys, bbox_local)
+    water_role_evidence["finished_frame_clip"] = {
+        "landmark": wl_frame_clip,
+        "ordinary": wo_frame_clip,
+    }
+    print(
+        "[preprocess] water_frame_clip: "
+        f"WL={wl_frame_clip['changed_polygons']} changed, "
+        f"WO={wo_frame_clip['changed_polygons']} changed"
+    )
+
     # ---- Step 7 + 8: subtraction + filter ----
     t7 = time.time()
     filtered = _apply_subtraction_and_filter(
@@ -1975,18 +2358,39 @@ def preprocess_layers(
     # ---- Step 8.5: block_base (与 PNG brick_render 对齐) ----
     t85 = time.time()
     # 对齐 PNG load_data：roads 只取 LineString/MultiLineString（排除 Point/Polygon）
-    roads_lines_only = (road_roles.structural
-                        if len(road_roles.structural) > 0 else None)
+    roads_lines_only = (
+        eligible_structural_gdf
+        if len(eligible_structural_gdf) > 0 else None)
+    block_base_source_guard = {}
     block_base_polys = _compute_block_base(
         city_blocks, BLOCK_BASE_MIN_AREA_M2,
+        max_area_m2=BLOCK_BASE_MAX_AREA_M2,
         water_gdf=water_gdf,
         roads_gdf=roads_lines_only,
         buildings_gdf=buildings_gdf,
         veg_landmark_polys=VL_polys,
         road_inset=effective_printer.min_gap_mm / scale / 2.0,
+        bbox_local=bbox_local,
+        max_frame_area_fraction=BLOCK_BASE_MAX_FRAME_AREA_FRACTION,
+        evidence_out=block_base_source_guard,
     )
     print(f"[preprocess] _compute_block_base: {len(block_base_polys)} "
           f"polys after {time.time() - t85:.1f}s")
+    if (block_base_source_guard.get("rejected_above_frame_fraction", 0)
+            or block_base_source_guard.get("rejected_above_absolute_area", 0)):
+        print(
+            "[preprocess] block_base oversized-face guard: "
+            f"frame_rejected="
+            f"{block_base_source_guard['rejected_above_frame_fraction']} "
+            f"(frame-spanning="
+            f"{block_base_source_guard['rejected_frame_spanning']}), "
+            f"district_rejected="
+            f"{block_base_source_guard['rejected_above_absolute_area']}, "
+            f"frame_limit="
+            f"{block_base_source_guard['effective_max_area_m2']:.0f}m², "
+            f"district_limit="
+            f"{block_base_source_guard['absolute_max_area_m2']:.0f}m²"
+        )
 
     # ---- Step 8.6: classify block_base by landuse ----
     t86 = time.time()
@@ -2008,8 +2412,11 @@ def preprocess_layers(
         "city_blocks": len(city_blocks),
         "block_base_polygons": len(block_base_polys),
         "visible_segments": len(roads_lines),
+        "structural_selected": len(eligible_structural_lines),
         "structural_gap_model_mm": effective_printer.min_gap_mm,
         "structural_gap_real_m": effective_printer.min_gap_mm / scale,
+        "scale_aware_topology": topology_evidence,
+        "block_base_source_guard": block_base_source_guard,
     })
     print(f"[preprocess] _extract_roads: {time.time() - t9:.1f}s")
 
@@ -2017,6 +2424,7 @@ def preprocess_layers(
     result = LayerPolygons(
         BL=filtered["BL"],
         BL_categories=BL_categories,
+        BL_height_roles=BL_height_roles,
         BO=filtered["BO"],
         VL=filtered["VL"],
         VO=filtered["VO"],
@@ -2024,10 +2432,14 @@ def preprocess_layers(
         WO=filtered["WO"],
         block_base=block_base_polys,
         block_base_classes=block_base_classes,
-        block_base_cut_lines=(
-            list(road_roles.structural.geometry)
-            if len(road_roles.structural) > 0 else []
-        ),
+        # Building aggregation may coarsen its ownership blocks.  The visible
+        # lower-surface street texture keeps the complete, continuous tier-3
+        # structural network (including residential/living streets) while
+        # excluding service-road hatch. Tier-4 remains source/topology
+        # evidence but is too dense for the reference visual language.
+        block_base_cut_lines=list(block_structure_roads.geometry),
+        block_base_major_cut_lines=major_cut_lines,
+        city_blocks=city_blocks,
         roads_lines=roads_lines,
         road_roles=road_role_evidence,
         water_roles=water_role_evidence,

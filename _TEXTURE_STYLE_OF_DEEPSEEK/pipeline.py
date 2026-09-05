@@ -24,6 +24,7 @@ from _TEXTURE_STYLE_OF_DEEPSEEK.config import (
     get_area_class,
     compute_scale,
     BUILDING_V2_HOTSPOT_RELAX,
+    DEFAULT_VEGETATION_ENABLED,
 )
 from _TEXTURE_STYLE_OF_DEEPSEEK.terrain import build_deepseek_terrain
 from _TEXTURE_STYLE_OF_DEEPSEEK.object4_terrain_with_holes import (
@@ -48,7 +49,8 @@ from _TEXTURE_STYLE_OF_DEEPSEEK.validator import (
 
 def run(lat1: float, lon1: float, lat2: float, lon2: float,
         output_dir: str = "output/deepseek",
-        city_name: str = None) -> str:
+        city_name: str = None, *,
+        vegetation_enabled: bool = DEFAULT_VEGETATION_ENABLED) -> str:
     """Generate a _TEXTURE_STYLE_OF_DEEPSEEK 3MF model.
 
     Args:
@@ -56,6 +58,7 @@ def run(lat1: float, lon1: float, lat2: float, lon2: float,
         lat2, lon2: second corner (WGS84 degrees)
         output_dir: directory for output files
         city_name: name for output file (auto-detected from coords if None)
+        vegetation_enabled: opt in to vegetation mesh (source measurements remain enabled)
 
     Returns:
         Path to the generated .3mf file.
@@ -227,7 +230,8 @@ def run(lat1: float, lon1: float, lat2: float, lon2: float,
     landmarks_mesh = None
     if layers.BL or layers.BO:
         bldg_result = build_deepseek_buildings_v3(
-            layers.BL, layers.BO, terrain_solid, scale)
+            layers.BL, layers.BO, terrain_solid, scale,
+            BO_heights=(getattr(layers, "BO_heights", None) or None))
         if isinstance(bldg_result, dict):
             landmarks_mesh = bldg_result.get("landmarks")
             buildings_mesh = bldg_result.get("buildings")
@@ -301,7 +305,10 @@ def run(lat1: float, lon1: float, lat2: float, lon2: float,
     print("\n[Stage 8] Building vegetation features (v3)...")
     t8 = time.time()
 
-    if layers.VL or layers.VO:
+    if not vegetation_enabled:
+        vegetation_mesh = None
+        print("  Vegetation DISABLED (default; explicit opt-in required)")
+    elif layers.VL or layers.VO:
         vegetation_mesh = build_deepseek_vegetation_v3(
             layers.VL, layers.VO, terrain_solid, scale)
         if vegetation_mesh is not None:
@@ -323,7 +330,10 @@ def run(lat1: float, lon1: float, lat2: float, lon2: float,
         block_base_mesh = build_deepseek_block_base_v3(
             layers.block_base, terrain_solid, scale,
             clearance_lines=layers.block_base_cut_lines,
-            final_clearance_mm=DEFAULT_PRINTER_PROFILE.final_block_base_gap_mm)
+            final_clearance_mm=DEFAULT_PRINTER_PROFILE.final_block_base_gap_mm,
+            major_clearance_lines=getattr(
+                layers, "block_base_major_cut_lines", []),
+            surface_clearance_mm=DEFAULT_PRINTER_PROFILE.surface_road_gap_mm)
         if block_base_mesh is not None:
             print(f"  BlockBase faces: {len(block_base_mesh.faces):,}")
         else:

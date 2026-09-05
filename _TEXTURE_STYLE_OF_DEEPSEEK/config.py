@@ -17,6 +17,7 @@ Origin key (per constant):
 # ---------------------------------------------------------------------------
 INTERNAL_SPAN_MM = 196.0       # [REF] 200mm plate − 2mm margin/side; reference models use 100/127 transform scale
 BUILD_PLATE_MM = 200.0         # [HW]  Bambu Lab A1/P1 build plate
+DEFAULT_VEGETATION_ENABLED = False  # [DESIGN] 保留源数据测量，覆盖层仅显式开启
 
 
 def compute_scale(width_m: float, height_m: float) -> float:
@@ -241,6 +242,11 @@ MIN_PRINTABLE_AREA_M2 = 4000.0                   # [CALC] (nozzle/scale × 1.5)�
 # ---------------------------------------------------------------------------
 BLOCK_BASE_THICKNESS_MM = 0.5                    # [DESIGN] Z-texture displacement 的材料层
 BLOCK_BASE_MIN_AREA_M2 = 1000.0                  # [DESIGN] 对齐 PNG layer 1.5 阈值
+BLOCK_BASE_MAX_AREA_M2 = 500000.0                # [QUALITY] 街区底座不得退化成城区级白板
+# A single street block must never consume a material fraction of the whole
+# crop.  The limit is expressed as a frame fraction so it scales with 5/15/25
+# km products instead of baking one real-world area into every product size.
+BLOCK_BASE_MAX_FRAME_AREA_FRACTION = 0.05         # [QUALITY] reject polygonize outer faces
 
 # ---------------------------------------------------------------------------
 # WATERWAY 半宽  [TUNE] session_2026_05_17: 钱塘江/京杭运河 buffer 实测

@@ -15,6 +15,7 @@ import math
 import os
 import re
 import secrets
+import shutil
 import smtplib
 import socket
 import subprocess
@@ -24,6 +25,7 @@ import time
 import uuid
 from pathlib import Path
 from email.message import EmailMessage
+from urllib.parse import quote
 
 from fastapi import FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.responses import JSONResponse
@@ -31,8 +33,15 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import journey as journey_mod
-from auth_store import AuthError, AuthStore, AuthUser, store_from_env
-from job_store import JobStore
+from auth_store import (
+    AuthError, AuthStore, AuthUser, GuestSession, store_from_env,
+)
+from job_store import JobStore, renew_pipeline_attempt
+from pipeline_console import (
+    build_pipeline_console,
+    valid_pipeline_ledger,
+    write_pipeline_snapshot,
+)
 from progress_protocol import progress_from_log
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -40,6 +49,13 @@ ROOT = Path(__file__).resolve().parent.parent
 # 项目根不在路径上 → 无法 import _TEXTURE_STYLE_OF_DEEPSEEK（坐标转换等）
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+from aesthetic.pipeline_contract import (
+    CONTRACT_VERSION,
+    PIPELINE_STAGES,
+    S10_REQUIRED_ARTIFACT_BUNDLE,
+    validate_stage_context,
+)
 
 OUTPUT_DIR = Path(os.environ.get("STUDIO_OUTPUT_DIR", ROOT / "output"))
 GALLERY_DIR = OUTPUT_DIR / "style_gallery"
@@ -62,6 +78,9 @@ AUTH_REQUIRED = os.environ.get("AUTH_REQUIRED", "").lower() in (
     "1", "true", "yes", "on",
 )
 AUTH_COOKIE_NAME = "studio_session"
+GUEST_COOKIE_NAME = "studio_guest"
+GUEST_GENERATION_LIMIT = max(1, int(os.environ.get(
+    "GUEST_GENERATION_LIMIT", "3")))
 AUTH_COOKIE_SECURE = os.environ.get("AUTH_COOKIE_SECURE", "").lower() in (
     "1", "true", "yes", "on",
 )
@@ -80,13 +99,14 @@ def _auth_store() -> AuthStore:
     return _AUTH_STORE
 
 
-def _current_user(request: Request | None, *, required: bool = False
+def _current_user(request: Request | None, *, required: bool | None = None
                   ) -> AuthUser | None:
     if request is None:
         return None
     token = request.cookies.get(AUTH_COOKIE_NAME, "")
     user = _auth_store().get_session_user(token)
-    if user is None and (required or AUTH_REQUIRED):
+    must_login = AUTH_REQUIRED if required is None else required
+    if user is None and must_login:
         raise HTTPException(401, "请先登录")
     return user
 
@@ -102,6 +122,36 @@ def _user_public(user: AuthUser) -> dict:
         "quota_remaining": user.quota_remaining,
         "quota_period": user.quota_period,
     }
+
+
+def _guest_public(guest: GuestSession) -> dict:
+    return {
+        "quota_limit": guest.quota_limit,
+        "quota_used": guest.quota_used,
+        "quota_remaining": guest.quota_remaining,
+    }
+
+
+def _current_guest(request: Request | None, response: Response | None = None,
+                   *, create: bool = False) -> GuestSession | None:
+    """Resolve the opaque guest cookie, optionally creating one.
+
+    The browser only receives a random token.  Usage is stored transactionally
+    in SQLite and the token itself is never persisted in plaintext.
+    """
+    if request is None:
+        return None
+    token = request.cookies.get(GUEST_COOKIE_NAME, "")
+    guest = _auth_store().get_guest_session(token)
+    if guest is not None or not create or response is None:
+        return guest
+    guest, token = _auth_store().create_guest_session(
+        quota_limit=GUEST_GENERATION_LIMIT)
+    response.set_cookie(
+        GUEST_COOKIE_NAME, token, max_age=90 * 86400,
+        httponly=True, secure=AUTH_COOKIE_SECURE, samesite="lax", path="/",
+    )
+    return guest
 
 # 与 generate_city_legacy.py PRESETS 保持一致（轻量副本，避免 import 重管线）
 PRESETS = {
@@ -215,6 +265,51 @@ def _state_fields(bbox) -> dict:
 
 app = FastAPI(title="Map Relief Studio")
 
+_ADMIN_ONLY_ARTIFACT_PREFIXES = (
+    "pipeline_state",
+    "pipeline_observation",
+    "pipeline_measurement_report",
+    "scene_character",
+    "scene_policy",
+    "composition_spec",
+    "param_decision",
+    "block_grammar",
+    "building_mass",
+    "building_data_quality",
+    "height_hierarchy",
+    "height_emphasis",
+    "landform_character",
+    "validator_report",
+    "slicer_report",
+    "acceptance_report",
+)
+
+
+def _is_admin_only_artifact(filename: str) -> bool:
+    lowered = Path(filename).name.lower()
+    return any(lowered.startswith(prefix)
+               for prefix in _ADMIN_ONLY_ARTIFACT_PREFIXES)
+
+
+@app.middleware("http")
+async def protect_internal_pipeline_artifacts(request: Request, call_next):
+    """Keep implementation evidence behind the administrator session.
+
+    Customer models and preview images intentionally remain public under
+    ``/files`` for existing shared links.  Pipeline ledgers, observations,
+    measurement reports and strategy sidecars expose internal thresholds or
+    decision chains, so even a guessed static URL is denied before the mounted
+    StaticFiles application sees it.
+    """
+    path = request.url.path.rstrip("/")
+    filename = path.rsplit("/", 1)[-1].lower()
+    if path.startswith("/files/") and _is_admin_only_artifact(filename):
+        user = _current_user(request, required=False)
+        if user is None or user.role != "admin":
+            # Avoid confirming whether a private report exists.
+            return JSONResponse({"detail": "not found"}, status_code=404)
+    return await call_next(request)
+
 
 # ---------------------------------------------------------------------------
 # 账号（邮箱验证码；微信 UnionID 使用同一 auth_identities 表后续接入）
@@ -274,6 +369,8 @@ def _send_login_email(email: str, code: str) -> None:
 def api_auth_config():
     return {
         "required": AUTH_REQUIRED,
+        "guest_enabled": True,
+        "guest_generation_limit": GUEST_GENERATION_LIMIT,
         "email_enabled": bool(os.environ.get("SMTP_HOST")) or
                          AUTH_DEV_ECHO_CODE,
         "wechat_enabled": bool(os.environ.get("WECHAT_APP_ID")),
@@ -296,7 +393,9 @@ def api_auth_email_start(req: EmailCodeStart):
 
 
 @app.post("/api/auth/email/verify")
-def api_auth_email_verify(req: EmailCodeVerify, response: Response):
+def api_auth_email_verify(req: EmailCodeVerify, response: Response,
+                          request: Request):
+    guest = _current_guest(request)
     try:
         user, token = _auth_store().verify_email_code(req.email, req.code)
     except AuthError as exc:
@@ -305,14 +404,37 @@ def api_auth_email_verify(req: EmailCodeVerify, response: Response):
         AUTH_COOKIE_NAME, token, max_age=30 * 86400,
         httponly=True, secure=AUTH_COOKIE_SECURE, samesite="lax", path="/",
     )
-    return {"ok": True, "user": _user_public(user)}
+    claimed_jobs = 0
+    if guest is not None:
+        jobs_changed = False
+        with JOBS_LOCK:
+            for job in JOBS.values():
+                if guest.id not in (job.get("guest_owner_ids") or []):
+                    continue
+                guest_owners = job.get("guest_owner_ids") or []
+                job["guest_owner_ids"] = [
+                    owner for owner in guest_owners if owner != guest.id]
+                owners = job.setdefault("owner_ids", [])
+                if user.id not in owners:
+                    owners.append(user.id)
+                    claimed_jobs += 1
+                jobs_changed = True
+            if jobs_changed:
+                _save_jobs()
+    return {"ok": True, "user": _user_public(user),
+            "claimed_guest_jobs": claimed_jobs}
 
 
 @app.get("/api/auth/me")
-def api_auth_me(request: Request):
-    user = _current_user(request)
+def api_auth_me(request: Request, response: Response):
+    # Account discovery itself must stay available to anonymous visitors even
+    # when AUTH_REQUIRED is enabled for an older deployment.  The product now
+    # grants a bounded guest session rather than forcing login at first paint.
+    user = _current_user(request, required=False)
+    guest = None if user else _current_guest(request, response, create=True)
     return {"authenticated": user is not None,
-            "user": _user_public(user) if user else None}
+            "user": _user_public(user) if user else None,
+            "guest": _guest_public(guest) if guest else None}
 
 
 @app.post("/api/auth/logout")
@@ -360,6 +482,36 @@ def api_admin_user_update(user_id: str, req: AdminUserUpdate,
         raise HTTPException(400, str(exc)) from exc
     return {"user": _user_public(user)}
 
+
+@app.get("/api/admin/jobs/{job_id}/pipeline")
+def api_admin_job_pipeline(job_id: str, request: Request):
+    """Return the read-only, persisted pipeline projection for one job.
+
+    This endpoint intentionally requires an administrator even when account
+    enforcement is disabled for the public product page.  It contains design
+    decisions and intermediate evidence that are not part of customer output.
+    """
+    _admin_user(request)
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if job is not None:
+            job = dict(job)
+    if job is None:
+        raise HTTPException(404, "任务不存在")
+    public_job = _job_public(job)
+    events = _JOB_STORE.list_events(job_id, after_id=0, limit=500)
+    report = build_pipeline_console(
+        job, public_job, events=events, output_root=OUTPUT_DIR,
+        log_tail=_read_job_log_tail(job, max_bytes=100_000),
+    )
+    try:
+        write_pipeline_snapshot(JOB_LOG_DIR, report)
+    except OSError:
+        # The console remains useful if an old read-only deployment cannot
+        # persist the projection; the durable jobs/events are still intact.
+        pass
+    return report
+
 # ---------------------------------------------------------------------------
 # 任务管理（内存态，单机自用足够）
 # ---------------------------------------------------------------------------
@@ -388,6 +540,8 @@ class GenerateRequest(BaseModel):
 # 不作为用户参数也避免同一区域产生无意义的缓存分叉。
 PRODUCT_BASE_THICKNESS_MM = 0.4
 PRODUCT_PREVIEW_SIZE_KM = 5.0
+PRODUCT_MAX_GENERATION_SIDE_KM = 30.0
+_OUTPUT_SLUG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 
 
 GENERATION_PROFILES = {
@@ -590,6 +744,91 @@ def _job_quality_checks(log_tail: str) -> list[dict]:
     return checks
 
 
+_PUBLIC_STAGE_DETAILS = {
+    "S0": "确认取景范围、模型比例与打印配置",
+    "S1": "准备地图、高程和本地缓存数据",
+    "S2": "投影坐标并检查道路、水体、建筑等关键来源",
+    "S3": "组织道路、水体和街区的连续拓扑",
+    "S4": "测量城市结构、地貌特征与数据质量",
+    "S5": "根据场景测量选择有边界的生成策略",
+    "S6": "整理建筑中频形态与相对高度层级",
+    "S7": "生成构图证据、诊断图和快速预览",
+    "S8": "生成地形、建筑、道路和水体实体",
+    "S9": "检查打印缝隙与模型几何完整性",
+    "S10": "导出模型、设计说明和观测报告",
+    "S11": "执行项目验证器与切片验收",
+}
+
+
+def _public_pipeline_summary(job: dict, progress_pct: int) -> dict:
+    """Return a customer-safe pipeline projection without internal Context.
+
+    Exact attempt-scoped Ledger state wins.  Older tasks remain visible via an
+    explicitly labelled progress estimate, but the estimate never exposes
+    paths, fingerprints, policy values, intermediate geometry or logs.
+    """
+
+    mode = str(job.get("mode") or "full")
+    try:
+        specs = [stage for stage in PIPELINE_STAGES if stage.applies_to(mode)]
+    except ValueError:
+        specs = list(PIPELINE_STAGES)
+
+    ledger, _ledger_path = _job_pipeline_ledger(job)
+    ledger_stages = {
+        str(item.get("id") or ""): item
+        for item in ((ledger or {}).get("stages") or [])
+        if isinstance(item, dict)
+    }
+    exact = bool(ledger)
+    current_id = str((ledger or {}).get("current_stage_id") or "")
+    job_status = str(job.get("status") or "pending")
+
+    if exact and not current_id and specs:
+        current_id = specs[-1].id
+    if not exact:
+        eligible = [
+            stage for stage in specs
+            if int(progress_pct) >= int(stage.progress_threshold)
+        ]
+        current_spec = eligible[-1] if eligible else specs[0]
+        current_id = current_spec.id
+
+    stages = []
+    current_order = next(
+        (stage.order for stage in specs if stage.id == current_id),
+        specs[-1].order if job_status == "done" else specs[0].order,
+    )
+    for spec in specs:
+        if exact:
+            status = str(
+                (ledger_stages.get(spec.id) or {}).get("status") or "pending")
+        elif job_status == "done":
+            status = "completed"
+        elif spec.order < current_order:
+            status = "completed"
+        elif spec.order == current_order:
+            status = "failed" if job_status == "failed" else (
+                "queued" if job_status in {"starting", "pending"}
+                else "running")
+        else:
+            status = "pending"
+        stages.append({
+            "id": spec.id,
+            "name": spec.name,
+            "status": status,
+            "detail": _PUBLIC_STAGE_DETAILS.get(spec.id, spec.summary),
+        })
+
+    return {
+        "contract_version": CONTRACT_VERSION,
+        "state_source": "verified_ledger" if exact else "estimated_progress",
+        "current_stage_id": current_id or None,
+        "stages": stages,
+        "privacy": "仅展示阶段状态；生成参数、内部上下文与中间产物仅管理员可见",
+    }
+
+
 def _job_public(job: dict, include_log: bool = False) -> dict:
     """任务对外视图（去掉 proc 等内部字段）。
 
@@ -640,6 +879,7 @@ def _job_public(job: dict, include_log: bool = False) -> dict:
                 if key not in {"progress_pct"}})
     out["progress_pct"] = progress_pct
     out["progress_kind"] = "estimated_overall"
+    out["pipeline"] = _public_pipeline_summary(job, progress_pct)
     out["duration_hint"] = _job_duration_hint(job)
     eta = _job_eta(job, elapsed, progress_pct)
     if eta:
@@ -694,6 +934,15 @@ def _watch_job(job: dict):
         else:
             ok = False
             tmp.unlink(missing_ok=True)
+    if ok and job.get("mode") in {"full", "draft"}:
+        try:
+            _require_canonical_job_completion(job)
+        except HTTPException as exc:
+            ok = False
+            with open(job["log_path"], "a", encoding="utf-8") as stream:
+                stream.write(
+                    "\ncompletion evidence rejected: "
+                    f"{exc.detail}\n")
     with JOBS_LOCK:
         job["ended"] = time.time()
         job["status"] = "done" if ok else "failed"
@@ -726,10 +975,13 @@ def _job_artifacts_available(job: dict) -> bool:
     city = job["city"]
     if job.get("mode") == "styles":
         return bool(_load_gallery(city))
-    artifacts = _scan_artifacts(city)
-    if job.get("mode") == "draft":
-        return bool(artifacts["draft_glb"] or artifacts["preview_png"])
-    return bool(artifacts["models_3mf"])
+    if job.get("mode") not in {"full", "draft"}:
+        return False
+    try:
+        _require_canonical_job_completion(job)
+    except HTTPException:
+        return False
+    return True
 
 
 def _bbox_side_km(bbox: list[float] | tuple[float, ...]) -> float:
@@ -764,12 +1016,22 @@ def _quota_cost(mode: str, bbox: list[float] | tuple[float, ...]) -> int:
 
 
 def _attach_job_account(job: dict, user: AuthUser | None,
-                        bbox: list[float] | tuple[float, ...]) -> None:
-    if user is None:
-        return
-    job["owner_ids"] = [user.id]
-    job["quota_payer_id"] = user.id
-    job["quota_cost"] = _quota_cost(job.get("mode", ""), bbox)
+                        bbox: list[float] | tuple[float, ...],
+                        guest: GuestSession | None = None) -> None:
+    """Attach exactly one billing identity to a prospective new job."""
+    if user is not None:
+        job["owner_ids"] = [user.id]
+        job["quota_payer_kind"] = "user"
+        job["quota_payer_id"] = user.id
+        job["quota_cost"] = _quota_cost(job.get("mode", ""), bbox)
+    elif guest is not None:
+        job["guest_owner_ids"] = [guest.id]
+        job["quota_payer_kind"] = "guest"
+        job["quota_payer_id"] = guest.id
+        # A guest opportunity means one actual new compute job, independent
+        # of area/mode.  The full styles → draft → full journey therefore fits
+        # exactly inside the three-try product promise.
+        job["quota_cost"] = 1
 
 
 def _refund_job_quota(job: dict) -> None:
@@ -778,20 +1040,27 @@ def _refund_job_quota(job: dict) -> None:
     amount = int(job.get("quota_cost") or 0)
     if not payer or amount <= 0 or job.get("quota_refunded"):
         return
-    _auth_store().refund_quota(payer, job["id"])
+    if job.get("quota_payer_kind") == "guest":
+        _auth_store().refund_guest_generation(payer, job["id"])
+    else:
+        _auth_store().refund_quota(payer, job["id"])
     job["quota_refunded"] = True
 
 
 def _share_job_with_owner(existing: dict, incoming: dict) -> bool:
     """Attach an identical shared result to another account without rebilling."""
     incoming_owners = incoming.get("owner_ids") or []
-    if not incoming_owners:
-        return False
     owners = existing.setdefault("owner_ids", [])
     changed = False
     for owner_id in incoming_owners:
         if owner_id not in owners:
             owners.append(owner_id)
+            changed = True
+    incoming_guests = incoming.get("guest_owner_ids") or []
+    guests = existing.setdefault("guest_owner_ids", [])
+    for guest_id in incoming_guests:
+        if guest_id not in guests:
+            guests.append(guest_id)
             changed = True
     return changed
 
@@ -847,8 +1116,20 @@ def _claim_or_reuse_job(job: dict) -> tuple[dict, bool, bool]:
             amount = int(job.get("quota_cost") or 0)
             if payer and amount > 0:
                 try:
-                    _auth_store().reserve_quota(payer, job["id"], amount)
+                    if job.get("quota_payer_kind") == "guest":
+                        _auth_store().reserve_guest_generation(
+                            payer, job["id"])
+                    else:
+                        _auth_store().reserve_quota(
+                            payer, job["id"], amount)
                 except AuthError as exc:
+                    if job.get("quota_payer_kind") == "guest":
+                        code = ("guest_quota_exhausted" if
+                                "已用完" in str(exc) else
+                                "guest_session_invalid")
+                        raise HTTPException(429, {
+                            "code": code, "message": str(exc),
+                        }) from exc
                     raise HTTPException(429, str(exc)) from exc
             try:
                 JOBS[job["id"]] = job
@@ -860,7 +1141,11 @@ def _claim_or_reuse_job(job: dict) -> tuple[dict, bool, bool]:
             except Exception:
                 JOBS.pop(job["id"], None)
                 if payer and amount > 0:
-                    _auth_store().refund_quota(payer, job["id"])
+                    if job.get("quota_payer_kind") == "guest":
+                        _auth_store().refund_guest_generation(
+                            payer, job["id"])
+                    else:
+                        _auth_store().refund_quota(payer, job["id"])
                 raise
     return job, False, False
 
@@ -925,8 +1210,13 @@ def _worker_job_requirements(cmd: list[str], mode: str) -> dict:
     }
 
 
-def _make_worker_spec(cmd: list[str], mode: str,
-                      inline_paths: list[Path] | None = None) -> dict:
+def _make_worker_spec(
+    cmd: list[str], mode: str,
+    inline_paths: list[Path] | None = None,
+    *,
+    run_id: str | None = None,
+    attempt_id: str | None = None,
+) -> dict:
     """Build a versioned, allow-listed task instead of arbitrary shell text."""
     if len(cmd) < 2 or cmd[1] not in _ALLOWED_WORKER_ENTRYPOINTS:
         raise ValueError(f"worker entrypoint 未列入白名单: {cmd[1:2]}")
@@ -937,14 +1227,21 @@ def _make_worker_spec(cmd: list[str], mode: str,
             "name": path.name,
             "content": path.read_text(encoding="utf-8"),
         })
+    env_extra = {
+        "PYTHONIOENCODING": "utf-8",
+        "PYTHONUNBUFFERED": "1",
+    }
+    if run_id:
+        env_extra["MAP_PIPELINE_RUN_ID"] = str(run_id)
+    if attempt_id:
+        env_extra["MAP_PIPELINE_ATTEMPT_ID"] = str(attempt_id)
+    if mode in {"full", "draft", "styles", "fetch", "review"}:
+        env_extra["MAP_PIPELINE_MODE"] = mode
     return {
         "version": 1,
         "task": {"entrypoint": cmd[1], "args": cmd[2:]},
         "inline_files": inline_files,
-        "env_extra": {
-            "PYTHONIOENCODING": "utf-8",
-            "PYTHONUNBUFFERED": "1",
-        },
+        "env_extra": env_extra,
         # Keep the old field for one rolling deployment; new workers ignore it.
         "cmd": cmd,
         "requirements": _worker_job_requirements(cmd, mode),
@@ -995,6 +1292,16 @@ def _load_jobs():
             else:
                 j["status"] = "failed"
                 j["ended"] = time.time()
+                # A local child process cannot survive an API restart. Treat
+                # the recovered task as a genuine failure and release its
+                # account/guest reservation exactly once.
+                try:
+                    _refund_job_quota(j)
+                except AuthError:
+                    # Old deployments may contain a payer id whose auth row
+                    # was already removed.  Keep booting and preserve the job
+                    # as failed instead of taking the whole API down.
+                    j["quota_refund_error"] = True
                 changed = True
         JOBS[jid] = j
     if changed:
@@ -1042,8 +1349,7 @@ def _scan_artifacts(city: str) -> dict:
     """扫描 output/{city}/ 下的最新产物。"""
     d = OUTPUT_DIR / city
     art = {"models_3mf": [], "draft_glb": None, "preview_png": None,
-           "topdown_png": None, "height_png": None,
-           "param_decision": None, "design_spec": None}
+           "topdown_png": None, "height_png": None, "design_spec": None}
     if not d.is_dir():
         return art
     for p in sorted(d.glob("*.3mf"), key=lambda p: p.stat().st_mtime,
@@ -1080,12 +1386,6 @@ def _scan_artifacts(city: str) -> dict:
     hgt = d / f"{city}_height.png"
     if hgt.exists():
         art["height_png"] = f"/files/{city}/{hgt.name}"
-    pd = d / "param_decision.json"
-    if pd.exists():
-        try:
-            art["param_decision"] = json.loads(pd.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            pass
     ds = d / "design_spec.json"
     if ds.exists():
         art["design_spec"] = {
@@ -1093,6 +1393,221 @@ def _scan_artifacts(city: str) -> dict:
             "name": ds.name,
         }
     return art
+
+
+_BOUND_ARTIFACT_VERIFY_CACHE: dict[tuple, bool] = {}
+
+
+def _verified_bound_artifact(path: Path, claim: dict) -> bool:
+    """Verify one claimed file, caching only an unchanged filesystem inode."""
+
+    try:
+        stat = path.stat()
+    except OSError:
+        return False
+    expected_size = claim.get("size_bytes")
+    expected_hash = str(claim.get("sha256") or "").lower()
+    if (not path.is_file() or stat.st_size != expected_size
+            or not re.fullmatch(r"[0-9a-f]{64}", expected_hash)):
+        return False
+    key = (
+        str(path.resolve()), stat.st_dev, stat.st_ino, stat.st_size,
+        stat.st_mtime_ns, expected_hash,
+    )
+    if _BOUND_ARTIFACT_VERIFY_CACHE.get(key):
+        return True
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError:
+        return False
+    passed = digest.hexdigest() == expected_hash
+    if passed:
+        _BOUND_ARTIFACT_VERIFY_CACHE[key] = True
+    return passed
+
+
+def _job_pipeline_ledger(job: dict) -> tuple[dict, Path] | tuple[None, None]:
+    """Load only the exact run/attempt ledger belonging to one job."""
+
+    city = str(job.get("city") or "")
+    run_id = str(job.get("id") or "")
+    attempt_id = str(job.get("pipeline_attempt_id") or "")
+    if (not city or not run_id or not attempt_id
+            or any(part in city for part in ("/", "\\", ".."))):
+        return None, None
+    filename = f"pipeline_state.{run_id}.{attempt_id}.json"
+    city_dir = OUTPUT_DIR / city
+    candidates = (
+        city_dir / ".pipeline_runs" / filename,
+        city_dir / filename,
+    )
+    for path in candidates:
+        try:
+            ledger = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if (valid_pipeline_ledger(ledger)
+                and str(ledger.get("run_id") or "") == run_id
+                and str(ledger.get("attempt_id") or "") == attempt_id
+                and str(ledger.get("mode") or "") == str(job.get("mode") or "")):
+            return ledger, path
+    return None, None
+
+
+def _scan_job_artifacts(job: dict) -> dict:
+    """Return only hash-verified artifacts claimed by this exact attempt."""
+
+    city = str(job.get("city") or "")
+    ledger, _ledger_path = _job_pipeline_ledger(job)
+    if ledger is None:
+        raise HTTPException(
+            409, "该历史任务没有可验证的 attempt 产物绑定，不能猜测同城文件")
+    city_dir = (OUTPUT_DIR / city).resolve()
+    public_roles = {
+        "3mf", "draft_glb", "diagnostic_png", "review_topdown_png",
+        "review_height_png", "design_spec",
+    }
+    # Later canonical stages supersede earlier claims with the same role.
+    claims = {}
+    for claim in sorted(
+            ledger.get("artifacts") or [],
+            key=lambda item: int(str(item.get("stage_id") or "S0")[1:])):
+        role = str(claim.get("name") or "")
+        if role in public_roles:
+            claims[role] = claim
+
+    artifacts = {
+        "models_3mf": [], "draft_glb": None, "preview_png": None,
+        "topdown_png": None, "height_png": None, "design_spec": None,
+    }
+    for role, claim in claims.items():
+        relative = Path(str(claim.get("path") or ""))
+        path = (city_dir / relative).resolve()
+        try:
+            path.relative_to(city_dir)
+        except ValueError as exc:
+            raise HTTPException(409, "任务产物路径越界") from exc
+        if not _verified_bound_artifact(path, claim):
+            raise HTTPException(
+                409, f"任务产物 {role} 已缺失或与 Pipeline Ledger 不一致")
+        url = f"/files/{quote(city)}/{quote(relative.as_posix(), safe='/')}"
+        mtime = time.strftime(
+            "%m-%d %H:%M", time.localtime(path.stat().st_mtime))
+        record = {
+            "name": path.name,
+            "url": url,
+            "size_mb": round(path.stat().st_size / 1e6, 1),
+            "mtime": mtime,
+            "sha256": claim["sha256"],
+            "run_id": ledger["run_id"],
+            "attempt_id": ledger["attempt_id"],
+        }
+        if role == "3mf":
+            artifacts["models_3mf"].append(record)
+        elif role == "draft_glb":
+            artifacts["draft_glb"] = record
+        elif role == "diagnostic_png":
+            artifacts["preview_png"] = url
+        elif role == "review_topdown_png":
+            artifacts["topdown_png"] = url
+        elif role == "review_height_png":
+            artifacts["height_png"] = url
+        elif role == "design_spec":
+            artifacts["design_spec"] = record
+    return {
+        "city": city,
+        "job_id": str(job["id"]),
+        "run_id": str(ledger["run_id"]),
+        "attempt_id": str(ledger["attempt_id"]),
+        "integrity": "ledger_hash_verified",
+        "artifacts": artifacts,
+    }
+
+
+def _require_canonical_job_completion(job: dict) -> dict:
+    """Return artifacts only when the exact attempt reached its terminal gate.
+
+    A child process exiting with status zero is transport evidence, not
+    generation evidence.  Full jobs are reusable only after S10 published its
+    exact six-file bundle and the ledger is waiting for (or has passed) S11.
+    Draft jobs are reusable only after their terminal S7 committed the GLB.
+    Every required claim is hash-verified against this attempt's city folder.
+    """
+
+    mode = str(job.get("mode") or "")
+    if mode not in {"full", "draft"}:
+        raise HTTPException(409, "该任务模式没有模型终态门禁")
+    ledger, _ledger_path = _job_pipeline_ledger(job)
+    if ledger is None:
+        raise HTTPException(
+            409, "该任务缺少当前 attempt 的有效 Pipeline Ledger")
+
+    stages = ledger["stages"]
+    if mode == "full":
+        s10 = stages[10]
+        s11 = stages[11]
+        root_status = ledger.get("status")
+        pending_validation = (
+            root_status == "generated_pending_validation"
+            and ledger.get("current_stage_id") == "S11"
+            and s11.get("status") == "pending_validation"
+        )
+        validated = (
+            root_status == "validated"
+            and ledger.get("current_stage_id") is None
+            and s11.get("status") == "completed"
+        )
+        claims = s10.get("artifacts") or []
+        if (s10.get("status") != "completed"
+                or {str(item.get("name") or "") for item in claims}
+                != set(S10_REQUIRED_ARTIFACT_BUNDLE)
+                or not (pending_validation or validated)):
+            raise HTTPException(
+                409, "正式任务尚未通过 S10 六件套终态门禁")
+        required_claims = claims
+        required_public_role = "3mf"
+    else:
+        s7 = stages[7]
+        claims = s7.get("artifacts") or []
+        if (ledger.get("status") != "completed"
+                or ledger.get("current_stage_id") is not None
+                or s7.get("status") != "completed"):
+            raise HTTPException(409, "快速预览尚未到达 S7 终态")
+        required_claims = [
+            item for item in claims if item.get("name") == "draft_glb"
+        ]
+        required_public_role = "draft_glb"
+        if len(required_claims) != 1:
+            raise HTTPException(409, "S7 缺少唯一的 draft_glb 产物绑定")
+
+    city_dir = (OUTPUT_DIR / str(job.get("city") or "")).resolve()
+    for claim in required_claims:
+        if int(claim.get("size_bytes") or 0) <= 0:
+            raise HTTPException(
+                409, f"S10/S7 必需产物 {claim.get('name')} 为空",
+            )
+        relative = Path(str(claim.get("path") or ""))
+        path = (city_dir / relative).resolve()
+        try:
+            path.relative_to(city_dir)
+        except ValueError as exc:
+            raise HTTPException(409, "任务产物路径越界") from exc
+        if not _verified_bound_artifact(path, claim):
+            raise HTTPException(
+                409,
+                f"S10/S7 必需产物 {claim.get('name')} 已缺失或哈希不一致",
+            )
+
+    bound = _scan_job_artifacts(job)
+    artifacts = bound["artifacts"]
+    if required_public_role == "3mf" and not artifacts["models_3mf"]:
+        raise HTTPException(409, "S10 缺少可交付的 3MF")
+    if required_public_role == "draft_glb" and not artifacts["draft_glb"]:
+        raise HTTPException(409, "S7 缺少可预览的 GLB")
+    return bound
 
 
 def _load_gallery(city: str):
@@ -1736,35 +2251,49 @@ class StylesRequest(BaseModel):
 
 
 @app.post("/api/styles")
-def api_styles(req: StylesRequest, request: Request = None):
+def api_styles(req: StylesRequest, request: Request = None,
+               response: Response = None):
     """为任意区域生成风格画廊（4 种风格的 2D 图）。
 
     实测 10km 见方 ≈ 49s 出 4 张（每张 7–8s + 一次 prepare）。
     同 bbox 命中 PipelineCache 后更快。
     """
     bbox = req.bbox
-    user = _current_user(request, required=AUTH_REQUIRED)
+    user = _current_user(request, required=False)
     if len(bbox) != 4:
         raise HTTPException(400, "bbox 需为 [south, west, north, east]")
     s, w, n, e = bbox
+    if (not all(math.isfinite(value) for value in bbox) or
+            not (-90 <= s <= 90 and -90 <= n <= 90 and
+                 -180 <= w <= 180 and -180 <= e <= 180)):
+        raise HTTPException(400, "bbox 坐标超出 WGS84 范围")
     if not (n > s and e > w):
         raise HTTPException(400, "bbox 南北/东西颠倒")
+    if _bbox_side_km(bbox) > PRODUCT_MAX_GENERATION_SIDE_KM:
+        raise HTTPException(
+            400, "取景范围过大，请使用 15 km 或 25 km 档位",
+        )
     st = _pbf_status(bbox)
     if st["state"] == "fetchable":
         raise HTTPException(409, "该区域数据正在准备中，敬请期待")
     if st["state"] == "none":
         raise HTTPException(422, "该区域即将开放，敬请期待")
 
-    slug = req.slug.strip() if req.slug.strip() else _custom_slug(bbox)
+    requested_slug = req.slug.strip()
+    if requested_slug and not _OUTPUT_SLUG_RE.fullmatch(requested_slug):
+        raise HTTPException(400, "区域标识只能包含字母、数字、下划线和短横线")
+    slug = requested_slug or _custom_slug(bbox)
     request_key = _request_key("styles", {
         "bbox": [round(value, 7) for value in bbox],
         "prototype": req.prototype,
     })
     job_id = uuid.uuid4().hex[:8]
+    pipeline_attempt_id = uuid.uuid4().hex[:12]
     log_path = JOB_LOG_DIR / f"{job_id}_styles_{slug}.log"
     cmd = [sys.executable, "tools/gen_area_gallery.py",
            "--bbox", f"{s},{w},{n},{e}", "--pbf", st["pbf"],
-           "--slug", slug, "--prototype", req.prototype]
+           "--slug", slug, "--prototype", req.prototype,
+           "--amap-salience", "network"]
     if req.name.strip():
         cmd += ["--title", req.name.strip()]
 
@@ -1772,19 +2301,28 @@ def api_styles(req: StylesRequest, request: Request = None):
     env["PYTHONIOENCODING"] = "utf-8"
     env["PYTHONUNBUFFERED"] = "1"
     env["PATH"] = str(ROOT / "tools") + os.pathsep + env.get("PATH", "")
+    env["MAP_PIPELINE_RUN_ID"] = job_id
+    env["MAP_PIPELINE_ATTEMPT_ID"] = pipeline_attempt_id
+    env["MAP_PIPELINE_MODE"] = "styles"
+    # Do not mint persistent guest rows for malformed/unsupported requests.
+    # The identity is only needed once a valid compute job can be claimed.
+    guest = None if user else _current_guest(
+        request, response, create=True)
 
     if WORKER_MODE:
-        worker_spec = _make_worker_spec(cmd, "styles")
+        worker_spec = _make_worker_spec(
+            cmd, "styles", run_id=job_id, attempt_id=pipeline_attempt_id)
         job = {"id": job_id, "city": slug,
                "city_title": req.name.strip() or "自定义区域",
                "mode": "styles", "style": None, "exec": "worker",
                "request_key": request_key, "prototype": req.prototype,
                "bbox": bbox,
+               "pipeline_attempt_id": pipeline_attempt_id,
                "log_path": str(log_path), "status": "pending",
                "started": time.time(), "queued_at": time.time(), "ended": None,
                "requirements": worker_spec["requirements"],
                "spec": worker_spec}
-        _attach_job_account(job, user, bbox)
+        _attach_job_account(job, user, bbox, guest)
         claimed, reused, cached = _claim_or_reuse_job(job)
         return {"job_id": claimed["id"], "slug": slug,
                 "queued": claimed["status"] == "pending",
@@ -1795,9 +2333,10 @@ def api_styles(req: StylesRequest, request: Request = None):
            "mode": "styles", "style": None, "exec": "local",
            "request_key": request_key, "prototype": req.prototype,
            "bbox": bbox,
+           "pipeline_attempt_id": pipeline_attempt_id,
            "log_path": str(log_path), "status": "starting",
            "started": time.time(), "ended": None}
-    _attach_job_account(job, user, bbox)
+    _attach_job_account(job, user, bbox, guest)
     claimed, reused, cached = _claim_or_reuse_job(job)
     if reused:
         return {"job_id": claimed["id"], "slug": slug,
@@ -1870,8 +2409,9 @@ def api_geocode(q: str = "", near_lat: float | None = None,
 
 
 @app.post("/api/generate")
-def api_generate(req: GenerateRequest, request: Request = None):
-    user = _current_user(request, required=AUTH_REQUIRED)
+def api_generate(req: GenerateRequest, request: Request = None,
+                 response: Response = None):
+    user = _current_user(request, required=False)
     if req.mode not in ("draft", "full"):
         raise HTTPException(400, f"未知模式: {req.mode}")
     profile = req.generation_profile.strip() or "classic"
@@ -2001,6 +2541,16 @@ def api_generate(req: GenerateRequest, request: Request = None):
             "pbf": preview_status["pbf"],
         }
 
+    if not quality_profile:
+        # The guide is a no-op outside mainland China.  Inside China it is a
+        # read-only cartographic cross-check used to prevent a lake/terrain-
+        # heavy city frame from being misclassified as wilderness; OSM still
+        # owns every generated road, water and building geometry.
+        base_cmd.extend([
+            "--amap-salience", "network",
+            "--scene-policy-mode", "active",
+        ])
+
     # Keep both regions on disk.  Task recovery must never present the central
     # preview crop as if it were the formal framing selected by the user.
     if req.area is not None:
@@ -2017,6 +2567,7 @@ def api_generate(req: GenerateRequest, request: Request = None):
 
     request_key = _request_key("generate", {
         "city": city,
+        "vegetation_enabled": False,
         "mode": req.mode,
         "style": req.style,
         "generation_profile": profile,
@@ -2026,6 +2577,7 @@ def api_generate(req: GenerateRequest, request: Request = None):
         "preview_bbox": preview_bbox,
     })
     job_id = uuid.uuid4().hex[:8]
+    pipeline_attempt_id = uuid.uuid4().hex[:12]
     log_path = JOB_LOG_DIR / f"{job_id}_{city}_{req.mode}.log"
     # draft 也出 2D 图：诊断图（带图例统计）+ 画廊级俯视图（无文字）
     if quality_profile:
@@ -2033,12 +2585,13 @@ def api_generate(req: GenerateRequest, request: Request = None):
     else:
         cmd = base_cmd + [
             "--base-thickness-mm", f"{PRODUCT_BASE_THICKNESS_MM:.2f}",
+            "--no-vegetation",
         ]
         if req.mode == "draft":
             # Draft is a composition check, not a print artifact.  Avoid both
             # PNG render passes, full vegetation/landuse, and print-grade mesh
             # density; the formal 3MF path remains unchanged.
-            cmd.extend(["--draft", "--preview-fast", "--no-vegetation"])
+            cmd.extend(["--draft", "--preview-fast"])
         else:
             cmd.extend(["--png", "--review-png"])
 
@@ -2090,14 +2643,25 @@ def api_generate(req: GenerateRequest, request: Request = None):
     env["PYTHONIOENCODING"] = "utf-8"
     env["PYTHONUNBUFFERED"] = "1"
     env["PATH"] = str(ROOT / "tools") + os.pathsep + env.get("PATH", "")
+    env["MAP_PIPELINE_RUN_ID"] = job_id
+    env["MAP_PIPELINE_ATTEMPT_ID"] = pipeline_attempt_id
+    env["MAP_PIPELINE_MODE"] = req.mode
+    guest = None if user else _current_guest(
+        request, response, create=True)
 
     if WORKER_MODE:
         # ── Worker 模式：入队等本机 worker 拉取，不本地起进程 ──
         worker_spec = _make_worker_spec(
-            cmd, req.mode, [params_path] if params_path is not None else [])
+            cmd,
+            req.mode,
+            [params_path] if params_path is not None else [],
+            run_id=job_id,
+            attempt_id=pipeline_attempt_id,
+        )
         job = {"id": job_id, "city": city, "city_title": city_title,
                "mode": req.mode, "style": req.style,
                "generation_profile": profile, "exec": "worker",
+               "pipeline_attempt_id": pipeline_attempt_id,
                "fast_draft": fast_draft,
                "request_key": request_key,
                "log_path": str(log_path), "status": "pending",
@@ -2112,7 +2676,7 @@ def api_generate(req: GenerateRequest, request: Request = None):
             job["bbox"] = list(source_bbox)
         if preview_bbox is not None:
             job["preview_bbox"] = list(preview_bbox)
-        _attach_job_account(job, user, quota_bbox)
+        _attach_job_account(job, user, quota_bbox, guest)
         claimed, reused, cached = _claim_or_reuse_job(job)
         if reused and params_path is not None:
             params_path.unlink(missing_ok=True)
@@ -2125,6 +2689,7 @@ def api_generate(req: GenerateRequest, request: Request = None):
     job = {"id": job_id, "city": city, "city_title": city_title,
            "mode": req.mode, "style": req.style,
            "generation_profile": profile, "exec": "local",
+           "pipeline_attempt_id": pipeline_attempt_id,
            "fast_draft": fast_draft,
            "request_key": request_key,
            "log_path": str(log_path), "status": "starting",
@@ -2137,7 +2702,7 @@ def api_generate(req: GenerateRequest, request: Request = None):
         job["bbox"] = list(source_bbox)
     if preview_bbox is not None:
         job["preview_bbox"] = list(preview_bbox)
-    _attach_job_account(job, user, quota_bbox)
+    _attach_job_account(job, user, quota_bbox, guest)
     claimed, reused, cached = _claim_or_reuse_job(job)
     if reused:
         if params_path is not None:
@@ -2175,24 +2740,38 @@ def api_generation_profiles():
     return {"profiles": GENERATION_PROFILES}
 
 
-def _can_access_job(job: dict, user: AuthUser | None) -> bool:
+def _can_access_job(job: dict, user: AuthUser | None,
+                    guest: GuestSession | None = None) -> bool:
     if user and user.role == "admin":
         return True
+    if _owns_job(job, user, guest):
+        return True
     owners = job.get("owner_ids") or []
-    if not owners:
+    guest_owners = job.get("guest_owner_ids") or []
+    if not owners and not guest_owners:
         return True  # legacy jobs created before accounts were activated
-    return bool(user and user.id in owners)
+    return False
+
+
+def _owns_job(job: dict, user: AuthUser | None,
+              guest: GuestSession | None = None) -> bool:
+    """True only for explicit ownership; legacy-public is not "my task"."""
+    owners = job.get("owner_ids") or []
+    guest_owners = job.get("guest_owner_ids") or []
+    return bool((user and user.id in owners) or
+                (guest and guest.id in guest_owners))
 
 
 @app.get("/api/jobs/{job_id}")
 def api_job(job_id: str, include_log: bool = False,
             request: Request = None):
-    user = _current_user(request, required=AUTH_REQUIRED)
+    user = _current_user(request, required=False)
+    guest = None if user else _current_guest(request)
     with JOBS_LOCK:
         job = JOBS.get(job_id)
     if job is None:
         raise HTTPException(404, "任务不存在")
-    if AUTH_REQUIRED and not _can_access_job(job, user):
+    if not _can_access_job(job, user, guest):
         raise HTTPException(404, "任务不存在")
     if include_log and not (user and user.role == "admin"):
         raise HTTPException(403, "需要管理员账号")
@@ -2200,13 +2779,29 @@ def api_job(job_id: str, include_log: bool = False,
     return _job_public(job, include_log=allow_log)
 
 
+@app.get("/api/jobs/{job_id}/artifacts")
+def api_job_artifacts(job_id: str, request: Request = None):
+    """Return the exact immutable artifact set bound to one job attempt."""
+
+    user = _current_user(request, required=False)
+    guest = None if user else _current_guest(request)
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+    if job is None or not _can_access_job(job, user, guest):
+        raise HTTPException(404, "任务不存在")
+    if job.get("status") != "done":
+        raise HTTPException(409, "任务尚未完成")
+    return _scan_job_artifacts(job)
+
+
 @app.get("/api/jobs/{job_id}/events")
 def api_job_events(job_id: str, after: int = 0, request: Request = None):
     """Return durable progress events for reconnecting browsers."""
-    user = _current_user(request, required=AUTH_REQUIRED)
+    user = _current_user(request, required=False)
+    guest = None if user else _current_guest(request)
     with JOBS_LOCK:
         job = JOBS.get(job_id)
-    if job is None or (AUTH_REQUIRED and not _can_access_job(job, user)):
+    if job is None or not _can_access_job(job, user, guest):
         raise HTTPException(404, "任务不存在")
     events = _JOB_STORE.list_events(job_id, after_id=after)
     return {"job_id": job_id, "events": events,
@@ -2216,15 +2811,16 @@ def api_job_events(job_id: str, after: int = 0, request: Request = None):
 @app.get("/api/jobs")
 def api_jobs(include_log: bool = False, mine: bool = False,
              request: Request = None):
-    user = _current_user(request, required=AUTH_REQUIRED)
+    user = _current_user(request, required=False)
+    guest = None if user else _current_guest(request)
     with JOBS_LOCK:
         jobs = list(JOBS.values())
     if mine:
-        if user is None:
-            raise HTTPException(401, "请先登录")
-        jobs = [job for job in jobs if user.id in (job.get("owner_ids") or [])]
-    elif AUTH_REQUIRED and not (user and user.role == "admin"):
-        jobs = [job for job in jobs if _can_access_job(job, user)]
+        if user is None and guest is None:
+            raise HTTPException(401, "游客会话已失效，请刷新页面")
+        jobs = [job for job in jobs if _owns_job(job, user, guest)]
+    elif not (user and user.role == "admin"):
+        jobs = [job for job in jobs if _can_access_job(job, user, guest)]
     if include_log and not (user and user.role == "admin"):
         raise HTTPException(403, "需要管理员账号")
     allow_log = bool(include_log and user and user.role == "admin")
@@ -2238,6 +2834,7 @@ def api_jobs(include_log: bool = False, mine: bool = False,
 
 class WorkerFinish(BaseModel):
     job_id: str
+    attempt_id: str
     token: str = ""  # rolling-deploy compatibility; prefer Authorization header
     worker_id: str = "legacy-worker"
     ok: bool = True
@@ -2247,6 +2844,7 @@ class WorkerFinish(BaseModel):
 
 class WorkerHeartbeat(BaseModel):
     job_id: str
+    attempt_id: str
     token: str = ""  # rolling-deploy compatibility; prefer Authorization header
     worker_id: str
     log_tail: str = ""
@@ -2256,12 +2854,177 @@ class WorkerHeartbeat(BaseModel):
     stage_current: int | None = None
     stage_total: int | None = None
     stage_detail: str = ""
+    pipeline_state: dict | None = None
 
 
 class WorkerRegister(BaseModel):
     worker_id: str
     token: str = ""
     capabilities: dict = {}
+
+
+def _validated_worker_manifest(job: dict, files: list[dict]) -> list[dict]:
+    """Fail closed before a worker may turn a lease into ``done``."""
+
+    if not files:
+        raise HTTPException(400, "成功任务必须提交非空产物清单")
+    normalized = []
+    seen = set()
+    for raw in files:
+        if not isinstance(raw, dict):
+            raise HTTPException(400, "产物清单格式无效")
+        supplied_name = str(raw.get("name") or "")
+        name = Path(supplied_name).name
+        digest = str(raw.get("sha256") or "").lower()
+        size = raw.get("size")
+        if not name or name != supplied_name or name in seen:
+            raise HTTPException(400, "产物名称无效或重复")
+        if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise HTTPException(400, f"{name} 缺少有效 sha256")
+        if (not isinstance(size, int) or isinstance(size, bool) or size <= 0):
+            raise HTTPException(400, f"{name} 缺少有效文件大小")
+        seen.add(name)
+        normalized.append({"name": name, "sha256": digest, "size": size})
+
+    mode = str(job.get("mode") or "")
+    if mode == "full":
+        attempt = str(job.get("pipeline_attempt_id") or "")
+        expected_ledger = (
+            f"pipeline_state.{job['id']}.{attempt}.json" if attempt else "")
+        missing = []
+        if not any(name.endswith(".3mf") for name in seen):
+            missing.append("3MF")
+        if not any(
+                name == "design_spec.json" or
+                (name.startswith("design_spec.") and name.endswith(".json"))
+                for name in seen):
+            missing.append("design_spec.json")
+        if not expected_ledger or expected_ledger not in seen:
+            missing.append("attempt-scoped pipeline ledger")
+        if missing:
+            raise HTTPException(
+                400, "正式任务产物不完整: " + ", ".join(missing))
+    elif mode == "draft" and not any(
+            name.endswith(".glb") for name in seen):
+        raise HTTPException(400, "快速预览任务缺少 GLB")
+    elif mode == "styles":
+        if "gallery_metadata.json" not in seen or not any(
+                name.endswith(".png") for name in seen):
+            raise HTTPException(
+                400, "风格任务缺少 gallery_metadata.json 或 PNG")
+    return normalized
+
+
+def _validate_uploaded_full_ledger(
+        job: dict, manifest: list[dict], checks: dict[str, Path]) -> dict:
+    """Bind a formal worker completion to the exact S10 Ledger artifacts."""
+
+    if str(job.get("mode") or "") != "full":
+        return {}
+    attempt = str(job.get("pipeline_attempt_id") or "")
+    ledger_name = f"pipeline_state.{job['id']}.{attempt}.json"
+    try:
+        ledger = json.loads(checks[ledger_name].read_text(encoding="utf-8"))
+    except (KeyError, OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(400, "正式任务 Pipeline Ledger 不可读") from exc
+    if not valid_pipeline_ledger(ledger):
+        raise HTTPException(400, "正式任务 Pipeline Ledger 语义无效")
+    stages = ledger.get("stages") or []
+    valid_stages = (
+        isinstance(stages, list) and len(stages) == len(PIPELINE_STAGES)
+        and all(isinstance(item, dict) for item in stages)
+    )
+    if (not valid_stages or
+            ledger.get("schema_version") != "pipeline-ledger-v1" or
+            ledger.get("contract_version") != CONTRACT_VERSION or
+            str(ledger.get("run_id") or "") != str(job["id"]) or
+            str(ledger.get("attempt_id") or "") != attempt or
+            ledger.get("status") != "generated_pending_validation" or
+            [item.get("id") for item in stages] != [
+                stage.id for stage in PIPELINE_STAGES] or
+            stages[10].get("status") != "completed" or
+            stages[11].get("status") != "pending_validation"):
+        raise HTTPException(400, "正式任务 Pipeline Ledger 状态无效")
+    context = ((stages[10].get("context_out") or {}).get("value"))
+    try:
+        validate_stage_context("S10", context)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(400, "S10 Context 语义无效") from exc
+
+    manifest_by_name = {item["name"]: item for item in manifest}
+    all_claims = [
+        item for item in (ledger.get("artifacts") or [])
+        if isinstance(item, dict)
+    ]
+    s10_claims = {
+        str(item.get("name") or ""): item
+        for item in ledger.get("artifacts") or []
+        if isinstance(item, dict) and item.get("stage_id") == "S10"
+    }
+    for claim_name in ("3mf", "design_spec"):
+        claim = s10_claims.get(claim_name) or {}
+        filename = Path(str(claim.get("path") or "")).name
+        actual = manifest_by_name.get(filename) or {}
+        if (not filename or filename not in checks or
+                str(claim.get("sha256") or "").lower() !=
+                str(actual.get("sha256") or "").lower() or
+                int(claim.get("size_bytes") or -1) !=
+                int(actual.get("size") or -2)):
+            raise HTTPException(
+                400, f"S10 {claim_name} 与上传清单身份不一致")
+    claimed_filenames = [
+        Path(str(claim.get("path") or "")).name for claim in all_claims
+    ]
+    if (len(claimed_filenames) != len(set(claimed_filenames))
+            or set(manifest_by_name) != set(claimed_filenames) | {ledger_name}):
+        raise HTTPException(
+            400, "正式任务上传清单必须与 Pipeline Ledger 产物完全一致")
+    bound_claims = {}
+    for claim in all_claims:
+        role = str(claim.get("name") or "")
+        filename = Path(str(claim.get("path") or "")).name
+        actual = manifest_by_name.get(filename) or {}
+        if (filename not in checks
+                or str(claim.get("sha256") or "").lower()
+                != str(actual.get("sha256") or "").lower()
+                or int(claim.get("size_bytes") or -1)
+                != int(actual.get("size") or -2)):
+            raise HTTPException(
+                400, f"Pipeline artifact {role} 与上传清单身份不一致")
+        # Later canonical stages supersede an earlier report role (S10's
+        # final measurement report supersedes the S7 measured snapshot).
+        bound_claims[role] = filename
+    return bound_claims
+
+
+def _publish_worker_sidecar_aliases(
+        destination: Path, claims: dict[str, str]) -> None:
+    city = destination.name
+    aliases = {
+        "scene_character": "scene_character.json",
+        "scene_policy": "scene_policy.json",
+        "composition_spec": "composition_spec.json",
+        "design_spec": "design_spec.json",
+        "measurement_report_json": "pipeline_measurement_report.json",
+        "measurement_report_html": "pipeline_measurement_report.html",
+        "pipeline_observation_json": "pipeline_observation.json",
+        "pipeline_observation_html": "pipeline_observation.html",
+        "diagnostic_png": f"{city}_preview.png",
+        "review_topdown_png": f"{city}_topdown.png",
+        "review_height_png": f"{city}_height.png",
+        "draft_glb": f"{city}_draft.glb",
+    }
+    for role, alias in aliases.items():
+        source_name = claims.get(role)
+        if not source_name:
+            continue
+        source = destination / source_name
+        temporary = destination / f".{alias}.{uuid.uuid4().hex}.tmp"
+        try:
+            shutil.copy2(source, temporary)
+            os.replace(temporary, destination / alias)
+        finally:
+            temporary.unlink(missing_ok=True)
 
 
 def _worker_request_token(request: Request | None, fallback: str = "") -> str:
@@ -2296,6 +3059,39 @@ def _worker_owner(job: dict) -> str:
                ((job.get("owner_ids") or [""])[0]) or "anonymous")
 
 
+def _validate_heartbeat_pipeline_state(
+        job: dict, pipeline_state: dict) -> tuple[dict, bool]:
+    """Validate attempt identity before heartbeat state mutates the job.
+
+    Equal revisions are idempotent and keep the already persisted snapshot;
+    lower revisions are a stale worker heartbeat and must be rejected rather
+    than silently extending its lease.
+    """
+    ledger = dict(pipeline_state)
+    expected_attempt = str(job.get("pipeline_attempt_id") or "")
+    revision = ledger.get("revision")
+    valid_revision = (
+        isinstance(revision, int) and not isinstance(revision, bool)
+        and revision >= 0
+    )
+    if (not valid_pipeline_ledger(ledger) or
+            str(ledger.get("run_id") or "") != str(job["id"]) or
+            not expected_attempt or
+            str(ledger.get("attempt_id") or "") != expected_attempt or
+            str(ledger.get("mode") or "") != str(job.get("mode") or "") or
+            not valid_revision):
+        raise HTTPException(400, "Pipeline Ledger 身份或契约无效")
+
+    previous = job.get("pipeline_ledger") or {}
+    previous_revision = previous.get("revision")
+    if not (isinstance(previous_revision, int) and
+            not isinstance(previous_revision, bool)):
+        previous_revision = -1
+    if revision < previous_revision:
+        raise HTTPException(409, "Pipeline Ledger revision 已倒退")
+    return ledger, revision > previous_revision
+
+
 def _reclaim_expired_worker_jobs(now: float) -> bool:
     changed = False
     for job in JOBS.values():
@@ -2303,6 +3099,7 @@ def _reclaim_expired_worker_jobs(now: float) -> bool:
                 and float(job.get("lease_expires") or 0) <= now):
             job["status"] = "pending"
             job["retry_count"] = int(job.get("retry_count") or 0) + 1
+            renew_pipeline_attempt(job)
             job.pop("worker_id", None)
             job.pop("lease_expires", None)
             changed = True
@@ -2350,7 +3147,17 @@ def worker_next(token: str = "", worker_id: str = "legacy-worker",
         if job is not None:
             _LAST_WORKER_OWNER = next_owner
             JOBS[job["id"]] = job
-            return {"job_id": job["id"], "spec": job.get("spec"),
+            attempt_id = str(job.get("pipeline_attempt_id") or "")
+            if not attempt_id:
+                # A worker lease without an attempt identity cannot be made
+                # safe against retry/reclaim races.  Old persisted jobs are
+                # upgraded at the lease boundary before any work is exposed.
+                renew_pipeline_attempt(job)
+                attempt_id = str(job["pipeline_attempt_id"])
+                JOBS[job["id"]] = job
+                _JOB_STORE.save_job(job)
+            return {"job_id": job["id"], "attempt_id": attempt_id,
+                    "spec": job.get("spec"),
                     "city": job["city"], "mode": job["mode"],
                     "style": job.get("style"),
                     "fast_draft": bool(job.get("fast_draft")),
@@ -2370,6 +3177,16 @@ def worker_heartbeat(req: WorkerHeartbeat, request: Request = None):
             raise HTTPException(409, "任务已不在运行")
         if job.get("worker_id") != req.worker_id:
             raise HTTPException(409, "任务租约属于其他计算节点")
+        expected_attempt = str(job.get("pipeline_attempt_id") or "")
+        if (not req.attempt_id or not expected_attempt
+                or expected_attempt != req.attempt_id):
+            raise HTTPException(409, "任务 attempt 已失效")
+        heartbeat_ledger = None
+        update_heartbeat_ledger = False
+        if req.pipeline_state is not None:
+            heartbeat_ledger, update_heartbeat_ledger = (
+                _validate_heartbeat_pipeline_state(job, req.pipeline_state)
+            )
         now = time.time()
         old_stage = job.get("stage_code")
         old_progress = int(job.get("progress_pct") or 0)
@@ -2386,6 +3203,8 @@ def worker_heartbeat(req: WorkerHeartbeat, request: Request = None):
             job["stage_current"] = max(0, int(req.stage_current))
         if req.stage_total is not None:
             job["stage_total"] = max(0, int(req.stage_total))
+        if update_heartbeat_ledger:
+            job["pipeline_ledger"] = heartbeat_ledger
         _save_jobs()
         if (job.get("stage_code") != old_stage or
                 int(job.get("progress_pct") or 0) >= old_progress + 2):
@@ -2407,7 +3226,7 @@ def worker_heartbeat(req: WorkerHeartbeat, request: Request = None):
 
 
 @app.post("/api/worker/upload")
-async def worker_upload(token: str = "", job_id: str = "",
+async def worker_upload(attempt_id: str, token: str = "", job_id: str = "",
                         filename: str = "", sha256: str = "",
                         worker_id: str = "",
                         file: UploadFile = File(...),
@@ -2418,10 +3237,15 @@ async def worker_upload(token: str = "", job_id: str = "",
         raise HTTPException(400, "缺 job_id 或 filename")
     with JOBS_LOCK:
         job = JOBS.get(job_id)
-    if not job:
-        raise HTTPException(404, "任务不存在")
-    if worker_id and job.get("worker_id") != worker_id:
-        raise HTTPException(409, "任务租约属于其他计算节点")
+        if not job:
+            raise HTTPException(404, "任务不存在")
+        expected_attempt = str(job.get("pipeline_attempt_id") or "")
+        if (job.get("status") != "running"
+                or str(job.get("worker_id") or "") != worker_id
+                or not attempt_id or not expected_attempt
+                or expected_attempt != attempt_id
+                or float(job.get("lease_expires") or 0) <= time.time()):
+            raise HTTPException(409, "任务租约或 attempt 已失效")
     city = job["city"]
     # 安全：filename 不能含路径分隔符
     safe_name = Path(filename).name
@@ -2430,23 +3254,42 @@ async def worker_upload(token: str = "", job_id: str = "",
     dest_dir = GALLERY_DIR / city if job.get("mode") == "styles" else OUTPUT_DIR / city
     dest_dir.mkdir(parents=True, exist_ok=True)
     part_path = dest_dir / (safe_name + ".part")
-    # 流式写入 .part
-    import hashlib
+    # First stream into an attempt-scoped temporary path.  A retry may be
+    # leased while a large upload is still in flight; only the second CAS
+    # below may publish it as the conventional ``.part`` consumed by finish.
+    attempt_key = hashlib.sha256(attempt_id.encode("utf-8")).hexdigest()[:16]
+    upload_path = dest_dir / f".{safe_name}.{attempt_key}.uploading"
+    # 流式写入 attempt 隔离的临时文件
     h = hashlib.sha256()
     total = 0
-    with open(part_path, "wb") as f:
-        while True:
-            chunk = await file.read(1024 * 1024)
-            if not chunk:
-                break
-            f.write(chunk)
-            h.update(chunk)
-            total += len(chunk)
+    try:
+        with open(upload_path, "wb") as f:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                f.write(chunk)
+                h.update(chunk)
+                total += len(chunk)
+    except BaseException:
+        upload_path.unlink(missing_ok=True)
+        raise
     # 校验 sha256
     if sha256 and h.hexdigest() != sha256.lower():
-        part_path.unlink(missing_ok=True)
+        upload_path.unlink(missing_ok=True)
         raise HTTPException(400, f"sha256 不匹配：期望 {sha256}，"
                                  f"实际 {h.hexdigest()}")
+    with JOBS_LOCK:
+        current = JOBS.get(job_id)
+        if (current is None
+                or current.get("status") != "running"
+                or str(current.get("worker_id") or "") != worker_id
+                or str(current.get("pipeline_attempt_id") or "") !=
+                attempt_id
+                or float(current.get("lease_expires") or 0) <= time.time()):
+            upload_path.unlink(missing_ok=True)
+            raise HTTPException(409, "任务在上传期间已失去租约或切换 attempt")
+        os.replace(str(upload_path), str(part_path))
     return {"ok": True, "name": safe_name, "size": total,
             "sha256": h.hexdigest()}
 
@@ -2464,60 +3307,103 @@ def worker_finish(req: WorkerFinish, request: Request = None):
         _worker_request_token(request, req.token), req.worker_id)
     with JOBS_LOCK:
         job = JOBS.get(req.job_id)
-    if not job:
-        raise HTTPException(404, "任务不存在")
-    # 幂等：已 done 直接返回
-    if job.get("status") == "done":
-        return {"ok": True, "already_done": True}
-    if (job.get("worker_id") and job.get("worker_id") != req.worker_id and
-            float(job.get("lease_expires") or 0) > time.time()):
-        raise HTTPException(409, "任务租约属于其他计算节点")
+        if not job:
+            raise HTTPException(404, "任务不存在")
+        expected_attempt = str(job.get("pipeline_attempt_id") or "")
+        if (str(job.get("worker_id") or "") != req.worker_id
+                or not req.attempt_id or not expected_attempt
+                or expected_attempt != req.attempt_id):
+            raise HTTPException(409, "任务租约或 attempt 已失效")
+        # Idempotency is scoped to the exact attempt.  An old attempt cannot
+        # receive success merely because a newer attempt already completed.
+        if job.get("status") == "done":
+            return {"ok": True, "already_done": True}
+        if (job.get("status") != "running" or
+                float(job.get("lease_expires") or 0) <= time.time()):
+            raise HTTPException(409, "任务租约已失效或属于其他计算节点")
+        expected_attempt = req.attempt_id
     city = job["city"]
     dest_dir = GALLERY_DIR / city if job.get("mode") == "styles" else OUTPUT_DIR / city
 
     if req.ok:
         # 验证所有产物文件
         import hashlib
-        for finfo in req.files:
-            name = Path(finfo["name"]).name
+        manifest = _validated_worker_manifest(job, req.files)
+        checks = {}
+        pending_renames = []
+        for finfo in manifest:
+            name = finfo["name"]
             part = dest_dir / (name + ".part")
             final = dest_dir / name
             # 优先检查 .part（刚上传的）
             check = part if part.exists() else final
             if not check.exists():
                 raise HTTPException(400, f"产物缺失: {name}")
-            if finfo.get("sha256"):
-                h = hashlib.sha256(check.read_bytes()).hexdigest()
-                if h != finfo["sha256"].lower():
-                    raise HTTPException(400, f"{name} sha256 不匹配")
-            # .part → 正式名
+            h = hashlib.sha256(check.read_bytes()).hexdigest()
+            if h != finfo["sha256"]:
+                raise HTTPException(400, f"{name} sha256 不匹配")
+            if check.stat().st_size != finfo["size"]:
+                raise HTTPException(400, f"{name} 文件大小不匹配")
+            checks[name] = check
             if part.exists():
-                os.replace(str(part), str(final))
+                pending_renames.append((part, final))
+        bound_s10_claims = _validate_uploaded_full_ledger(
+            job, manifest, checks)
+        # Validation can hash a large bundle.  The lease may be reclaimed and
+        # assigned a fresh attempt while that work is in progress, so the
+        # publication itself is a second compare-and-set boundary.  Hold the
+        # job lock from this recheck through rename + terminal state; an old
+        # worker may never publish into a newer retry merely because its
+        # bytes were valid for the previous attempt.
         with JOBS_LOCK:
-            job["status"] = "done"
-            job["ended"] = time.time()
-            job["progress_pct"] = 100
-            job["stage_code"] = "done"
-            job["stage_label"] = "模型与交付文件已经生成"
-            job.pop("lease_expires", None)
+            current = JOBS.get(req.job_id)
+            if (current is None
+                    or current.get("status") != "running"
+                    or str(current.get("worker_id") or "") != req.worker_id
+                    or str(current.get("pipeline_attempt_id") or "") !=
+                    expected_attempt
+                    or float(current.get("lease_expires") or 0) <=
+                    time.time()):
+                raise HTTPException(409, "任务在产物校验期间已失去租约或切换 attempt")
+            for part, final in pending_renames:
+                os.replace(str(part), str(final))
+            if bound_s10_claims:
+                _publish_worker_sidecar_aliases(dest_dir, bound_s10_claims)
+            current["status"] = "done"
+            current["ended"] = time.time()
+            current["progress_pct"] = 100
+            current["stage_code"] = "done"
+            current["stage_label"] = "模型与交付文件已经生成"
+            current.pop("lease_expires", None)
+            job = current
             _save_jobs()
             _JOB_STORE.append_event(req.job_id, "completed", {
-                "status": "done", "artifacts": len(req.files),
+                "status": "done", "artifacts": len(manifest),
             })
     else:
         # worker 报告失败
         with JOBS_LOCK:
-            job["status"] = "failed"
-            job["ended"] = time.time()
+            current = JOBS.get(req.job_id)
+            if (current is None
+                    or current.get("status") != "running"
+                    or str(current.get("worker_id") or "") != req.worker_id
+                    or str(current.get("pipeline_attempt_id") or "") !=
+                    expected_attempt
+                    or float(current.get("lease_expires") or 0) <=
+                    time.time()):
+                raise HTTPException(409, "任务在失败上报期间已失去租约或切换 attempt")
+            current["status"] = "failed"
+            current["ended"] = time.time()
             # worker 回传的错误文本同样归类，不直接外露
-            job["error_code"], job["error_msg"] = _classify_error_text(
+            current["error_code"], current["error_msg"] = _classify_error_text(
                 req.error)
-            job["error"] = req.error
-            job.pop("lease_expires", None)
-            _refund_job_quota(job)
+            current["error"] = req.error
+            current.pop("lease_expires", None)
+            _refund_job_quota(current)
+            job = current
             _save_jobs()
             _JOB_STORE.append_event(req.job_id, "failed", {
-                "error_code": job["error_code"],
+                "error_code": current["error_code"],
             })
         # 清理可能的 .part 残留
         for finfo in req.files:

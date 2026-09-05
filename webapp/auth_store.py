@@ -43,6 +43,18 @@ class AuthUser:
         return max(0, self.quota_limit - self.quota_used)
 
 
+@dataclass(frozen=True)
+class GuestSession:
+    id: str
+    quota_limit: int
+    quota_used: int
+    expires_at: float
+
+    @property
+    def quota_remaining(self) -> int:
+        return max(0, self.quota_limit - self.quota_used)
+
+
 class AuthStore:
     def __init__(self, path: Path, secret: str, default_quota: int = 20,
                  admin_emails: set[str] | None = None):
@@ -131,6 +143,25 @@ class AuthStore:
                     reason TEXT NOT NULL,
                     created_at REAL NOT NULL,
                     UNIQUE(user_id, job_id, reason)
+                );
+                CREATE TABLE IF NOT EXISTS guest_sessions (
+                    id TEXT PRIMARY KEY,
+                    token_hash TEXT NOT NULL UNIQUE,
+                    quota_limit INTEGER NOT NULL DEFAULT 3,
+                    quota_used INTEGER NOT NULL DEFAULT 0,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    expires_at REAL NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS guest_quota_ledger (
+                    id TEXT PRIMARY KEY,
+                    guest_id TEXT NOT NULL REFERENCES guest_sessions(id)
+                        ON DELETE CASCADE,
+                    job_id TEXT NOT NULL,
+                    delta INTEGER NOT NULL,
+                    reason TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    UNIQUE(guest_id, job_id, reason)
                 );
             """)
 
@@ -238,6 +269,135 @@ class AuthStore:
                 "UPDATE auth_sessions SET revoked_at=? WHERE token_hash=?",
                 (now or time.time(), self._digest("session", token)),
             )
+
+    @staticmethod
+    def _guest_from_row(row) -> GuestSession:
+        return GuestSession(
+            id=row["id"], quota_limit=int(row["quota_limit"]),
+            quota_used=int(row["quota_used"]),
+            expires_at=float(row["expires_at"]),
+        )
+
+    def create_guest_session(self, *, quota_limit: int = 3,
+                             now: float | None = None,
+                             session_ttl_s: int = 90 * 86400
+                             ) -> tuple[GuestSession, str]:
+        """Create one opaque browser guest with a server-side allowance."""
+        if not 1 <= int(quota_limit) <= 100:
+            raise ValueError("guest quota must be between 1 and 100")
+        now = now or time.time()
+        guest_id = uuid.uuid4().hex
+        token = secrets.token_urlsafe(32)
+        expires_at = now + session_ttl_s
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO guest_sessions "
+                "(id,token_hash,quota_limit,quota_used,created_at,updated_at,"
+                "expires_at) VALUES (?,?,?,?,?,?,?)",
+                (guest_id, self._digest("guest-session", token),
+                 int(quota_limit), 0, now, now, expires_at),
+            )
+        return GuestSession(guest_id, int(quota_limit), 0, expires_at), token
+
+    def get_guest_session(self, token: str, *,
+                          now: float | None = None) -> GuestSession | None:
+        if not token:
+            return None
+        now = now or time.time()
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM guest_sessions WHERE token_hash=? "
+                "AND expires_at>?",
+                (self._digest("guest-session", token), now),
+            ).fetchone()
+            if row:
+                conn.execute(
+                    "UPDATE guest_sessions SET updated_at=? WHERE id=?",
+                    (now, row["id"]),
+                )
+        return self._guest_from_row(row) if row else None
+
+    def get_guest(self, guest_id: str) -> GuestSession | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM guest_sessions WHERE id=?", (guest_id,),
+            ).fetchone()
+        return self._guest_from_row(row) if row else None
+
+    def reserve_guest_generation(self, guest_id: str, job_id: str, *,
+                                 now: float | None = None) -> GuestSession:
+        """Reserve exactly one guest opportunity, idempotently per job."""
+        now = now or time.time()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM guest_sessions WHERE id=? AND expires_at>?",
+                (guest_id, now),
+            ).fetchone()
+            if not row:
+                conn.rollback()
+                raise AuthError("游客会话已失效，请刷新页面后重试")
+            existing = conn.execute(
+                "SELECT 1 FROM guest_quota_ledger WHERE guest_id=? "
+                "AND job_id=? AND reason='reserve'", (guest_id, job_id),
+            ).fetchone()
+            if existing:
+                conn.commit()
+                current = self.get_guest(guest_id)
+                if current is None:  # pragma: no cover - transaction invariant
+                    raise AuthError("游客会话不存在")
+                return current
+            if int(row["quota_used"]) >= int(row["quota_limit"]):
+                conn.rollback()
+                raise AuthError(
+                    "游客的 3 次免费生成机会已用完，请登录后继续",
+                )
+            conn.execute(
+                "UPDATE guest_sessions SET quota_used=quota_used+1,"
+                "updated_at=? WHERE id=?", (now, guest_id),
+            )
+            conn.execute(
+                "INSERT INTO guest_quota_ledger "
+                "(id,guest_id,job_id,delta,reason,created_at) "
+                "VALUES (?,?,?,?,?,?)",
+                (uuid.uuid4().hex, guest_id, job_id, 1, "reserve", now),
+            )
+            conn.commit()
+        current = self.get_guest(guest_id)
+        if current is None:  # pragma: no cover - transaction invariant
+            raise AuthError("游客会话不存在")
+        return current
+
+    def refund_guest_generation(self, guest_id: str, job_id: str, *,
+                                now: float | None = None) -> GuestSession:
+        now = now or time.time()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            reserve = conn.execute(
+                "SELECT 1 FROM guest_quota_ledger WHERE guest_id=? "
+                "AND job_id=? AND reason='reserve'", (guest_id, job_id),
+            ).fetchone()
+            refunded = conn.execute(
+                "SELECT 1 FROM guest_quota_ledger WHERE guest_id=? "
+                "AND job_id=? AND reason='refund'", (guest_id, job_id),
+            ).fetchone()
+            if reserve and not refunded:
+                conn.execute(
+                    "UPDATE guest_sessions SET "
+                    "quota_used=MAX(0,quota_used-1),updated_at=? WHERE id=?",
+                    (now, guest_id),
+                )
+                conn.execute(
+                    "INSERT INTO guest_quota_ledger "
+                    "(id,guest_id,job_id,delta,reason,created_at) "
+                    "VALUES (?,?,?,?,?,?)",
+                    (uuid.uuid4().hex, guest_id, job_id, -1, "refund", now),
+                )
+            conn.commit()
+        current = self.get_guest(guest_id)
+        if current is None:
+            raise AuthError("游客会话不存在")
+        return current
 
     def get_user(self, user_id: str, *,
                  now: float | None = None) -> AuthUser | None:

@@ -119,7 +119,7 @@ def main() -> int:
         },
         "prototype": args.prototype,
         "scene_type": args.scene_type,
-        "params": params,
+        "params": {**params, "vegetation_enabled": False},
         "printability": harness.ctx["printability"],
         "road_roles": getattr(layers, "road_roles", {}),
         "evidence": {

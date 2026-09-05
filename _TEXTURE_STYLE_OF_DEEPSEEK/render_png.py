@@ -31,6 +31,7 @@ def render_from_layers(
     stadium_gdf=None,
     dpi: int = 220,
     fig_inches: float = 18.0,
+    vegetation_enabled: bool = False,
 ) -> str:
     """Render a PNG preview from preprocessed LayerPolygons.
 
@@ -95,8 +96,8 @@ def render_from_layers(
     small_water_polys = list(layers.WO) if layers.WO else []
 
     # Vegetation
-    veg_landmarks = list(layers.VL) if layers.VL else []
-    veg_fill_polys = list(layers.VO) if layers.VO else []
+    veg_landmarks = list(layers.VL) if vegetation_enabled and layers.VL else []
+    veg_fill_polys = list(layers.VO) if vegetation_enabled and layers.VO else []
 
     # raw_polys / individuals — used only for stats display, not for rendering
     raw_polys = tag_landmarks + blocks_aggregated
@@ -109,8 +110,8 @@ def render_from_layers(
         "BO": len(layers.BO),
         "WL": len(layers.WL),
         "WO": len(layers.WO),
-        "VL": len(layers.VL),
-        "VO": len(layers.VO),
+        "VL": len(veg_landmarks),
+        "VO": len(veg_fill_polys),
         "blocks": len(city_blocks),
     }
 

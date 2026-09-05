@@ -57,7 +57,9 @@ def _fast_simplify_direct(vertices, faces, target_count, agg=7.0):
 
 def build_terrain_mesh(elevation_grid: np.ndarray,
                        width_m: float, height_m: float,
-                       area_km2: float = 0) -> trimesh.Trimesh:
+                       area_km2: float = 0,
+                       *,
+                       allow_qem_decimation: bool = False) -> trimesh.Trimesh:
     """Build a 3D terrain mesh from a 2D elevation grid.
 
     Args:
@@ -66,6 +68,9 @@ def build_terrain_mesh(elevation_grid: np.ndarray,
         width_m: total width in meters (X axis)
         height_m: total height in meters (Y axis)
         area_km2: area for LOD decision
+        allow_qem_decimation: opt-in legacy preview optimisation.  Formal
+            terrain must keep the regular raster topology; QEM can create
+            very long triangles over locally flat DEM cells.
 
     Returns:
         trimesh.Trimesh with vertex colors encoding elevation
@@ -99,10 +104,14 @@ def build_terrain_mesh(elevation_grid: np.ndarray,
         process=False
     )
 
-    # Decimate if needed
+    # Legacy preview-only decimation.  Formal generation regularises the DEM
+    # *before* triangulation, so every terrain triangle has a bounded XY
+    # footprint derived from the printer profile.  QEM is deliberately
+    # opt-in: a face-count target alone does not constrain triangle size and
+    # previously produced 10-30 mm facets in the West Lake terrain.
     area_class = get_area_class(area_km2)
     target = DECIMATION_TARGETS.get(area_class)
-    if target and len(mesh.faces) > target:
+    if allow_qem_decimation and target and len(mesh.faces) > target:
         logger.info(f"Decimating terrain from {len(mesh.faces)} to ~{target} faces")
         try:
             import time as _time

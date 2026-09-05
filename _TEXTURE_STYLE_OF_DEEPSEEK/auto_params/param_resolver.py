@@ -5,9 +5,10 @@ Each parameter carries a reason string for traceability.
 """
 
 from dataclasses import dataclass, field, asdict
-from typing import Optional
+from typing import Mapping, Optional
 
 from .city_profile import CityProfile
+from _TEXTURE_STYLE_OF_DEEPSEEK.config import DEFAULT_VEGETATION_ENABLED
 
 
 @dataclass
@@ -53,7 +54,7 @@ class ResolvedParams:
 
     # Vegetation
     vegetation_min_area_m2: float = 5000.0
-    vegetation_enabled: bool = True
+    vegetation_enabled: bool = DEFAULT_VEGETATION_ENABLED
 
     # Brick texture
     brick_perlin_amp: float = 4.0
@@ -77,6 +78,7 @@ class ResolvedParams:
 def resolve_params(
     profile: CityProfile,
     user_overrides: Optional[dict] = None,
+    external_urban_evidence: Optional[Mapping] = None,
 ) -> ResolvedParams:
     """Rules engine: CityProfile → ResolvedParams.
 
@@ -109,6 +111,13 @@ def resolve_params(
     # ── Step 8: Style overrides ──
     _apply_style_overrides(params, reasons)
 
+    # Global averages can make a garden city look like wilderness when a
+    # 25 km frame contains a lake, hills and dense urban districts together.
+    # Distributed external roads may correct that classification, but never
+    # provide replacement geometry or control mesh operations.
+    _apply_external_urban_evidence(
+        profile, params, reasons, external_urban_evidence)
+
     # ── Apply user overrides (highest priority) ──
     if user_overrides:
         for key, val in user_overrides.items():
@@ -136,6 +145,74 @@ def explain_decisions(
 
 
 # ─── Internal resolvers ──────────────────────────────────────────────
+
+
+def _apply_external_urban_evidence(
+    profile: CityProfile,
+    params: ResolvedParams,
+    reasons: dict,
+    evidence: Optional[Mapping],
+) -> None:
+    """Correct false wilderness classifications with distributed evidence.
+
+    The guard requires both spatially distributed cartographic roads and
+    independent OSM vector support. One motorway through a natural landscape
+    is therefore insufficient. The result is a semantic parameter correction
+    only; project vectors remain the sole geometry authority.
+    """
+
+    if not isinstance(evidence, Mapping):
+        return
+    if evidence.get("status") != "evidence_only":
+        return
+    try:
+        network_support = float(evidence.get("urban_network_support") or 0.0)
+        road_cell_fraction = float(
+            evidence.get("road_presence_cell_fraction") or 0.0)
+    except (TypeError, ValueError):
+        return
+    estimated_buildings = (
+        float(profile.building_density) * float(profile.area_km2))
+    vector_support = (
+        estimated_buildings >= 200
+        and float(profile.building_density) >= 5.0
+        and float(profile.road_density_km_per_km2) >= 2.0
+    )
+    if not (
+        network_support >= 0.62
+        and road_cell_fraction >= 0.55
+        and vector_support
+    ):
+        return
+
+    mixed_landscape = (
+        float(profile.water_ratio) >= 0.05
+        or float(profile.vegetation_ratio) >= 0.12
+        or profile.relief_ratio in {"moderate", "mountainous"}
+    )
+    params.style = "garden-city" if mixed_landscape else "classic"
+    reasons["style"] = (
+        "distributed external urban network "
+        f"(support={network_support:.2f}, cells={road_cell_fraction:.2f}) "
+        f"+ OSM vectors → {params.style}; global density must not "
+        "classify a mixed city frame as wilderness"
+    )
+    if mixed_landscape:
+        # Tier 2 keeps arterials/tertiaries as printable neighbourhood
+        # boundaries. Residential/service streets remain quiet texture,
+        # avoiding thousands of sub-nozzle city fragments.
+        params.building_v2_road_tier = 2
+        reasons["building_v2_road_tier"] = (
+            "garden-city cross-source correction → tier=2 "
+            "(coherent mid-frequency neighbourhood masses)"
+        )
+        params.building_density_threshold = max(
+            0.003, float(params.building_density_threshold))
+        reasons["building_density_threshold"] = (
+            "garden-city correction → threshold>=0.003; density is "
+            "restored by printable mass aggregation, not raw fragments"
+        )
+    # Scene classification does not authorize enabling a surface layer.
 
 
 def _resolve_style(profile: CityProfile) -> tuple[str, str]:
@@ -233,8 +310,28 @@ def _resolve_buildings(
             f"density={density:.0f}/km² (normal) → threshold=0.005"
         )
 
-    # Print limit based on avg building size
-    if avg_area > 500:
+    # Complete, dense building sources should preserve the fine urban grid
+    # before the printer-scaled mass stage merges sub-nozzle neighbours.  The
+    # old average-area-only rule treated Chicago's many ordinary footprints as
+    # generic data and removed roughly 90% of the printable building bodies
+    # before the measured neighbourhood-mass policy could consume them.
+    complete_dense_source = bool(
+        profile.osm_quality == "good"
+        and density >= 500
+        and height_cov >= 0.30
+    )
+    if complete_dense_source:
+        params.building_print_limit_m2 = 1000.0
+        params.building_simplify_tol_m = 5.0
+        reasons["building_print_limit_m2"] = (
+            "good OSM + dense continuous buildings → limit=1000 "
+            "(preserve urban grid for measured mass aggregation)"
+        )
+        reasons["building_simplify_tol_m"] = (
+            "good OSM + dense continuous buildings → simplify=5m "
+            "(retain block-scale morphology)"
+        )
+    elif avg_area > 500:
         params.building_print_limit_m2 = 1500.0
         reasons["building_print_limit_m2"] = (
             f"avg_area={avg_area:.0f}m² > 500 (CBD) → limit=1500 (keep individuals)"
@@ -266,7 +363,18 @@ def _resolve_roads(
     """Spec §2.3 road adaptive."""
     rd = profile.road_density_km_per_km2
 
-    if rd > 15:
+    complete_dense_source = bool(
+        profile.osm_quality == "good"
+        and profile.building_density >= 500
+        and profile.height_tag_coverage >= 0.30
+    )
+    if complete_dense_source:
+        params.building_v2_road_tier = 5
+        reasons["building_v2_road_tier"] = (
+            "good OSM + dense continuous buildings → tier=5 "
+            "(retain the measured urban block grid)"
+        )
+    elif rd > 15:
         params.building_v2_road_tier = 4
         reasons["building_v2_road_tier"] = (
             f"road_density={rd:.1f}km/km² > 15 → tier=4 (reduce fragmentation)"
@@ -294,7 +402,13 @@ def _resolve_roads(
         reasons["road_filter_tier"] = "area < 50km² → no road filter"
 
     # Width multiplier
-    if rd > 15:
+    if complete_dense_source:
+        params.road_width_multiplier = 2.0
+        reasons["road_width_multiplier"] = (
+            "good OSM + dense continuous buildings → multiplier=2.0 "
+            "(preserve separations without swallowing the block grid)"
+        )
+    elif rd > 15:
         params.road_width_multiplier = 4.0
         reasons["road_width_multiplier"] = (
             f"road_density={rd:.1f} > 15 → multiplier=4.0 (prevent overlap)"
@@ -326,6 +440,7 @@ def _resolve_vegetation(
     profile: CityProfile, params: ResolvedParams, reasons: dict
 ):
     """Vegetation settings based on style."""
+    reasons["vegetation_enabled"] = "植被覆盖层默认关闭；源数据仍用于场景测量"
     if profile.vegetation_ratio < 0.02:
         params.vegetation_min_area_m2 = 2000.0
         reasons["vegetation_min_area_m2"] = (

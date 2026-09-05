@@ -381,6 +381,15 @@ class OsmiumCLIFetcher:
         if native:
             return [native]
         return ['osmium']
+
+    def osmium_backend_name(self) -> str:
+        """Return stable provenance for the selected extraction backend."""
+
+        command = self._get_osmium_command()
+        if (len(command) > 1
+                and os.path.basename(command[-1]) == "osmium_pyosmium.py"):
+            return "portable_pyosmium"
+        return "native_osmium" if self.osmium_available else "unavailable"
     
     def _get_tool_path(self, tool_name: str) -> str:
         """获取工具的完整路径"""
@@ -484,34 +493,26 @@ class OsmiumCLIFetcher:
         print(f"  Bounding box: ({south:.4f}, {west:.4f}, {north:.4f}, {east:.4f})")
 
         try:
-            # GeoJSON cache: if file already exists and is non-empty, reuse it
-            # 空结果（合法的空 FeatureCollection）同样命中缓存，避免重跑 osmium extract
-            if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-                try:
-                    _cached_empty = gpd.read_file(output_path)
-                    _cache_readable = True
-                except Exception:
-                    _cached_empty = None
-                    _cache_readable = False
-                if _cache_readable and len(_cached_empty) == 0:
+            # Exact-bbox requests need the same column projection as tiles.
+            # Do not expand every sparse regional tag, or read a dense Paris
+            # frame twice merely to distinguish a valid empty cache.
+            gdf = self._try_read_geojson_cache(output_path, tag_type)
+            if gdf is not None:
+                if len(gdf) == 0:
                     print(f"  [CLI Pipeline] Using cached GeoJSON (empty result): {output_path}")
-                    return _cached_empty
-
-            if os.path.exists(output_path) and os.path.getsize(output_path) > 100:
-                print(f"  [CLI Pipeline] Using cached GeoJSON: {output_path}")
-                gdf = gpd.read_file(output_path)
-                if len(gdf) > 0:
-                    print(f"  [CLI Pipeline] Loaded {len(gdf)} features from cache\n")
-                    # Buildings: ensure est_height column
-                    gdf = self._enrich_building_heights(
-                        gdf, tag_type, south, west, north, east)
                     return gdf
+                print(f"  [CLI Pipeline] Using cached GeoJSON: {output_path}")
+                print(f"  [CLI Pipeline] Loaded {len(gdf)} features from cache\n")
+                return self._enrich_building_heights(
+                    gdf, tag_type, south, west, north, east)
 
             result = self._run_osmium_pipeline(
                 pbf_file, tag_type, south, west, north, east, output_path
             )
             if result:
-                gdf = gpd.read_file(output_path)
+                gdf = self._prune_cache_columns(
+                    gpd.read_file(output_path, columns=list(self._CACHE_COLUMNS)),
+                    tag_type)
                 logger.info(f"CLI 管线完成: {len(gdf)} 条记录")
                 print(f"  [CLI Pipeline] Complete: {len(gdf)} features extracted\n")
                 print(f"  Output: {output_path}")

@@ -150,6 +150,38 @@ class TestBuildingsV3:
             z_range = np.ptp(buildings.vertices[:, 2])
             assert z_range <= (BUILDING_AGGREGATE_HEIGHT_MM + 0.5)
 
+    def test_parallel_ambient_heights_preserve_two_relief_tiers(self):
+        from _TEXTURE_STYLE_OF_DEEPSEEK.buildings import build_deepseek_buildings_v3
+
+        terrain = _make_flat_terrain_mesh()
+        result = build_deepseek_buildings_v3(
+            [],
+            [_make_square(100, 100, 50), _make_square(300, 100, 50)],
+            terrain,
+            2000.0,
+            brick_style=False,
+            BO_heights=[0.24, 0.60],
+        )
+
+        mesh = result["buildings"]
+        assert mesh is not None
+        # Bottom Z comes from terrain; both requested, layer-quantized relief
+        # tops must remain present after the manifold union.
+        z_values = np.unique(np.round(mesh.vertices[:, 2], 2))
+        relief = np.unique(np.round(z_values - z_values.min(), 2))
+        assert 0.24 in relief
+        assert 0.60 in relief
+
+    def test_parallel_ambient_heights_must_match_polygon_count(self):
+        from _TEXTURE_STYLE_OF_DEEPSEEK.buildings import build_deepseek_buildings_v3
+
+        terrain = _make_flat_terrain_mesh()
+        with pytest.raises(ValueError, match="parallel"):
+            build_deepseek_buildings_v3(
+                [], [_make_square(100, 100, 50)], terrain, 2000.0,
+                brick_style=False, BO_heights=[],
+            )
+
 
 # ---------------------------------------------------------------------------
 # water v3
@@ -289,6 +321,80 @@ class TestVegetationV3:
 
         assert len(split_points) == 6
         assert split_faces[0, 0] != split_faces[1, 0]
+
+    def test_polygon_with_hole_is_densified_without_crossing_hole(self):
+        """Large holed vegetation must not fall back to boundary-only fans."""
+        from _TEXTURE_STYLE_OF_DEEPSEEK.vegetation_exclusion import (
+            _triangulate_densified_polygon,
+        )
+
+        poly = Polygon(
+            [(0, 0), (10, 0), (10, 10), (0, 10)],
+            [[(4, 4), (6, 4), (6, 6), (4, 6)]],
+        )
+        points, faces = _triangulate_densified_polygon(
+            poly, 0.55, max_surface_edge_mm=0.84)
+
+        assert len(points) > 200
+        assert len(faces) > 300
+        triangles = points[faces]
+        edges = np.concatenate([
+            np.linalg.norm(triangles[:, 1] - triangles[:, 0], axis=1),
+            np.linalg.norm(triangles[:, 2] - triangles[:, 1], axis=1),
+            np.linalg.norm(triangles[:, 0] - triangles[:, 2], axis=1),
+        ])
+        assert float(edges.max()) < 0.85
+
+        from shapely import covers, polygons
+        assert bool(np.all(covers(poly.buffer(1e-8), polygons(triangles))))
+
+    def test_holed_draped_mesh_has_no_giant_surface_facets(self):
+        from _TEXTURE_STYLE_OF_DEEPSEEK.vegetation_exclusion import (
+            _polygon_to_draped_mesh,
+        )
+
+        # A 10 x 10 mm regular terrain with enough vertices for Z sampling.
+        axis = np.linspace(0.0, 10.0, 21)
+        gx, gy = np.meshgrid(axis, axis)
+        gz = 0.8 * np.sin(gx * 0.6) * np.cos(gy * 0.5)
+        vertices = np.column_stack([gx.ravel(), gy.ravel(), gz.ravel()])
+        faces = []
+        width = len(axis)
+        for row in range(width - 1):
+            for col in range(width - 1):
+                a = row * width + col
+                b = a + 1
+                c = a + width
+                d = c + 1
+                faces.extend([[a, b, d], [a, d, c]])
+        terrain = trimesh.Trimesh(
+            vertices=vertices,
+            faces=np.asarray(faces, dtype=np.int32),
+            process=False,
+        )
+        poly = Polygon(
+            [(0, 0), (1400, 0), (1400, 1400), (0, 1400)],
+            [[(500, 500), (900, 500), (900, 900), (500, 900)]],
+        )
+
+        mesh = _polygon_to_draped_mesh(
+            poly,
+            terrain,
+            scale=0.007,
+            z_offset=0.1,
+            grid_step_m=80.0,
+            max_surface_edge_mm=0.84,
+        )
+
+        assert mesh is not None
+        assert mesh.is_watertight
+        triangles = mesh.vertices[mesh.faces][:, :, :2]
+        edges = np.concatenate([
+            np.linalg.norm(triangles[:, 1] - triangles[:, 0], axis=1),
+            np.linalg.norm(triangles[:, 2] - triangles[:, 1], axis=1),
+            np.linalg.norm(triangles[:, 0] - triangles[:, 2], axis=1),
+        ])
+        assert float(edges.max()) < 0.9
 
     def test_empty_input_returns_none(self):
         """空输入返回 None。"""
@@ -586,6 +692,36 @@ class TestBlockBaseV3:
         assert mesh == "mesh"
         assert evidence["pre_clip_intrusion_area_m2"] > 0
         assert evidence["post_clip_intrusion_area_m2"] == pytest.approx(0.0)
+
+    def test_builder_applies_narrow_surface_and_wide_major_clearance(
+        self, monkeypatch,
+    ):
+        from shapely.geometry import LineString, box
+        from _TEXTURE_STYLE_OF_DEEPSEEK import block_base
+
+        monkeypatch.setattr(block_base, "_build_flat", lambda *args: "mesh")
+        local = LineString([(0, -20), (0, 20)])
+        major = LineString([(-20, 4), (20, 4)])
+        mesh, evidence = block_base.build_deepseek_block_base_v3(
+            [box(-10, -10, 10, 10)],
+            _make_flat_terrain_mesh(),
+            scale=1.0,
+            brick_style=False,
+            clearance_lines=[local, major],
+            final_clearance_mm=0.84,
+            major_clearance_lines=[major],
+            surface_clearance_mm=0.63,
+            return_clearance_evidence=True,
+        )
+
+        assert mesh == "mesh"
+        assert evidence["policy_version"] == (
+            "hierarchical-surface-road-clearance-v2")
+        assert evidence["surface_roads"]["verified_min_gap_mm"] == pytest.approx(
+            0.63)
+        assert evidence["major_roads"]["verified_min_gap_mm"] == pytest.approx(
+            0.84)
+        assert evidence["passed"] is True
 
 
 class TestBlockBaseEdgeFilter:

@@ -20,7 +20,9 @@ from __future__ import annotations
 import enum
 import re
 
+import numpy as np
 import pandas as pd
+from shapely.errors import GEOSException
 
 
 class LandmarkCategory(enum.IntEnum):
@@ -421,15 +423,47 @@ def compute_hotspot_block_ids(blocks: list, building_polys: list,
     if not blocks or not building_polys or top_percent <= 0:
         return set()
     from shapely.strtree import STRtree
-    btree = STRtree(blocks)
+    valid_buildings = [
+        building for building in building_polys
+        if building is not None and not building.is_empty
+    ]
+    if not valid_buildings:
+        return set()
+    centroids = np.asarray(
+        [building.centroid for building in valid_buildings], dtype=object)
+    building_areas = np.asarray(
+        [float(building.area) for building in valid_buildings], dtype=float)
+    btree = STRtree(centroids)
     block_bldg_area = [0.0] * len(blocks)
-    for b in building_polys:
-        if b is None or b.is_empty: continue
-        c = b.centroid
-        for ci in btree.query(c):
-            if blocks[ci].contains(c):
-                block_bldg_area[ci] += b.area
-                break
+    assigned = np.zeros(len(valid_buildings), dtype=bool)
+    block_batch_size = 10_000
+    try:
+        for start in range(0, len(blocks), block_batch_size):
+            stop = min(len(blocks), start + block_batch_size)
+            block_batch = np.asarray(blocks[start:stop], dtype=object)
+            pairs = btree.query(block_batch, predicate="contains")
+            for local_block_index, building_index in zip(pairs[0], pairs[1]):
+                building_index = int(building_index)
+                if assigned[building_index]:
+                    continue
+                block_bldg_area[start + int(local_block_index)] += float(
+                    building_areas[building_index])
+                assigned[building_index] = True
+    except (TypeError, ValueError, GEOSException):
+        # Compatibility path for older Shapely.  Blocks remain the predicate
+        # authority so complex polygon topology is prepared at most once per
+        # query rather than once per building.
+        assigned[:] = False
+        block_bldg_area = [0.0] * len(blocks)
+        for block_index, block in enumerate(blocks):
+            for building_index in btree.query(block):
+                building_index = int(building_index)
+                if assigned[building_index]:
+                    continue
+                if block.contains(centroids[building_index]):
+                    block_bldg_area[block_index] += float(
+                        building_areas[building_index])
+                    assigned[building_index] = True
     # 仅在"有建筑的 block"上取 top X%（避免空 block 把 percentile 拉到 0）
     nonzero = [(i, a / max(blocks[i].area, 1.0))
                for i, a in enumerate(block_bldg_area) if a > 0]

@@ -17,7 +17,7 @@ from typing import Any, Mapping, Sequence
 
 
 SCHEMA_VERSION = "1.0"
-POLICY_VERSION = "city-composition-v4"
+POLICY_VERSION = "city-composition-v5"
 
 
 def _json_value(value: Any) -> Any:
@@ -59,12 +59,23 @@ def _composition_roles(role_evidence: Mapping | None) -> dict:
     return _json_value(roles)
 
 
+def _scene_character_evidence(scene_character: Mapping | None) -> dict:
+    source = scene_character or {}
+    return _json_value({
+        key: source[key]
+        for key in ("version", "summary", "metrics")
+        if key in source
+    })
+
+
 def build_composition_spec(
     *,
     city: str,
     bbox_wgs84: Sequence[float],
     layers: Any,
     amap_evidence: Mapping | None = None,
+    scene_character: Mapping | None = None,
+    scene_policy: Mapping | None = None,
     pipeline: str = "generate_city_legacy",
 ) -> dict:
     """Build a deterministic, JSON-safe CompositionSpec.
@@ -85,6 +96,8 @@ def build_composition_spec(
     roads = _composition_roles(road_evidence)
     water = _composition_roles(water_evidence)
     reference = _safe_reference_evidence(amap_evidence)
+    scene = _scene_character_evidence(scene_character)
+    resolved_scene_policy = _json_value(scene_policy or {})
 
     warnings = []
     if reference.get("status") != "ready":
@@ -111,6 +124,9 @@ def build_composition_spec(
             "render_authority": "deterministic role-aware renderer",
             "density_authority": (
                 "structural OSM network may cut block base without becoming ink"),
+            "scene_authority": (
+                "measured scene character selects bounded perceptual roles; "
+                "printer constraints remain hard limits"),
         },
         "forbidden_controls": [
             "mesh vertices",
@@ -125,6 +141,8 @@ def build_composition_spec(
         },
         "roads": roads,
         "water": water,
+        "scene": scene,
+        "scene_policy": resolved_scene_policy,
         "background": {
             "block_base_polygons": len(
                 getattr(layers, "block_base", ()) or ()),
@@ -164,12 +182,15 @@ def build_composition_spec(
 
 
 def write_composition_spec(output_dir: os.PathLike | str,
-                           spec: Mapping) -> str:
-    """Atomically write ``composition_spec.json`` and return its path."""
+                           spec: Mapping, *,
+                           filename: str = "composition_spec.json") -> str:
+    """Atomically write an optionally attempt-scoped composition spec."""
 
     directory = Path(output_dir)
     directory.mkdir(parents=True, exist_ok=True)
-    destination = directory / "composition_spec.json"
+    if Path(filename).name != filename or not filename.endswith(".json"):
+        raise ValueError("composition spec filename must be a plain JSON name")
+    destination = directory / filename
     payload = json.dumps(_json_value(spec), ensure_ascii=False,
                          indent=2, sort_keys=True) + "\n"
     with tempfile.NamedTemporaryFile(

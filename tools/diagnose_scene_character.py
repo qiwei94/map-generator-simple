@@ -20,9 +20,16 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from aesthetic.scene_character import (
     analyze_scene_character,
+    refresh_building_data_quality,
+    render_building_data_quality,
     render_scene_character,
 )
+from aesthetic.scene_policy import resolve_scene_policy
 from aesthetic.cross_source_water import compare_water_sources
+from aesthetic.amap_salience import (
+    build_amap_salience_guide,
+    summarize_amap_urban_evidence,
+)
 from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.osmium_cli_fetcher import (
     fetch_from_cli,
     fetch_tiled_from_cli,
@@ -52,13 +59,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--tag", required=True)
     parser.add_argument("--grid-size", type=int, default=8)
+    parser.add_argument("--nozzle-mm", type=float, default=0.4)
+    parser.add_argument("--model-span-mm", type=float, default=196.0)
+    parser.add_argument(
+        "--dem-npy", type=Path,
+        help=("existing local 2D DEM .npy for landform evidence; never "
+              "downloads elevation data"))
     parser.add_argument(
         "--tiled", action="store_true",
         help="reuse the project's 5 km feature tile cache")
     parser.add_argument(
         "--amap-crosscheck", action="store_true",
-        help=("compare OSM water with vectorized AMap no-label tiles; "
-              "evidence only, never supplements model geometry"))
+        help=("compare OSM water and urban-network spread with AMap no-label "
+              "tiles; evidence only, never supplements model geometry"))
     return parser.parse_args()
 
 
@@ -141,19 +154,41 @@ def main() -> int:
         print(f"[scene] projected {key}: {len(projected[key]):,} "
               f"in {time.perf_counter() - stage:.1f}s")
 
+    projected_span_m = max(
+        projection["utm_bbox"][2] - projection["utm_bbox"][0],
+        projection["utm_bbox"][3] - projection["utm_bbox"][1],
+    )
+    nozzle_real_m = (
+        args.nozzle_mm * projected_span_m / max(args.model_span_mm, 1e-6))
+    elevation_grid = None
+    if args.dem_npy:
+        if not args.dem_npy.is_file():
+            raise SystemExit(f"DEM array not found: {args.dem_npy}")
+        elevation_grid = np.load(args.dem_npy, allow_pickle=False)
+        if elevation_grid.ndim != 2:
+            raise SystemExit("--dem-npy must contain one 2D array")
     report = analyze_scene_character(
         projected["roads"], projected["buildings"], projected["water"],
-        projection["utm_bbox"], grid_size=args.grid_size)
+        projection["utm_bbox"], grid_size=args.grid_size,
+        elevation_grid=elevation_grid,
+        nozzle_real_m=nozzle_real_m,
+        model_span_mm=args.model_span_mm)
     report["bbox_wgs84"] = list(args.bbox)
     report["source"] = {
         "pbf": args.pbf.name if args.pbf else None,
         "pipeline_cache": (args.pipeline_cache.name
                            if args.pipeline_cache else None),
+        "dem_npy": args.dem_npy.name if args.dem_npy else None,
     }
     report["cross_source_water"] = {
         "status": "not_requested",
         "source": "amap_nolabel_tiles",
         "candidate_cells": [],
+    }
+    report["metrics"]["external_urban"] = {
+        "version": "amap-urban-evidence-v1",
+        "status": "not_requested",
+        "source": "amap_style7_cartographic_reference",
     }
     if args.amap_crosscheck:
         cross_started = time.perf_counter()
@@ -182,19 +217,61 @@ def main() -> int:
         print("[scene] AMap water cross-check: "
               f"{report['cross_source_water']['status']} in "
               f"{time.perf_counter() - cross_started:.1f}s")
+        urban_started = time.perf_counter()
+        try:
+            guide, guide_evidence = build_amap_salience_guide(
+                args.bbox,
+                projection["utm_bbox"],
+                allow_network=True,
+            )
+            if guide is not None:
+                urban_evidence = summarize_amap_urban_evidence(
+                    guide.reference, grid_size=args.grid_size)
+                urban_evidence["reference_status"] = guide_evidence.get(
+                    "status", "ready")
+                report["metrics"]["external_urban"] = urban_evidence
+            else:
+                report["metrics"]["external_urban"] = {
+                    "version": "amap-urban-evidence-v1",
+                    "status": guide_evidence.get("status", "unavailable"),
+                    "source": "amap_style7_cartographic_reference",
+                    "reason": guide_evidence.get(
+                        "reason", "AMap salience reference unavailable"),
+                }
+        except Exception as exc:
+            report["metrics"]["external_urban"] = {
+                "version": "amap-urban-evidence-v1",
+                "status": "error",
+                "source": "amap_style7_cartographic_reference",
+                "reason": f"{type(exc).__name__}: {exc}",
+            }
+        print("[scene] AMap urban cross-check: "
+              f"{report['metrics']['external_urban']['status']} in "
+              f"{time.perf_counter() - urban_started:.1f}s")
+    refresh_building_data_quality(report)
     report["elapsed_seconds"] = round(time.perf_counter() - started, 3)
+    policy = resolve_scene_policy(report, activation="audit_only")
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     json_path = args.output_dir / f"{args.tag}_scene_character.json"
+    policy_path = args.output_dir / f"{args.tag}_scene_policy.json"
     png_path = args.output_dir / f"{args.tag}_scene_character.png"
+    quality_png_path = args.output_dir / f"{args.tag}_building_quality.png"
     json_path.write_text(
         json.dumps(report, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8")
+    policy_path.write_text(
+        json.dumps(policy, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8")
     render_scene_character(report, png_path)
+    render_building_data_quality(report, quality_png_path)
     print(json.dumps({
         "json": str(json_path),
+        "policy": str(policy_path),
         "png": str(png_path),
+        "building_quality_png": str(quality_png_path),
         "summary": report["summary"],
+        "archetype": policy["archetype"],
         "elapsed_seconds": report["elapsed_seconds"],
     }, ensure_ascii=False, indent=2))
     return 0

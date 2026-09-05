@@ -1,7 +1,38 @@
-# Pipeline 全流程、外部依赖与单步 Debug 指南
+# 历史底层 Pipeline、外部依赖与单步 Debug 指南
 
-> 适用于：`_TEXTURE_STYLE_OF_DEEPSEEK/pipeline.py::run()` 与等价的 `generate_*.py` 入口
-> 时间：2026-05-15（refactor 后）
+> 文档状态：**历史实现调试手册，不是 canonical Stage 契约**。
+>
+> 初始时间：2026-05-15；架构复核：2026-08-31。
+>
+> 适用范围：理解旧 `_TEXTURE_STYLE_OF_DEEPSEEK/pipeline.py::run()`、
+> `generate_city.py`、`generate_cli.py` 中仍保留的底层对象和日志位置。不同入口已经发生
+> 漂移，不能再把“等价的 `generate_*.py`”当作事实。
+
+> 当前包含 SceneCharacter、ScenePolicy、参考 Demo 建筑策略、保护性回退、GLB 与
+> 正式可打印验收分支的总图见
+> [`current_generation_pipeline.md`](current_generation_pipeline.md)。本文件以下内容
+> 主要保留旧 Stage 0–10 的实现与调试说明。canonical contract、ledger、S9/S10/S11
+> 边界、入口覆盖和迁移状态见
+> [`pipeline_architecture_audit_2026-08-31.md`](pipeline_architecture_audit_2026-08-31.md)。
+
+## 阅读前必须区分的两套编号
+
+本文件的 `Stage 0` 到 `Stage 10` 是旧日志/对象构建编号。当前管理员页面、ledger、
+重试和验收一律使用 `pipeline_contract.py` 的 S0–S11。两者不是一一对应关系：
+
+| 本文旧编号 | 旧职责 | 当前 canonical 归属 |
+|---|---|---|
+| Stage 0 / 1 | 工具检查、bbox、比例 | S0 解析运行配置 |
+| Stage 1b / 1c / 2–3d | DEM、nDSM、OSM 各图层 | S1 获取原始数据 |
+| Stage 3 | UTM 投影与裁切 | S2 投影与输入检查 |
+| Stage 4.5 | 图层相减与精度过滤 | S3 预处理与拓扑构图 |
+| 本文未覆盖 | SceneCharacter / ScenePolicy / 建筑中频 / 诊断 | S4–S7 |
+| Stage 4 / 5 / 6 / 7 / 8 | 地形及各语义对象 mesh | S8 生成语义网格；terrain plan 先在 S2 解析 |
+| 本文未覆盖 | 内存语义 mesh 与 Block Base 间隙门禁 | S9 间隙与几何门禁 |
+| Stage 9 | 3MF 装配与导出 | S10 导出交付产物 |
+| Stage 10 | 重开 3MF 的项目验证 | S11 的一部分；S11 还必须有真实 slicer 证据 |
+
+不要用旧编号更新 ledger，也不要从日志百分比推断 canonical Stage 已完成。
 
 ---
 
@@ -30,7 +61,9 @@
                 └────────────┘
 ```
 
-10 个 Stage 全部在一个进程内串行；中间产物只在内存里流转，没有跨进程序列化。
+历史 Stage 0–10 共 11 个编号段，全部在一个进程内串行；中间产物主要在内存里流转，
+没有领域对象级的跨进程序列化。当前 `generate_city_legacy.py` 会额外写 canonical
+attempt ledger，但 ledger 保存的是 Context 摘要证据，不是这些内存几何对象。
 
 ---
 
@@ -275,9 +308,11 @@ Step 3  collect_water_polygons +   水体挤出柱 → 布尔 ⨃ → 一次 ⊖
 
 ---
 
-### Stage 10 — 校验
+### 旧 Stage 10 — 项目校验（现归 canonical S11 的一部分）
 
-**做什么**：再读一遍刚写的 3MF，跑 V1–V12 共 12 条规则。错误项让 pipeline 报红，警告项不影响 Overall=PASSED。
+**做什么**：再读一遍刚写的 3MF。早期版本只有下表 V1–V12；当前 validator 已扩展到
+V1–V17。正式命令 `tools/validate_3mf.py` 采用严格退出码：errors 或 warnings 任一非零
+都失败。项目校验仍只是 canonical S11 的一个子门，不能替代真实 slicer 验收。
 
 **关键调用**：`validator.py::validate_3mf` + `print_validation_report`
 
@@ -287,7 +322,7 @@ Step 3  collect_water_polygons +   水体挤出柱 → 布尔 ⨃ → 一次 ⊖
 | `zipfile` + `re` | 解 3MF / 抽 `<vertex>` `<triangle>` |
 | `numpy` | 法线计算（用于 V6 V9 V12） |
 
-**12 条规则**
+**早期 12 条规则（保留作调试索引）**
 
 | ID | 含义 | 失败常见原因 |
 |----|------|----|
@@ -298,7 +333,57 @@ Step 3  collect_water_polygons +   水体挤出柱 → 布尔 ⨃ → 一次 ⊖
 | V6/V7 | 道路朝上 + Z 范围合理 | ribbon 法线翻转 |
 | V8/V9 | 水体厚度 + 有侧壁 | 水体只剩底板（无水体多边形） |
 | V10 | 每对象 extruder = EXTRUDER_MAP | 一般不会失败（已硬绑定） |
-| V11/V12 | 植被有厚度 + 面平整 | V12 现在通常会 warn — 因为 Manifold extrude 自带侧壁，可忽略 |
+| V11/V12 | 植被有厚度 + 旧版表面检查 | 早期曾把部分失败降为 warning；当前严格验收不允许忽略 |
+
+当前新增硬规则包括：
+
+| ID | 当前新增检查 |
+|---|---|
+| V13 | Block Base 有限、在成品边界内且为闭合 edge-manifold |
+| V14 | DesignSpec 与 3MF hash 一致，并证明变换后的结构道路间隙 |
+| V15 | 正式地形使用受打印精度约束的规则拓扑，禁止把 QEM 结果冒充正式地形 |
+| V16 | 贴地 overlay 不得出现跨山体的巨型扇形面 |
+| V17 | 视觉中心建筑满足喷嘴最小宽度、细长比和场景 Z 所有权 |
+
+严格项目验证示例：
+
+```bash
+.venv/bin/python tools/validate_3mf.py output/<city>/<artifact>.3mf \
+  --output output/<city>/validation.json
+```
+
+退出码为 0、`0 errors / 0 warnings` 后，S11 仍须保存目标打印机的真实切片证据。
+validator-only 只是诊断结果，不能把 canonical S11 标为完成。
+
+真实切片后至少保存以下字段；`artifact_sha256` 必须是本次 S10 3MF 的实际哈希，切片器
+名称和版本必须来自实际运行：
+
+```json
+{
+  "schema_version": "slicer-acceptance-v1",
+  "artifact_sha256": "<exact 64-character 3MF SHA-256>",
+  "status": "passed",
+  "errors": [],
+  "warnings": [],
+  "tool": {"name": "Bambu Studio", "version": "<actual slicer version>"},
+  "checks": {"loaded": true, "sliced": true}
+}
+```
+
+正式写回同一 attempt ledger：
+
+```bash
+.venv/bin/python tools/accept_pipeline_artifact.py \
+  --ledger output/<city>/.pipeline_runs/pipeline_state.<run>.<attempt>.json \
+  --3mf output/<city>/<artifact>.3mf \
+  --slicer-report output/<city>/<slicer-evidence>.json
+```
+
+该命令会重新运行项目 validator，并校验 ledger、3MF 实际哈希与 slicer evidence 哈希。
+成功才得到 S11=`completed`、run=`validated`；证据不通过则得到 S11=`rejected`、
+run=`validation_rejected`，同时保留已完成的 S10。命令不会代替 Bambu Studio 或其他
+目标切片器执行真实切片。完整状态机见
+[`pipeline_architecture_audit_2026-08-31.md`](pipeline_architecture_audit_2026-08-31.md)。
 
 **Debug**
 - V2 FAIL：之前 B 阶段有 metadata 不写问题，refactor 后 validator 改读 XML name 属性。

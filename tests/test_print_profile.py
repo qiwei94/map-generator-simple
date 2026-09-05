@@ -53,6 +53,26 @@ def test_final_block_base_gap_reserves_two_extrusion_lines():
     assert custom.final_block_base_gap_mm == pytest.approx(1.1)
 
 
+def test_surface_road_gap_uses_supported_minimum_gap_floor():
+    assert DEFAULT_PRINTER_PROFILE.surface_road_gap_mm == pytest.approx(0.55)
+    custom = PrinterProfile(
+        profile_id="wide-surface-gap",
+        min_gap_mm=0.72,
+    )
+    assert custom.surface_road_gap_mm == pytest.approx(0.72)
+
+
+def test_default_terrain_grid_is_finer_than_two_extrusion_lines():
+    assert DEFAULT_PRINTER_PROFILE.terrain_max_surface_edge_mm == pytest.approx(
+        0.672)
+    report = build_printability_report(
+        DEFAULT_PRINTER_PROFILE, PrintScale(25_000.0, 25_000.0))
+    assert report["derived_xy_model_mm"][
+        "terrain_nominal_cell"] == pytest.approx(0.672 / 2 ** 0.5)
+    assert report["derived_xy_real_m"][
+        "terrain_max_surface_edge"] == pytest.approx(25_000 / 196 * 0.672)
+
+
 @pytest.mark.parametrize(
     ("value", "mode", "expected"),
     [(0.4, "ceil", 0.48),
@@ -75,6 +95,7 @@ def test_zero_thickness_can_remain_disabled():
     {"extrusion_width_mm": 0.2},
     {"min_colored_strip_mm": 0.2},
     {"min_surface_layers": 0},
+    {"terrain_max_surface_edge_factor": 0},
 ])
 def test_profile_rejects_invalid_physical_constraints(kwargs):
     with pytest.raises(ValueError):

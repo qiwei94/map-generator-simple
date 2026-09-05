@@ -32,18 +32,37 @@ def _json_default(value):
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("path", type=Path)
+    parser.add_argument(
+        "--design-spec",
+        type=Path,
+        help=("validate against this exact DesignSpec instead of the mutable "
+              "design_spec.json compatibility alias"),
+    )
     parser.add_argument("--json", action="store_true")
+    parser.add_argument(
+        "--output",
+        type=Path,
+        help="also persist the complete validation result as JSON",
+    )
     args = parser.parse_args()
 
-    result = validate_3mf(str(args.path))
+    result = validate_3mf(
+        str(args.path),
+        design_spec_path=(
+            str(args.design_spec) if args.design_spec is not None else None),
+    )
     result["strict_passed"] = bool(
         result.get("passed")
         and not result.get("errors")
         and not result.get("warnings")
     )
+    payload = json.dumps(
+        result, ensure_ascii=False, indent=2, default=_json_default)
+    if args.output:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(payload + "\n", encoding="utf-8")
     if args.json:
-        print(json.dumps(
-            result, ensure_ascii=False, indent=2, default=_json_default))
+        print(payload)
     else:
         print_validation_report(result)
         print(f"  Strict acceptance: {'PASSED' if result['strict_passed'] else 'FAILED'}")

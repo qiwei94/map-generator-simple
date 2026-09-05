@@ -63,9 +63,14 @@ class CityHarness:
         preset: CityPreset,
         use_cache: bool = True,
         printer_profile: Optional[PrinterProfile] = None,
+        amap_salience_mode: str = "cache",
     ):
+        if amap_salience_mode not in {"off", "cache", "network"}:
+            raise ValueError(
+                "amap_salience_mode must be off, cache or network")
         self.preset = preset
         self.printer_profile = printer_profile or DEFAULT_PRINTER_PROFILE
+        self.amap_salience_mode = amap_salience_mode
         self.cache = PipelineCache(f"{preset.name}_aesthetic", enabled=use_cache)
         self.ctx: dict = {}
         self.profile = None
@@ -110,6 +115,61 @@ class CityHarness:
         utm_crs, origin, utm_bbox = bbox["utm_crs"], bbox["origin"], bbox["utm_bbox"]
         bbox_local = (utm_bbox[0] - origin[0], utm_bbox[1] - origin[1],
                       utm_bbox[2] - origin[0], utm_bbox[3] - origin[1])
+
+        # AMap is a read-only cartographic cross-check in mainland China. It
+        # may rank matching OSM roads and disambiguate a garden city from
+        # wilderness, but never contributes replacement vector geometry.
+        amap_salience_guide = None
+        amap_salience_evidence = {
+            "status": "disabled",
+            "reason": "AMap salience mode is off",
+        }
+        external_urban_evidence = {
+            "status": "unavailable",
+            "constraint": "cross-source scene evidence only",
+        }
+        if self.amap_salience_mode != "off":
+            try:
+                from aesthetic.amap_salience import (
+                    build_amap_salience_guide,
+                    summarize_amap_urban_evidence,
+                )
+                amap_salience_guide, amap_salience_evidence = (
+                    build_amap_salience_guide(
+                        p.bbox,
+                        bbox_local,
+                        allow_network=(self.amap_salience_mode == "network"),
+                    )
+                )
+                if amap_salience_guide is not None:
+                    external_urban_evidence = summarize_amap_urban_evidence(
+                        amap_salience_guide.reference, grid_size=8)
+                    external_urban_evidence["reference_status"] = (
+                        amap_salience_evidence.get("status", "ready"))
+                    print(
+                        "  [harness] AMap urban support: "
+                        f"{external_urban_evidence['urban_network_support']:.2f} "
+                        f"(road cells="
+                        f"{external_urban_evidence['road_presence_cell_fraction']:.0%})"
+                    )
+                else:
+                    external_urban_evidence = {
+                        "status": amap_salience_evidence.get(
+                            "status", "unavailable"),
+                        "reason": amap_salience_evidence.get(
+                            "reason", "AMap reference unavailable"),
+                        "constraint": "cross-source scene evidence only",
+                    }
+            except Exception as exc:
+                amap_salience_evidence = {
+                    "status": "unavailable",
+                    "reason": f"{type(exc).__name__}: {exc}",
+                }
+                external_urban_evidence = {
+                    **amap_salience_evidence,
+                    "constraint": "cross-source scene evidence only",
+                }
+                print(f"  [harness] AMap salience unavailable: {exc}")
 
         # ── gdfs（缓存：PBF 提取很贵）──
         def _fetch_all():
@@ -212,7 +272,10 @@ class CityHarness:
             vegetation_gdf=gdfs["vegetation"],
             bbox_local_area_m2=bbox["width_m"] * bbox["height_m"],
         )
-        self.base_params = resolve_params(self.profile)
+        self.base_params = resolve_params(
+            self.profile,
+            external_urban_evidence=external_urban_evidence,
+        )
         print(f"  [harness] profile: relief={self.profile.relief_ratio}, "
               f"water={self.profile.water_ratio:.2f}, "
               f"density={self.profile.building_density:.0f}/km2, "
@@ -234,6 +297,9 @@ class CityHarness:
                 for key in ("buildings", "roads", "water", "vegetation")
             },
             "amap_water_polys": amap_water_polys,
+            "amap_salience_guide": amap_salience_guide,
+            "amap_salience_evidence": amap_salience_evidence,
+            "external_urban_evidence": external_urban_evidence,
             "printer_profile": self.printer_profile,
             "printability": build_printability_report(
                 self.printer_profile,
@@ -320,6 +386,9 @@ class CityHarness:
         cache_key["simplify_tol_m"] = float(_cfg.BUILDING_SIMPLIFY_TOL_M)
         cache_key["printer_profile"] = self.printer_profile.to_dict()
         cache_key["preprocess_policy"] = PREPROCESS_POLICY_VERSION
+        cache_key["amap_salience"] = dict(
+            ctx.get("amap_salience_evidence", {})).get(
+                "cache_path", "unavailable")
 
         def _compute():
             return preprocess_layers(
@@ -336,6 +405,7 @@ class CityHarness:
                 utm_crs=ctx["utm_crs"],
                 origin=ctx["origin"],
                 printer_profile=self.printer_profile,
+                amap_salience_guide=ctx.get("amap_salience_guide"),
                 **overrides,
             )
 

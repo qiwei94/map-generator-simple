@@ -28,20 +28,34 @@ def test_restored_gallery_uses_original_bbox_and_server_identity():
     assert "if (j.mode === \"styles\") restoreJobArea(j);" in source
 
 
-def test_restored_gallery_also_loads_existing_preview_artifacts():
+def test_restored_gallery_does_not_guess_same_city_model_artifacts():
     source = APP_JS.read_text(encoding="utf-8")
 
-    styles_branch = source[source.index('if (mode === "styles")'):]
-    assert "await refreshArtifacts(state.jobSlug);" in styles_branch
+    start = source.index('if (mode === "styles")')
+    end = source.index('if (j.status === "done") {', start)
+    styles_branch = source[start:end]
+    assert "refreshJobArtifacts" not in styles_branch
+    assert "/api/artifacts/" not in styles_branch
+    assert "/api/artifacts/" not in source
+    assert "lastJobId" in source
+    assert "`/api/jobs/${jobId}/artifacts`" in source
 
 
-def test_app_script_cache_key_is_bumped_for_hero_sample_carousel():
+def test_app_assets_and_guest_quota_contract_are_versioned():
     html = INDEX_HTML.read_text(encoding="utf-8")
     source = APP_JS.read_text(encoding="utf-8")
 
-    assert '<script src="app.js?v=55"></script>' in html
-    assert '<link rel="stylesheet" href="style.css?v=53">' in html
+    assert '<script src="app.js?v=59"></script>' in html
+    assert '<link rel="stylesheet" href="style.css?v=56">' in html
     assert 'id="accountDialog"' in html
+    assert 'id="guestQuotaBlock"' in html
+    assert 'id="guestQuotaLarge"' in html
+    assert 'id="btnGuestTasks"' in html
+    assert 'id="authServiceMessage"' in html
+    assert 'aria-labelledby="accountDialogTitle"' in html
+    assert 'aria-live="polite"' in html
+    assert "guest_quota_exhausted" in source
+    assert "state.guest = result.guest || null" in source
     assert 'id="myTasksCard"' in html
     assert 'id="heroShowcase"' in html
     assert 'id="heroShowcasePrev"' in html
@@ -54,6 +68,18 @@ def test_app_script_cache_key_is_bumped_for_hero_sample_carousel():
     assert 'src="assets/westlake-real-output.jpg"' in html
     assert "westlake-real-output.jpg" in source
     assert "chicago-15km-dense.jpg" in source
+
+
+def test_customer_page_renders_safe_pipeline_progress():
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    source = APP_JS.read_text(encoding="utf-8")
+
+    assert 'id="jobPipeline"' in html
+    assert 'id="jobPipelineStages"' in html
+    assert "function renderPublicPipeline(pipeline)" in source
+    assert "job.pipeline || null" in source
+    assert "运行记录已验证" in source
+    assert "/api/admin/" not in source
 
 
 def test_fixed_framing_tiers_and_center_preview_are_explained():

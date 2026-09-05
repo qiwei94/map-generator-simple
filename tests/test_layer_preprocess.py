@@ -24,6 +24,7 @@ from _TEXTURE_STYLE_OF_DEEPSEEK._layer_preprocess import (
     _extract_roads,
     _effective_road_tier,
     _close_unprintable_water_gaps,
+    _clip_polygons_to_bbox,
     _extract_WL_WO,
     preprocess_layers,
     LayerPolygons,
@@ -69,6 +70,21 @@ def test_city_scale_water_demotes_named_pond_but_keeps_main_surfaces():
     assert evidence["main_surface_min_area_m2"] == pytest.approx(250000.0)
     assert evidence["landmark_polygon_demotions"] == 1
     assert evidence["isolated_polygon_drops"] == 1
+
+
+def test_materialized_water_is_clipped_to_finished_frame():
+    clipped, evidence = _clip_polygons_to_bbox(
+        [box(-20, 10, 40, 90), box(80, 20, 130, 70)],
+        (0, 0, 100, 100),
+    )
+
+    assert len(clipped) == 2
+    assert all(poly.bounds[0] >= 0 for poly in clipped)
+    assert all(poly.bounds[1] >= 0 for poly in clipped)
+    assert all(poly.bounds[2] <= 100 for poly in clipped)
+    assert all(poly.bounds[3] <= 100 for poly in clipped)
+    assert evidence["changed_polygons"] == 2
+    assert evidence["dropped_polygons"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -274,7 +290,24 @@ def test_preprocess_records_separate_road_roles_and_printable_seam_width():
     assert layers.road_roles["structural_gap_model_mm"] == pytest.approx(0.55)
     assert layers.road_roles["structural_gap_real_m"] == pytest.approx(
         0.55 / scale)
+    assert layers.road_roles["block_base_source_guard"] == {
+        "policy_version": "block-base-outer-face-guard-v2",
+        "source_polygons": 1,
+        "accepted_before_exclusions": 0,
+        "rejected_below_min_area": 0,
+        "rejected_above_absolute_area": 0,
+        "rejected_above_frame_fraction": 1,
+        "rejected_frame_spanning": 1,
+        "frame_area_m2": 225000000.0,
+        "max_frame_area_fraction": 0.05,
+        "absolute_max_area_m2": 500000.0,
+        "effective_max_area_m2": 11250000.0,
+    }
+    # The complete tier-3 structural network supplies the supported local-road
+    # texture; service roads remain topology evidence rather than visible
+    # hatch, and the conservative major hierarchy stays a separate tier.
     assert len(layers.block_base_cut_lines) == 1
+    assert len(layers.block_base_major_cut_lines) == 1
     assert layers.block_base_cut_lines[0].equals(roads.geometry.iloc[0])
 
 
@@ -524,6 +557,67 @@ class TestBlockBase:
         result = _compute_block_base(
             [big, mid], min_area_m2=1000.0, max_area_m2=20000.0)
         assert len(result) == 1
+
+    def test_crop_relative_guard_rejects_polygonize_outer_face(self):
+        """覆盖取景框的外环面不得成为一整片 Block Base。"""
+        from _TEXTURE_STYLE_OF_DEEPSEEK._layer_preprocess import _compute_block_base
+
+        frame = (0.0, 0.0, 1000.0, 1000.0)
+        outer_face = box(*frame)
+        normal_block = box(100.0, 100.0, 200.0, 200.0)
+        evidence = {}
+
+        result = _compute_block_base(
+            [outer_face, normal_block],
+            min_area_m2=1000.0,
+            bbox_local=frame,
+            max_frame_area_fraction=0.05,
+            evidence_out=evidence,
+        )
+
+        assert len(result) == 1
+        assert result[0].equals(normal_block)
+        assert evidence["rejected_above_frame_fraction"] == 1
+        assert evidence["rejected_frame_spanning"] == 1
+        assert evidence["effective_max_area_m2"] == pytest.approx(50000.0)
+
+    def test_absolute_guard_rejects_district_sized_white_sheet(self):
+        """未贴边的大面积开区也不是可接受的城市街区底座。"""
+        from _TEXTURE_STYLE_OF_DEEPSEEK._layer_preprocess import _compute_block_base
+
+        frame = (0.0, 0.0, 10000.0, 10000.0)
+        district_sheet = box(1000.0, 1000.0, 2000.0, 2000.0)
+        normal_block = box(3000.0, 3000.0, 3200.0, 3200.0)
+        evidence = {}
+        result = _compute_block_base(
+            [district_sheet, normal_block],
+            min_area_m2=1000.0,
+            max_area_m2=500000.0,
+            bbox_local=frame,
+            max_frame_area_fraction=0.05,
+            evidence_out=evidence,
+        )
+
+        assert len(result) == 1
+        assert result[0].equals(normal_block)
+        assert evidence["rejected_above_absolute_area"] == 1
+
+    def test_crop_relative_guard_scales_with_frame_area(self):
+        """同一相对街区在不同产品范围下使用相同判定。"""
+        from _TEXTURE_STYLE_OF_DEEPSEEK._layer_preprocess import _compute_block_base
+
+        for span in (5000.0, 15000.0, 25000.0):
+            frame = (0.0, 0.0, span, span)
+            accepted = box(0.1 * span, 0.1 * span, 0.2 * span, 0.2 * span)
+            rejected = box(0.1 * span, 0.1 * span, 0.4 * span, 0.4 * span)
+            result = _compute_block_base(
+                [accepted, rejected],
+                min_area_m2=1.0,
+                bbox_local=frame,
+                max_frame_area_fraction=0.05,
+            )
+            assert len(result) == 1
+            assert result[0].equals(accepted)
 
     def test_veg_landmark_exclusion(self):
         """veg_landmark_polys 被用作 exclusion，减掉后碎片过滤。"""

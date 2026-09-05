@@ -49,7 +49,10 @@ from _TEXTURE_STYLE_OF_DEEPSEEK._pipeline_cache import PipelineCache
 from _TEXTURE_STYLE_OF_DEEPSEEK._process_lock import acquire_lock
 from _TEXTURE_STYLE_OF_DEEPSEEK.exporter import export_deepseek_3mf, split_terrain_mesh
 from _TEXTURE_STYLE_OF_DEEPSEEK import config as _cfg
+from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d import config as _t3d_cfg
 from _TEXTURE_STYLE_OF_DEEPSEEK.config import compute_scale, WATERWAY_WIDTHS, TERRAIN_GRID, get_area_class, BUILDING_V2_HOTSPOT_RELAX
+
+_t3d_cfg.ELEVATION_SMOOTHING_SIGMA = _cfg.ELEVATION_SMOOTHING_SIGMA
 from _TEXTURE_STYLE_OF_DEEPSEEK.water_roles import retain_continuous_water_source
 from _TEXTURE_STYLE_OF_DEEPSEEK.print_profile import DEFAULT_PRINTER_PROFILE
 
@@ -74,7 +77,7 @@ PRESETS = {
 # ---------------------------------------------------------------------------
 # CLI 参数
 # ---------------------------------------------------------------------------
-def parse_args():
+def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description="统一城市 3MF 模型生成 (标准 CLI 管线: 对象4 + 高德水体补偿 + 缓存)"
     )
@@ -110,10 +113,16 @@ def parse_args():
         '--narrow-penalty', type=float, default=0.5,
         help='细长建筑高度缩放系数（默认 0.5）'
     )
-    parser.add_argument(
-        '--no-vegetation', action='store_true', default=False,
-        help='跳过植被层'
+    vegetation = parser.add_mutually_exclusive_group()
+    vegetation.add_argument(
+        '--vegetation', dest='no_vegetation', action='store_false',
+        help='显式开启植被覆盖层（默认关闭；源数据仍用于场景测量）'
     )
+    vegetation.add_argument(
+        '--no-vegetation', dest='no_vegetation', action='store_true',
+        help='关闭植被覆盖层（默认行为，兼容已有命令）'
+    )
+    parser.set_defaults(no_vegetation=not _cfg.DEFAULT_VEGETATION_ENABLED)
     parser.add_argument(
         '--no-block-base', action='store_true', default=False,
         help='跳过 block_base 层'
@@ -147,7 +156,7 @@ def parse_args():
         help='禁用美学闭环学成参数注入，使用 config 默认值'
     )
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     # 合并 preset + 显式参数
     if args.preset:
@@ -706,6 +715,7 @@ def main():
             city_name=CITY_NAME,
             water_gdf=water_gdf,
             landuse_gdf=landuse_gdf,
+            vegetation_enabled=ENABLE_VEGETATION,
         )
         print(f"  Time: {time.time() - t46:.1f}s")
 
@@ -809,7 +819,7 @@ def main():
 
     vegetation_mesh = None
     if not ENABLE_VEGETATION:
-        print(f"  Vegetation DISABLED via --no-vegetation")
+        print("  Vegetation DISABLED (default; opt in with --vegetation)")
     elif layers.VL or layers.VO:
         try:
             vegetation_mesh = build_deepseek_vegetation_v3(

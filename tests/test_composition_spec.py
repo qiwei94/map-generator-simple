@@ -75,6 +75,17 @@ def test_composition_spec_records_contract_and_identities_not_geometry():
             "snap_cache_reason": "snap miss",
             "secret": "must-not-leak",
         },
+        scene_character={
+            "version": "scene-character-v2",
+            "summary": {"traits": ["grid_structure"]},
+            "metrics": {"road_structure": {"ring_score": 0.7}},
+            "cells": [{"geometry": "must-not-be-embedded"}],
+        },
+        scene_policy={
+            "policy_version": "scene-policy-v1",
+            "activation": "audit_only",
+            "archetype": "ring_axis_lowrise",
+        },
     )
 
     payload = json.dumps(spec, sort_keys=True)
@@ -93,6 +104,9 @@ def test_composition_spec_records_contract_and_identities_not_geometry():
     assert spec["reference"]["evidence"]["snap_cache_fallback"] is True
     assert "spatially matching" in (
         spec["decision_contract"]["salience_reference"])
+    assert spec["scene"]["version"] == "scene-character-v2"
+    assert "cells" not in spec["scene"]
+    assert spec["scene_policy"]["archetype"] == "ring_axis_lowrise"
     assert spec["evidence"]["road_corridor_matching"] == {
         "method": "amap_seed_to_complete_osm_physical_corridor_v2",
         "selected_corridors": 4,

@@ -34,6 +34,11 @@ class PrinterProfile:
     min_colored_strip_mm: float = 0.63
     min_gap_mm: float = 0.55
     min_surface_layers: int = 2
+    # Terrain facets need to sample below the two-line feature scale.  The
+    # default 1.6x extrusion-width diagonal gives a ~0.48 mm square grid for
+    # the balanced 0.4 mm profile, matching the measured reference granularity
+    # without pretending to add detail below the source DEM.
+    terrain_max_surface_edge_factor: float = 1.6
 
     def __post_init__(self) -> None:
         if not self.profile_id.strip():
@@ -44,6 +49,8 @@ class PrinterProfile:
             "layer_height_mm": self.layer_height_mm,
             "min_colored_strip_mm": self.min_colored_strip_mm,
             "min_gap_mm": self.min_gap_mm,
+            "terrain_max_surface_edge_factor": (
+                self.terrain_max_surface_edge_factor),
         }
         for name, value in positive.items():
             if not math.isfinite(value) or value <= 0:
@@ -64,6 +71,11 @@ class PrinterProfile:
         return self.layer_height_mm * self.min_surface_layers
 
     @property
+    def terrain_max_surface_edge_mm(self) -> float:
+        """Maximum XY triangle edge for the printable terrain surface."""
+        return self.terrain_max_surface_edge_factor * self.extrusion_width_mm
+
+    @property
     def final_block_base_gap_mm(self) -> float:
         """Minimum final road seam after all block-base deformations.
 
@@ -73,6 +85,18 @@ class PrinterProfile:
         two-line clearance while still respecting stricter custom profiles.
         """
         return max(self.min_gap_mm, 2.0 * self.extrusion_width_mm)
+
+    @property
+    def surface_road_gap_mm(self) -> float:
+        """Printable lower-surface road texture used for local streets.
+
+        Local streets are a colour/height boundary over the continuous
+        terrain substrate, not a free-standing two-wall void or a separately
+        extruded coloured strip.  They therefore use the tested minimum-gap
+        floor, while arterials keep the more conservative
+        ``final_block_base_gap_mm`` structural separation.
+        """
+        return self.min_gap_mm
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -205,6 +229,13 @@ def build_printability_report(
             "min_colored_strip": scale.model_mm_to_real_m(
                 profile.min_colored_strip_mm),
             "min_gap": scale.model_mm_to_real_m(profile.min_gap_mm),
+            "terrain_max_surface_edge": scale.model_mm_to_real_m(
+                profile.terrain_max_surface_edge_mm),
+        },
+        "derived_xy_model_mm": {
+            "terrain_max_surface_edge": profile.terrain_max_surface_edge_mm,
+            "terrain_nominal_cell": (
+                profile.terrain_max_surface_edge_mm / math.sqrt(2.0)),
         },
         "derived_z_model_mm": {
             "layer_height": profile.layer_height_mm,

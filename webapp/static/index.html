@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <meta name="theme-color" content="#171916">
 <title>旅程浮雕 Studio</title>
-<link rel="stylesheet" href="style.css?v=53">
+<link rel="stylesheet" href="style.css?v=56">
 <link rel="stylesheet" href="vendor/leaflet/leaflet.css">
 <!-- 本地自托管，无 CDN 依赖 -->
 <script type="module" src="vendor/model-viewer.min.js"
@@ -26,7 +26,8 @@
     <a href="#step2"><span>02</span>取景</a>
     <a href="#step4"><span>03</span>生成</a>
   </nav>
-  <button class="account-trigger" id="accountTrigger" type="button">
+  <button class="account-trigger" id="accountTrigger" type="button"
+          aria-haspopup="dialog" aria-controls="accountDialog">
     <span id="accountLabel">登录</span>
     <small id="accountQuota">保存我的任务</small>
   </button>
@@ -231,6 +232,16 @@
       <span id="jobProgressText">总体进度（估算）0%</span>
       <span id="jobEstimate">请耐心等待，页面可以暂时离开</span>
     </div>
+    <section class="job-pipeline" id="jobPipeline" hidden
+             aria-labelledby="jobPipelineTitle">
+      <div class="job-pipeline-head">
+        <strong id="jobPipelineTitle">生成 Pipeline</strong>
+        <span id="jobPipelineSource">等待阶段数据</span>
+      </div>
+      <ol class="job-pipeline-stages" id="jobPipelineStages"></ol>
+      <p class="job-pipeline-detail" id="jobPipelineDetail"></p>
+      <p class="job-pipeline-privacy">这里只展示安全的阶段进度；详细 Context、策略和中间产物仅管理员可见。</p>
+    </section>
     <div class="quality-checks" id="qualityChecks" hidden></div>
     <div class="job-token" id="jobTokenRow" hidden>
       <span>任务令牌</span>
@@ -257,12 +268,17 @@
   </section>
 </main>
 
-<dialog class="account-dialog" id="accountDialog">
+<dialog class="account-dialog" id="accountDialog" aria-labelledby="accountDialogTitle">
   <button class="account-close" id="accountClose" type="button" aria-label="关闭">×</button>
   <div id="accountLoginView">
     <p class="account-kicker">YOUR RELIEF ARCHIVE</p>
-    <h2>找回每一段旅程</h2>
-    <p class="account-intro">用邮箱验证码登录。任务、进度与成品会保存在你的账号中，无需记住任务令牌。</p>
+    <h2 id="accountDialogTitle">先体验，再把旅程留下</h2>
+    <div class="guest-quota-block" id="guestQuotaBlock">
+      <span>游客体验额度</span>
+      <strong id="guestQuotaLarge" aria-live="polite">3 / 3 次</strong>
+      <small>每发起一次新的风格、预览或正式生成，扣 1 次；共 3 次。缓存复用与任务找回不扣。</small>
+    </div>
+    <p class="account-intro">登录后，任务、进度与成品会保存在账号中，也能在其他设备找回。</p>
     <label class="account-field">邮箱
       <input class="text-input" id="authEmail" type="email" autocomplete="email" placeholder="name@example.com">
     </label>
@@ -273,7 +289,9 @@
       <button class="btn btn-ghost" id="btnSendCode" type="button">获取验证码</button>
     </div>
     <button class="btn btn-primary" id="btnVerifyCode" type="button">登录 / 注册</button>
-    <p class="account-message" id="authMessage"></p>
+    <button class="btn btn-ghost" id="btnGuestTasks" type="button">查看当前浏览器任务</button>
+    <p class="account-service-message" id="authServiceMessage" hidden></p>
+    <p class="account-message" id="authMessage" role="status" aria-live="polite"></p>
   </div>
   <div id="accountUserView" hidden>
     <p class="account-kicker">MY STUDIO</p>
@@ -297,6 +315,6 @@
 
 <footer class="foot">旅程浮雕 · 把走过的路，凝固成可以触摸的实体 · <a href="#" onclick="copyMyLink();return false">复制我的链接</a> · <a href="#" onclick="localStorage.removeItem('jr_session');location.href=location.pathname;return false">重新开始</a></footer>
 
-<script src="app.js?v=55"></script>
+<script src="app.js?v=59"></script>
 </body>
 </html>

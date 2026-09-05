@@ -259,7 +259,8 @@
 |------|------|------|
 | --narrow-threshold | 6.0 | 细长建筑 aspect ratio |
 | --narrow-penalty | 0.5 | 细长建筑高度缩放 |
-| --no-vegetation | False | 跳过植被层 |
+| --vegetation | False | 显式开启植被覆盖层；源数据测量不受影响 |
+| --no-vegetation | True | 关闭植被覆盖层（默认；保留为兼容开关） |
 | --no-block-base | False | 跳过 block_base 层 |
 | --merge-layers | False | 合并 block_base+BO |
 | --use-ndsm | False | 使用 nDSM 推算楼高 |

@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
 
 
-SCHEMA_VERSION = "1.3"
+SCHEMA_VERSION = "1.5"
 
 
 def _json_value(value: Any) -> Any:
@@ -49,7 +49,7 @@ def artifact_identity(path: os.PathLike | str) -> dict:
     }
 
 
-def layer_evidence(layers: Any) -> dict:
+def layer_evidence(layers: Any, *, vegetation_enabled: bool = True) -> dict:
     """Capture non-zero acceptance evidence from a LayerPolygons-like object."""
     evidence = {
         "building_landmarks": len(getattr(layers, "BL", ()) or ()),
@@ -82,6 +82,12 @@ def layer_evidence(layers: Any) -> dict:
     ):
         if source_key in water_roles:
             evidence[output_key] = int(water_roles[source_key])
+    if not vegetation_enabled:
+        # The source polygons still belong in evidence.source_features, but a
+        # layer explicitly disabled by the generation request has no printable
+        # features and must not make the validator expect a missing mesh.
+        evidence["vegetation_landmarks"] = 0
+        evidence["vegetation_polygons"] = 0
     return evidence
 
 
@@ -101,6 +107,8 @@ def build_design_spec(
     printability: Optional[Mapping] = None,
     road_roles: Optional[Mapping] = None,
     water_roles: Optional[Mapping] = None,
+    scene_policy: Optional[Mapping] = None,
+    terrain: Optional[Mapping] = None,
     pipeline: str = "generate_city_legacy",
 ) -> dict:
     """Build a validated DesignSpec dictionary without mutating generation."""
@@ -135,6 +143,8 @@ def build_design_spec(
         "printability": _json_value(printability or {}),
         "road_roles": _json_value(road_roles or {}),
         "water_roles": _json_value(water_roles or {}),
+        "scene_policy": _json_value(scene_policy or {}),
+        "terrain": _json_value(terrain or {}),
         "evidence": {
             "source_features": source,
             "printable_features": printable,

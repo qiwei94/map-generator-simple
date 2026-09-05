@@ -122,6 +122,7 @@ def test_classic_full_keeps_print_render_outputs():
     assert "--preview-fast" not in cmd
     assert "--png" in cmd
     assert "--review-png" in cmd
+    assert "--no-vegetation" in cmd
 
 
 def test_center_preview_bbox_is_physical_five_km_at_high_latitude():

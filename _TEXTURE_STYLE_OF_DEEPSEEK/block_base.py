@@ -442,6 +442,8 @@ def build_deepseek_block_base_v3(
     amp_scale: float = 2.0,
     clearance_lines: "List | None" = None,
     final_clearance_mm: "float | None" = None,
+    major_clearance_lines: "List | None" = None,
+    surface_clearance_mm: "float | None" = None,
     return_clearance_evidence: bool = False,
 ):
     """V3 block_base builder with optional Z-texture displacement.
@@ -480,8 +482,33 @@ def build_deepseek_block_base_v3(
 
     clearance_evidence = None
     if final_clearance_mm is not None:
-        polys, block_classes, clearance_evidence = enforce_final_block_base_clearance(
-            polys, block_classes, clearance_lines, scale, final_clearance_mm)
+        if surface_clearance_mm is not None:
+            polys, block_classes, surface_evidence = (
+                enforce_final_block_base_clearance(
+                    polys, block_classes, clearance_lines, scale,
+                    surface_clearance_mm))
+            polys, block_classes, major_evidence = (
+                enforce_final_block_base_clearance(
+                    polys, block_classes, major_clearance_lines, scale,
+                    final_clearance_mm))
+            # Keep the conservative major-road proof at the top level for
+            # backward-compatible S9/V14 gates, and preserve both tiers for
+            # an auditable explanation of the reference-style local texture.
+            clearance_evidence = dict(major_evidence)
+            if major_evidence.get("status") != "checked":
+                clearance_evidence.update(surface_evidence)
+            clearance_evidence.update({
+                "policy_version": "hierarchical-surface-road-clearance-v2",
+                "passed": bool(surface_evidence.get("passed")
+                               and (major_evidence.get("passed")
+                                    or major_evidence.get("status")
+                                    == "not_applicable")),
+                "surface_roads": surface_evidence,
+                "major_roads": major_evidence,
+            })
+        else:
+            polys, block_classes, clearance_evidence = enforce_final_block_base_clearance(
+                polys, block_classes, clearance_lines, scale, final_clearance_mm)
         print(
             "  BlockBase final clearance: "
             f"{clearance_evidence['target_gap_mm']:.2f}mm, "

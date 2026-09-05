@@ -38,6 +38,19 @@ _REF_DIR = {"landscape": "杭州", "skyline": "芝加哥",
             "terrain": "重庆", "minimal": "杭州"}
 
 
+def gallery_succeeded(meta, requested_styles):
+    """Require every requested style to have a complete render record."""
+
+    results = meta.get("styles", {}) if isinstance(meta, dict) else {}
+    return bool(requested_styles) and all(
+        isinstance(results.get(style), dict)
+        and isinstance(results[style].get("renders"), dict)
+        and bool(results[style]["renders"].get("topdown"))
+        and bool(results[style]["renders"].get("height"))
+        for style in requested_styles
+    )
+
+
 def main():
     ap = argparse.ArgumentParser(description="任意区域风格画廊生成")
     ap.add_argument("--bbox", required=True,
@@ -48,6 +61,11 @@ def main():
     ap.add_argument("--prototype", default="landscape",
                     choices=["landscape", "skyline", "terrain", "minimal"])
     ap.add_argument("--styles", default=None, help="逗号分隔，默认全部 4 种")
+    ap.add_argument(
+        "--amap-salience", choices=["off", "cache", "network"],
+        default="cache",
+        help="国内道路骨架/场景交叉证据；不替换 OSM 几何",
+    )
     ap.add_argument("--out-dir",
                     default=os.path.join(_ROOT, "output", "style_gallery"))
     args = ap.parse_args()
@@ -78,7 +96,8 @@ def main():
           f"pbf={args.pbf} prototype={args.prototype}")
     t0 = time.time()
     meta = generate_city_gallery(args.slug, styles, args.out_dir,
-                                 use_cache=True)
+                                 use_cache=True,
+                                 amap_salience_mode=args.amap_salience)
     # 补上展示名，前端直接用
     if args.title:
         meta["title"] = args.title
@@ -89,7 +108,7 @@ def main():
     ok = sum(1 for v in meta.get("styles", {}).values() if "renders" in v)
     print(f"[area-gallery] done in {time.time() - t0:.1f}s, "
           f"{ok}/{len(styles)} styles OK")
-    return 0 if ok else 1
+    return 0 if gallery_succeeded(meta, styles) else 1
 
 
 if __name__ == "__main__":

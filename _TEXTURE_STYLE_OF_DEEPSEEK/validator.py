@@ -6,6 +6,7 @@ against the Urban Series reference model parameters.
 
 import json
 import hashlib
+import math
 import os
 import re
 import zipfile
@@ -40,6 +41,39 @@ def _sha256_file(path: str) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _terrain_surface_edge_metrics(vertices: np.ndarray,
+                                  faces: np.ndarray) -> dict:
+    """Measure top-surface XY triangle edges from the exported artifact."""
+    if vertices is None or faces is None or not len(faces):
+        return {"top_face_count": 0}
+    triangles = vertices[faces]
+    cross = np.cross(
+        triangles[:, 1] - triangles[:, 0],
+        triangles[:, 2] - triangles[:, 0],
+    )
+    lengths = np.linalg.norm(cross, axis=1)
+    normal_z = np.divide(
+        cross[:, 2], lengths,
+        out=np.zeros_like(lengths), where=lengths > 1e-12,
+    )
+    top = triangles[normal_z > 0.05]
+    if not len(top):
+        return {"top_face_count": 0}
+    longest = np.maximum.reduce([
+        np.linalg.norm(top[:, 0, :2] - top[:, 1, :2], axis=1),
+        np.linalg.norm(top[:, 1, :2] - top[:, 2, :2], axis=1),
+        np.linalg.norm(top[:, 2, :2] - top[:, 0, :2], axis=1),
+    ])
+    return {
+        "top_face_count": int(len(top)),
+        "max_xy_edge_mm": float(longest.max()),
+        "p99_xy_edge_mm": float(np.quantile(longest, 0.99)),
+        "p999_xy_edge_mm": float(np.quantile(longest, 0.999)),
+        "faces_over_2mm": int(np.count_nonzero(longest > 2.0)),
+        "faces_over_5mm": int(np.count_nonzero(longest > 5.0)),
+    }
 
 
 def _parse_vertices(xml: str) -> Optional[np.ndarray]:
@@ -239,8 +273,61 @@ def _get_extruder_map_from_3mf(objects: Dict[str, dict]) -> Dict[str, int]:
     return {name: EXTRUDER_MAP[name] for name in objects if name in EXTRUDER_MAP}
 
 
-def validate_3mf(filepath: str) -> Dict[str, any]:
-    """Run all 10 validation rules on a generated 3MF file.
+def _component_slender_metrics(vertices: np.ndarray,
+                                faces: np.ndarray,
+                                extrusion_width_mm: float) -> dict:
+    """Measure independent-body XY/Z survival on an exported mesh."""
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import connected_components
+
+    if vertices is None or faces is None or not len(vertices) or not len(faces):
+        return {"component_count": 0}
+    rows = np.concatenate((
+        faces[:, 0], faces[:, 1], faces[:, 1], faces[:, 2],
+        faces[:, 2], faces[:, 0],
+    ))
+    columns = np.concatenate((
+        faces[:, 1], faces[:, 0], faces[:, 2], faces[:, 1],
+        faces[:, 0], faces[:, 2],
+    ))
+    graph = coo_matrix(
+        (np.ones(len(rows), dtype=np.uint8), (rows, columns)),
+        shape=(len(vertices), len(vertices)),
+    ).tocsr()
+    count, labels = connected_components(graph, directed=False)
+    minima = np.full((count, 3), np.inf, dtype=float)
+    maxima = np.full((count, 3), -np.inf, dtype=float)
+    for axis in range(3):
+        np.minimum.at(minima[:, axis], labels, vertices[:, axis])
+        np.maximum.at(maxima[:, axis], labels, vertices[:, axis])
+    spans = maxima - minima
+    minimum_width = np.min(spans[:, :2], axis=1)
+    height = spans[:, 2]
+    slenderness = height / np.maximum(minimum_width, 1e-9)
+    return {
+        "component_count": int(count),
+        "below_extrusion_width": int(np.count_nonzero(
+            minimum_width + 1e-9 < float(extrusion_width_mm))),
+        "height_to_width_above_4": int(np.count_nonzero(
+            slenderness > 4.0 + 1e-9)),
+        "minimum_width_p50_mm": float(np.percentile(minimum_width, 50)),
+        "height_p50_mm": float(np.percentile(height, 50)),
+        "height_to_width_p50": float(np.percentile(slenderness, 50)),
+        "maximum_top_z_mm": float(vertices[:, 2].max()),
+    }
+
+
+def validate_3mf(
+    filepath: str,
+    *,
+    design_spec_path: Optional[str] = None,
+) -> Dict[str, any]:
+    """Run all validation rules on a generated 3MF file.
+
+    ``design_spec_path`` is optional for legacy/standalone diagnostics.  Formal
+    acceptance must pass the exact attempt-scoped DesignSpec claimed by the
+    S10 ledger; silently reading the mutable ``design_spec.json`` alias would
+    bind an older 3MF to a later same-city attempt.
 
     Returns dict with keys: 'passed', 'rules', 'errors', 'warnings'.
     """
@@ -266,6 +353,51 @@ def validate_3mf(filepath: str) -> Dict[str, any]:
 
     objects = _get_object_meshes(zf)
     extruder_map = _get_extruder_map_from_3mf(objects)
+
+    explicit_design_spec = design_spec_path is not None
+    if design_spec_path is None:
+        design_spec_path = os.path.join(
+            os.path.dirname(os.path.abspath(filepath)), "design_spec.json")
+    else:
+        design_spec_path = os.path.abspath(os.fspath(design_spec_path))
+    results["design_spec"] = {
+        "filename": os.path.basename(design_spec_path),
+        "explicit": explicit_design_spec,
+    }
+    design_spec = None
+    design_spec_error = None
+    if os.path.isfile(design_spec_path):
+        try:
+            with open(design_spec_path, encoding="utf-8") as handle:
+                loaded_design_spec = json.load(handle)
+            if not isinstance(loaded_design_spec, dict):
+                raise ValueError("DesignSpec root must be an object")
+            design_spec = loaded_design_spec
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            design_spec_error = exc
+    elif explicit_design_spec:
+        design_spec_error = FileNotFoundError(
+            f"explicit DesignSpec not found: {design_spec_path}")
+
+    if explicit_design_spec:
+        if design_spec_error is not None:
+            results["errors"].append(
+                f"Explicit DesignSpec is invalid: {design_spec_error}")
+        elif design_spec is None:
+            results["errors"].append("Explicit DesignSpec is missing")
+        else:
+            claim = design_spec.get("artifact")
+            actual_hash = _sha256_file(filepath)
+            if (not isinstance(design_spec.get("schema_version"), str)
+                    or not str(design_spec["schema_version"]).strip()):
+                results["errors"].append(
+                    "Explicit DesignSpec has no schema_version")
+            if (not isinstance(claim, dict)
+                    or claim.get("filename") != os.path.basename(filepath)
+                    or claim.get("sha256") != actual_hash
+                    or claim.get("size_bytes") != os.path.getsize(filepath)):
+                results["errors"].append(
+                    "Explicit DesignSpec artifact identity does not match 3MF")
 
     # ---- V1: Max XY span = INTERNAL_SPAN_MM +/- 2mm ----
     # Non-square bbox means one axis may be shorter. Check the longer axis.
@@ -301,7 +433,7 @@ def validate_3mf(filepath: str) -> Dict[str, any]:
         "passed": v2_ok,
     })
 
-    # ---- V3: Terrain thickness ~4.0mm (+/- 15%) ----
+    # ---- V3: Terrain height matches the declared mapping ----
     terrain_z_all = []
     for key in ["terrain", "terrain_surface", "terrain_walls"]:
         if key in objects:
@@ -309,15 +441,30 @@ def validate_3mf(filepath: str) -> Dict[str, any]:
 
     if terrain_z_all:
         z_range = max(terrain_z_all) - min(terrain_z_all)
-        v3_ok = abs(z_range - TERRAIN_THICKNESS_MM) < TERRAIN_THICKNESS_MM * 0.15
+        terrain_spec = ((design_spec or {}).get("terrain") or {})
+        declared_span = terrain_spec.get("artifact_z_span_mm")
+        if declared_span is None:
+            expected_span = float(TERRAIN_THICKNESS_MM)
+            tolerance = expected_span * 0.15
+            contract = "legacy fixed-height contract"
+        else:
+            expected_span = float(declared_span)
+            tolerance = max(0.02, expected_span * 0.01)
+            contract = "DesignSpec terrain contract"
+        v3_ok = abs(z_range - expected_span) <= tolerance
     else:
         z_range = 0
+        expected_span = float(TERRAIN_THICKNESS_MM)
+        tolerance = expected_span * 0.15
+        contract = "missing terrain"
         v3_ok = False
     results["rules"].append({
         "id": "V3",
-        "name": f"Terrain thickness = {TERRAIN_THICKNESS_MM}mm +/- 15%",
+        "name": "Terrain height matches its declared artifact contract",
         "passed": v3_ok,
-        "detail": f"Z range: {z_range:.2f}mm",
+        "detail": (
+            f"actual={z_range:.3f}mm, expected={expected_span:.3f}mm, "
+            f"tolerance={tolerance:.3f}mm ({contract})"),
     })
 
     # ---- V4: Buildings embedded into terrain ----
@@ -541,17 +688,6 @@ def validate_3mf(filepath: str) -> Dict[str, any]:
     # The proof cannot be reconstructed from the 3MF alone because the source
     # road centre-lines are not embedded in the archive.  New full-generation
     # artifacts therefore persist the measured cut evidence in DesignSpec.
-    design_spec_path = os.path.join(
-        os.path.dirname(os.path.abspath(filepath)), "design_spec.json")
-    design_spec = None
-    design_spec_error = None
-    if os.path.isfile(design_spec_path):
-        try:
-            with open(design_spec_path, encoding="utf-8") as handle:
-                design_spec = json.load(handle)
-        except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
-            design_spec_error = exc
-
     has_block_base = bool(
         block_base_obj and len(block_base_obj["faces"]) > 0)
     declared_block_mode = str(
@@ -587,6 +723,41 @@ def validate_3mf(filepath: str) -> Dict[str, any]:
             target_gap = float(clearance.get("target_gap_mm", 0.0))
             verified_gap = float(clearance.get("verified_min_gap_mm", 0.0))
             required_gap = max(configured_gap, 2.0 * extrusion_width)
+            hierarchical = (
+                clearance.get("policy_version")
+                == "hierarchical-surface-road-clearance-v2")
+            surface = clearance.get("surface_roads") or {}
+            major = clearance.get("major_roads") or {}
+            # The local-road reveal is a supported height/material boundary,
+            # not a separately extruded coloured strip.  Validate its clear
+            # gap against min_gap; the coloured-strip floor remains relevant
+            # to explicit road objects only.
+            surface_required = configured_gap
+            surface_ok = True
+            major_ok = True
+            if hierarchical:
+                surface_ok = bool(
+                    surface.get("status") == "checked"
+                    and surface.get("passed") is True
+                    and float(surface.get("target_gap_mm", 0.0)) + 1e-9
+                    >= surface_required
+                    and float(surface.get("verified_min_gap_mm", 0.0)) + 1e-9
+                    >= surface_required)
+                major_ok = bool(
+                    major.get("status") == "not_applicable"
+                    or (
+                        major.get("status") == "checked"
+                        and major.get("passed") is True
+                        and float(major.get("target_gap_mm", 0.0)) + 1e-9
+                        >= required_gap
+                        and float(major.get("verified_min_gap_mm", 0.0)) + 1e-9
+                        >= required_gap
+                    ))
+                # With no arterial in the crop, the surface tier is the
+                # strongest applicable proof and need not pretend to be a
+                # two-extrusion arterial seam.
+                if major.get("status") == "not_applicable":
+                    required_gap = surface_required
             cutters = int(clearance.get("cutter_features", 0))
             post_intrusion = float(clearance.get(
                 "post_clip_intrusion_area_m2", float("inf")))
@@ -611,6 +782,8 @@ def validate_3mf(filepath: str) -> Dict[str, any]:
                 and required_gap > 0
                 and target_gap + 1e-9 >= required_gap
                 and verified_gap + 1e-9 >= required_gap
+                and surface_ok
+                and major_ok
                 and post_intrusion <= tolerance
                 and artifact_matches
             )
@@ -632,11 +805,193 @@ def validate_3mf(filepath: str) -> Dict[str, any]:
         "detail": v14_detail,
     })
 
+    # ---- V15: Formal terrain keeps printer-bounded regular topology ----
+    terrain_spec = ((design_spec or {}).get("terrain") or {})
+    if not os.path.isfile(design_spec_path):
+        v15_ok = True
+        v15_detail = "not recorded (legacy artifact without design_spec.json)"
+    elif design_spec_error is not None:
+        v15_ok = False
+        v15_detail = f"invalid terrain evidence: {design_spec_error}"
+    elif not terrain_spec:
+        v15_ok = True
+        v15_detail = "not recorded (legacy DesignSpec without terrain contract)"
+    elif terrain_obj is None:
+        v15_ok = False
+        v15_detail = "terrain contract exists but no terrain mesh was parsed"
+    else:
+        try:
+            grid = terrain_spec.get("grid") or {}
+            stored_mesh = terrain_spec.get("surface_mesh") or {}
+            actual_mesh = _terrain_surface_edge_metrics(
+                terrain_obj["vertices"], terrain_obj["faces"])
+            allowed_edge = float(grid["max_surface_edge_mm"])
+            actual_edge = float(actual_mesh["max_xy_edge_mm"])
+            stored_edge = float(stored_mesh["max_xy_edge_mm"])
+            qem_off = bool(
+                terrain_spec.get("formal_qem_decimation") is False
+                and grid.get("qem_decimation") is False
+                and grid.get("method") == "regular_raster_resample"
+            )
+            artifact_claim = design_spec.get("artifact") or {}
+            artifact_matches = bool(
+                artifact_claim.get("filename") == os.path.basename(filepath)
+                and artifact_claim.get("sha256") == _sha256_file(filepath)
+            )
+            numeric_ok = bool(np.isfinite([
+                allowed_edge, actual_edge, stored_edge,
+            ]).all())
+            v15_ok = bool(
+                numeric_ok
+                and qem_off
+                and allowed_edge > 0
+                and actual_edge <= allowed_edge + 1e-4
+                and abs(actual_edge - stored_edge) <= 1e-3
+                and int(actual_mesh.get("faces_over_2mm", -1)) == 0
+                and int(actual_mesh.get("faces_over_5mm", -1)) == 0
+                and artifact_matches
+            )
+            v15_detail = (
+                f"actual_max={actual_edge:.3f}mm, "
+                f"allowed={allowed_edge:.3f}mm, "
+                f"over_2mm={actual_mesh.get('faces_over_2mm')}, "
+                f"over_5mm={actual_mesh.get('faces_over_5mm')}, "
+                f"QEM_off={qem_off}, artifact_matches={artifact_matches}"
+            )
+        except (KeyError, OSError, ValueError, TypeError) as exc:
+            v15_ok = False
+            v15_detail = f"invalid terrain evidence: {exc}"
+    results["rules"].append({
+        "id": "V15",
+        "name": "Formal terrain uses printer-bounded regular topology",
+        "passed": v15_ok,
+        "detail": v15_detail,
+    })
+
+    # ---- V16: Terrain-draped overlays cannot contain giant fan facets ----
+    # A valid terrain mesh is insufficient: any overlay that samples terrain
+    # only at sparse boundary vertices can still bridge an entire hill with a
+    # single flat triangle.  Vegetation is currently the formal draped layer.
+    vegetation_obj = objects.get("vegetation")
+    printable_evidence = (((design_spec or {}).get("evidence") or {})
+                          .get("printable_features") or {})
+    declared_vegetation = int(
+        printable_evidence.get("vegetation_landmarks", 0)
+        + printable_evidence.get("vegetation_polygons", 0)
+    )
+    if not vegetation_obj or not len(vegetation_obj["faces"]):
+        v16_ok = declared_vegetation == 0
+        v16_detail = (
+            "not applicable (no vegetation mesh)"
+            if v16_ok else
+            f"missing vegetation mesh for {declared_vegetation} declared "
+            "printable vegetation features"
+        )
+    elif not os.path.isfile(design_spec_path):
+        v16_ok = True
+        v16_detail = "not recorded (legacy artifact without design_spec.json)"
+    elif design_spec_error is not None:
+        v16_ok = False
+        v16_detail = f"invalid draped-layer evidence: {design_spec_error}"
+    else:
+        try:
+            printer = ((design_spec.get("printability") or {})
+                       .get("printer_profile") or {})
+            extrusion_width = float(printer["extrusion_width_mm"])
+            allowed_edge = 2.0 * extrusion_width
+            metrics = _terrain_surface_edge_metrics(
+                vegetation_obj["vertices"], vegetation_obj["faces"])
+            actual_edge = float(metrics["max_xy_edge_mm"])
+            numeric_ok = bool(np.isfinite([
+                extrusion_width, allowed_edge, actual_edge,
+            ]).all())
+            v16_ok = bool(
+                numeric_ok
+                and extrusion_width > 0
+                and actual_edge <= allowed_edge + 1e-4
+                and int(metrics.get("faces_over_2mm", -1)) == 0
+                and int(metrics.get("faces_over_5mm", -1)) == 0
+            )
+            v16_detail = (
+                f"vegetation_actual_max={actual_edge:.3f}mm, "
+                f"allowed={allowed_edge:.3f}mm, "
+                f"over_2mm={metrics.get('faces_over_2mm')}, "
+                f"over_5mm={metrics.get('faces_over_5mm')}"
+            )
+        except (KeyError, ValueError, TypeError) as exc:
+            v16_ok = False
+            v16_detail = f"invalid draped-layer evidence: {exc}"
+    results["rules"].append({
+        "id": "V16",
+        "name": "Terrain-draped overlays use printer-bounded facets",
+        "passed": v16_ok,
+        "detail": v16_detail,
+    })
+
+    # ---- V17: Final hero buildings are printable and respect Z ownership ----
+    hierarchy = (((design_spec or {}).get("decisions") or {})
+                 .get("building_height_hierarchy") or {})
+    landmarks_obj = objects.get("landmarks")
+    hierarchy_policy = str(hierarchy.get("policy_version") or "")
+    if not hierarchy_policy.startswith("terrain-owned-building-z-v"):
+        v17_ok = True
+        v17_detail = "not recorded (legacy building-height contract)"
+    elif hierarchy.get("status") != "active":
+        v17_ok = True
+        v17_detail = f"not applicable ({hierarchy.get('status', 'inactive')})"
+    elif not landmarks_obj or not len(landmarks_obj["faces"]):
+        declared = int(hierarchy.get("hero_count", 0))
+        v17_ok = declared == 0
+        v17_detail = f"no landmark mesh; declared heroes={declared}"
+    else:
+        try:
+            printer = ((design_spec.get("printability") or {})
+                       .get("printer_profile") or {})
+            extrusion_width = float(printer["extrusion_width_mm"])
+            metrics = _component_slender_metrics(
+                landmarks_obj["vertices"], landmarks_obj["faces"],
+                extrusion_width,
+            )
+            terrain_peak = (
+                float(terrain_obj["vertices"][:, 2].max())
+                if terrain_obj is not None else float("nan"))
+            peak_ok = bool(
+                not hierarchy.get("terrain_owned")
+                or (math.isfinite(terrain_peak)
+                    and metrics["maximum_top_z_mm"]
+                    <= terrain_peak + 1e-4)
+            )
+            v17_ok = bool(
+                metrics["below_extrusion_width"] == 0
+                and metrics["height_to_width_above_4"] == 0
+                and peak_ok
+            )
+            v17_detail = (
+                f"components={metrics['component_count']}, "
+                f"below_{extrusion_width:.2f}mm="
+                f"{metrics['below_extrusion_width']}, "
+                f"height/width>4={metrics['height_to_width_above_4']}, "
+                f"width_p50={metrics['minimum_width_p50_mm']:.3f}mm, "
+                f"height_p50={metrics['height_p50_mm']:.3f}mm, "
+                f"landmark_top={metrics['maximum_top_z_mm']:.3f}mm, "
+                f"terrain_peak={terrain_peak:.3f}mm, peak_ok={peak_ok}"
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            v17_ok = False
+            v17_detail = f"invalid final hero evidence: {exc}"
+    results["rules"].append({
+        "id": "V17",
+        "name": "Hero buildings survive the nozzle and respect scene Z ownership",
+        "passed": v17_ok,
+        "detail": v17_detail,
+    })
+
     # Aggregate results
     for rule in results["rules"]:
         if not rule["passed"]:
             if rule["id"] in (
-                    "V2", "V4", "V8", "V9", "V10", "V13", "V14"):
+                    "V2", "V4", "V8", "V9", "V10", "V13", "V14",
+                    "V15", "V16", "V17"):
                 results["errors"].append(f"{rule['id']}: {rule['name']}")
             else:
                 results["warnings"].append(f"{rule['id']}: {rule['name']}")

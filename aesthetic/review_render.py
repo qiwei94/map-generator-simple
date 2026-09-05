@@ -14,6 +14,7 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 from _TEXTURE_STYLE_OF_DEEPSEEK import config as _cfg
+from _TEXTURE_STYLE_OF_DEEPSEEK.print_profile import PrinterProfile
 from _TEXTURE_STYLE_OF_DEEPSEEK.road_roles import (
     resolve_composed_road_width_m,
     road_width_multiplier_from_layers,
@@ -28,6 +29,8 @@ _VEGETATION = (196, 196, 196)
 _BUILDING = (255, 255, 255)
 _BUILDING_EDGE = (138, 138, 138)
 _ROAD = (74, 74, 74)
+_ROAD_LOCAL = (160, 160, 157)
+_ROAD_MAJOR = (124, 124, 121)
 _WATER = (0, 0, 0)
 
 SUPERSAMPLE = 2  # 抗锯齿超采样倍数
@@ -103,7 +106,8 @@ def _hillshade(heightmap: np.ndarray, pixel_size: float,
 
 def render_review_bundle(layers, ctx: dict, road_width_multiplier: float,
                          out_dir: str, tag: str,
-                         scene_type: str = "urban") -> dict:
+                         scene_type: str = "urban",
+                         vegetation_enabled: bool = False) -> dict:
     """渲染评审图包。
 
     Returns:
@@ -127,7 +131,8 @@ def render_review_bundle(layers, ctx: dict, road_width_multiplier: float,
     water_2x = _mask2x(list(layers.WL) + list(layers.WO))
     building_2x = _mask2x(list(layers.BO) + [p for p, _ in layers.BL])
     block_2x = _mask2x(layers.block_base)
-    veg_2x = _mask2x(list(layers.VL) + list(layers.VO))
+    veg_2x = _mask2x(
+        list(layers.VL) + list(layers.VO) if vegetation_enabled else [])
 
     water_mask = _downscale_mask(water_2x.astype(np.uint8), G)
     building_mask = _downscale_mask(building_2x.astype(np.uint8), G)
@@ -137,8 +142,12 @@ def render_review_bundle(layers, ctx: dict, road_width_multiplier: float,
     # ── 高度 DSM（BO 统一聚合高度垫底，BL 按高度升序后画压上）──
     dsm_img, dsm_draw = raster_d.new_canvas(float_mode=True)
     agg_h = float(_cfg.BUILDING_AGGREGATE_HEIGHT_MM)
-    for p in _iter_polys(layers.BO):
-        raster_d.draw_poly(dsm_draw, p, agg_h)
+    bo_heights = list(getattr(layers, "BO_heights", ()) or ())
+    if len(bo_heights) != len(layers.BO):
+        bo_heights = [agg_h] * len(layers.BO)
+    for polygon, height in zip(layers.BO, bo_heights):
+        for part in _iter_polys([polygon]):
+            raster_d.draw_poly(dsm_draw, part, float(height))
     for p, h in sorted(((p, float(h)) for p, h in layers.BL
                         if p is not None and not p.is_empty),
                        key=lambda x: x[1]):
@@ -171,13 +180,58 @@ def render_review_bundle(layers, ctx: dict, road_width_multiplier: float,
 
     # 道路（2x 画线；同步产出 road_mask）
     road_canvas, road_draw = raster_g.new_canvas(float_mode=False)
-    if layers.roads_lines:
-        draw = ImageDraw.Draw(pil_img)
+    draw = ImageDraw.Draw(pil_img)
+    topology_lines = list(
+        getattr(layers, "block_base_cut_lines", ()) or ())
+    major_lines = list(
+        getattr(layers, "block_base_major_cut_lines", ()) or ())
+    width_policy = getattr(layers, "road_roles", {}).get("width_policy", {})
+    scale_mm_per_m = float(ctx.get("scale", 0.0))
+    default_profile = PrinterProfile()
+
+    def _draw_geometry_lines(geometries, *, color, width_model_mm):
+        if scale_mm_per_m <= 0:
+            return
+        width_m = float(width_model_mm) / scale_mm_per_m
+        width_px = max(1, int(round(width_m / meters_per_px)))
+        for geometry in geometries:
+            if geometry is None or geometry.is_empty:
+                continue
+            parts = (geometry.geoms if geometry.geom_type in {
+                "MultiLineString", "GeometryCollection"
+            } else [geometry])
+            for part in parts:
+                try:
+                    points = [raster_g.to_px(x, y) for x, y in part.coords]
+                except Exception:
+                    continue
+                if len(points) >= 2:
+                    draw.line(points, fill=color, width=width_px)
+                    road_draw.line(points, fill=1, width=width_px)
+
+    if topology_lines:
+        # The complete tier-4 topology is the visible street texture in the
+        # reference language.  It is distinct from the much smaller ink-
+        # budgeted foreground list and uses the exact lower-surface seam width
+        # owned by the printer profile.
+        _draw_geometry_lines(
+            topology_lines,
+            color=_ROAD_LOCAL,
+            width_model_mm=width_policy.get(
+                "surface_road_gap_mm", default_profile.surface_road_gap_mm),
+        )
+        _draw_geometry_lines(
+            major_lines,
+            color=_ROAD_MAJOR,
+            width_model_mm=width_policy.get(
+                "major_road_gap_mm", default_profile.final_block_base_gap_mm),
+        )
+    elif layers.roads_lines:
+        # Compatibility path for old layer bundles that predate separate
+        # topology and major-cut collections.
         road_widths = getattr(_cfg, "ROAD_WIDTHS", {})
         default_w = float(getattr(_cfg, "ROAD_DEFAULT_WIDTH_M", 10.0))
-        width_policy = getattr(layers, "road_roles", {}).get("width_policy", {})
         min_strip_mm = width_policy.get("min_colored_strip_mm")
-        scale_mm_per_m = float(ctx.get("scale", 0.0))
         effective_multiplier = road_width_multiplier_from_layers(
             layers, road_width_multiplier)
         for item in layers.roads_lines:
@@ -196,8 +250,9 @@ def render_review_bundle(layers, ctx: dict, road_width_multiplier: float,
             else:
                 w_m = road_widths.get(highway, default_w) * effective_multiplier
             w_px = max(1, int(round(w_m / meters_per_px)))
-            geoms = line.geoms if hasattr(line, "geoms") and not hasattr(
-                line, "coords") else [line]
+            geoms = (line.geoms if line.geom_type in {
+                "MultiLineString", "GeometryCollection"
+            } else [line])
             for g in geoms:
                 try:
                     pts = [raster_g.to_px(x, y) for x, y in g.coords]

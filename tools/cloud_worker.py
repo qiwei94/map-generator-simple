@@ -36,6 +36,10 @@ if str(_WEBAPP) not in sys.path:
     sys.path.insert(0, str(_WEBAPP))
 
 from progress_protocol import progress_from_log  # noqa: E402
+from aesthetic.pipeline_contract import (  # noqa: E402
+    CONTRACT_VERSION,
+    PIPELINE_STAGES,
+)
 
 
 _ALLOWED_ENTRYPOINTS = {
@@ -152,6 +156,114 @@ def _prepare_command(spec: dict) -> tuple[list[str], tempfile.TemporaryDirectory
     return cmd, temp_dir
 
 
+def _pipeline_ledger_records(
+        cmd: list[str], env: dict) -> list[tuple[dict, Path]]:
+    """Return valid records for exactly this run/attempt, newest later."""
+    run_id = str(env.get("MAP_PIPELINE_RUN_ID") or "")
+    attempt_id = str(env.get("MAP_PIPELINE_ATTEMPT_ID") or "")
+    if not run_id or not attempt_id or "--city" not in cmd:
+        return []
+    city = Path(cmd[cmd.index("--city") + 1]).name
+    filename = f"pipeline_state.{run_id}.{attempt_id}.json"
+    candidates = []
+    state_root = str(env.get("MAP_PIPELINE_STATE_DIR") or "").strip()
+    if state_root:
+        candidates.append(Path(state_root) / filename)
+    candidates.append(_ROOT / "output" / city / ".pipeline_runs" / filename)
+    studio_root = Path(str(env.get("STUDIO_OUTPUT_DIR") or _ROOT / "output"))
+    candidates.append(studio_root / city / ".pipeline_runs" / filename)
+    snapshots = []
+    expected_stage_ids = [stage.id for stage in PIPELINE_STAGES]
+    for path in dict.fromkeys(candidates):
+        try:
+            if not path.is_file() or path.stat().st_size > 512 * 1024:
+                continue
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        stages = payload.get("stages")
+        actual_stage_ids = (
+            [str(item.get("id")) for item in stages]
+            if isinstance(stages, list) and
+            all(isinstance(item, dict) for item in stages)
+            else []
+        )
+        revision = payload.get("revision")
+        if (payload.get("schema_version") != "pipeline-ledger-v1" or
+                payload.get("contract_version") != CONTRACT_VERSION or
+                str(payload.get("run_id") or "") != run_id or
+                str(payload.get("attempt_id") or "") != attempt_id or
+                actual_stage_ids != expected_stage_ids or
+                not isinstance(revision, int) or isinstance(revision, bool) or
+                revision < 0):
+            continue
+        snapshots.append((payload, path))
+    return sorted(snapshots, key=lambda item: int(item[0]["revision"]))
+
+
+def _pipeline_ledger_snapshot(cmd: list[str], env: dict) -> dict | None:
+    """Read this attempt's small telemetry ledger for a live heartbeat.
+
+    Geometry and source data never travel through this channel.  Identity is
+    fixed by the API job, and a bounded JSON size prevents accidental upload
+    of a large or unrelated file.
+    """
+
+    records = _pipeline_ledger_records(cmd, env)
+    return records[-1][0] if records else None
+
+
+def _pipeline_ledger_artifact(cmd: list[str], env: dict) -> Path | None:
+    """Return the exact final Ledger file that must accompany an artifact."""
+
+    records = _pipeline_ledger_records(cmd, env)
+    return records[-1][1] if records else None
+
+
+def _pipeline_ledger_deliverables(
+        cmd: list[str], env: dict) -> list[Path] | None:
+    """Resolve only artifacts hash-bound to the current attempt Ledger."""
+
+    records = _pipeline_ledger_records(cmd, env)
+    if not records:
+        return None
+    ledger, ledger_path = records[-1]
+    output_dir = (
+        ledger_path.parent.parent
+        if ledger_path.parent.name == ".pipeline_runs"
+        else ledger_path.parent
+    ).resolve()
+    produced = []
+    for claim in ledger.get("artifacts") or []:
+        if not isinstance(claim, dict):
+            raise ValueError("Pipeline Ledger artifact claim is invalid")
+        relative = Path(str(claim.get("path") or ""))
+        if (not relative.parts or relative.is_absolute()
+                or ".." in relative.parts):
+            raise ValueError("Pipeline Ledger artifact path is invalid")
+        path = (output_dir / relative).resolve()
+        try:
+            path.relative_to(output_dir)
+        except ValueError as exc:
+            raise ValueError("Pipeline artifact escaped output directory") from exc
+        if not path.is_file():
+            raise ValueError(f"Pipeline artifact missing: {relative.as_posix()}")
+        if int(claim.get("size_bytes") or -1) != path.stat().st_size:
+            raise ValueError(f"Pipeline artifact size changed: {path.name}")
+        if str(claim.get("sha256") or "").lower() != sha256_file(path):
+            raise ValueError(f"Pipeline artifact hash changed: {path.name}")
+        produced.append(path)
+    produced.append(ledger_path)
+    unique = sorted(dict.fromkeys(produced), key=lambda path: path.name)
+    names = [path.name for path in unique]
+    if len(names) != len(set(names)):
+        raise ValueError(
+            "Pipeline 交付物存在同名文件，远端协议无法保持目录身份")
+    return unique
+
+
 def run_task(spec: dict, dry_run: bool = False, heartbeat=None,
              timeout_s: int = 7200,
              job_meta: dict | None = None) -> tuple[bool, str, list[Path]]:
@@ -193,7 +305,7 @@ def run_task(spec: dict, dry_run: bool = False, heartbeat=None,
         fake_png = out_dir / f"{city}_preview.png"
         fake_png.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 100)
         if slug:
-            fake_json = out_dir / "gallery.json"
+            fake_json = out_dir / "gallery_metadata.json"
             fake_json.write_text('{"styles": {}}', encoding="utf-8")
             produced = [fake_png, fake_json]
         else:
@@ -228,8 +340,12 @@ def run_task(spec: dict, dry_run: bool = False, heartbeat=None,
                 tail = "".join(output_lines[-200:])[-20_000:]
             if heartbeat is not None:
                 try:
-                    alive = heartbeat(tail, progress_from_log(
-                        {"status": "running", **(job_meta or {})}, tail))
+                    progress = progress_from_log(
+                        {"status": "running", **(job_meta or {})}, tail)
+                    ledger = _pipeline_ledger_snapshot(cmd, env)
+                    if ledger is not None:
+                        progress = {**progress, "pipeline_state": ledger}
+                    alive = heartbeat(tail, progress)
                 except Exception:
                     alive = False
                 failures = 0 if alive else failures + 1
@@ -253,8 +369,12 @@ def run_task(spec: dict, dry_run: bool = False, heartbeat=None,
         complete_tail = "".join(output_lines)[-20_000:]
     if heartbeat is not None and not lease_lost.is_set():
         try:
-            heartbeat(complete_tail, progress_from_log(
-                {"status": "running", **(job_meta or {})}, complete_tail))
+            progress = progress_from_log(
+                {"status": "running", **(job_meta or {})}, complete_tail)
+            ledger = _pipeline_ledger_snapshot(cmd, env)
+            if ledger is not None:
+                progress = {**progress, "pipeline_state": ledger}
+            heartbeat(complete_tail, progress)
         except Exception:
             pass
     wall = time.time() - t0
@@ -275,16 +395,56 @@ def run_task(spec: dict, dry_run: bool = False, heartbeat=None,
         "STUDIO_OUTPUT_DIR", Path(cwd) / "output"))
     out_dir = (output_root / "style_gallery" / slug
                if "--slug" in cmd else output_root / city)
-    produced = []
-    if out_dir.is_dir():
-        for ext in ("*.glb", "*.png", "*.3mf", "*.json"):
+    try:
+        produced = _pipeline_ledger_deliverables(cmd, env)
+    except ValueError as exc:
+        return result((False, str(exc), []))
+    if produced is None and out_dir.is_dir():
+        produced = []
+        # Human-readable pipeline audits are first-class deliverables for the
+        # administrator console.  Keep the machine-readable JSON and its HTML
+        # companion together when a remote worker finishes a job.
+        for ext in ("*.glb", "*.png", "*.3mf", "*.json", "*.html"):
             produced.extend(out_dir.glob(ext))
+    produced = produced or []
+    ledger_artifact = _pipeline_ledger_artifact(cmd, env)
+    if (ledger_artifact is not None and produced is not None
+            and ledger_artifact not in produced):
+        produced.append(ledger_artifact)
+    produced = sorted(dict.fromkeys(produced), key=lambda path: path.name)
+    if not produced:
+        return result((
+            False,
+            "生成进程退出成功但没有发现任何交付产物，拒绝标记任务完成",
+            [],
+        ))
+    produced_names = {path.name for path in produced}
+    mode = str(env.get("MAP_PIPELINE_MODE") or
+               (job_meta or {}).get("mode") or "")
+    if mode == "full":
+        required_missing = []
+        if not any(name.endswith(".3mf") for name in produced_names):
+            required_missing.append("3MF")
+        if not any(
+                name == "design_spec.json" or
+                (name.startswith("design_spec.") and name.endswith(".json"))
+                for name in produced_names):
+            required_missing.append("design_spec.json")
+        if ledger_artifact is None:
+            required_missing.append("attempt-scoped pipeline ledger")
+        if required_missing:
+            return result((
+                False,
+                "生成进程缺少正式交付物: " + ", ".join(required_missing),
+                [],
+            ))
     print(f"  [worker] 完成 ({wall:.0f}s), 产物 {len(produced)} 个")
     return result((True, "", produced))
 
 
 def upload_files(session: requests.Session, server: str, job_id: str,
-                 worker_id: str, files: list[Path], progress=None) -> list[dict]:
+                 attempt_id: str, worker_id: str, files: list[Path],
+                 progress=None) -> list[dict]:
     """上传产物到 server，返回 [{name, sha256, size}]。"""
     manifests = []
     total_files = len(files)
@@ -304,7 +464,8 @@ def upload_files(session: requests.Session, server: str, job_id: str,
         with open(f, "rb") as fh:
             r = session.post(
                 f"{server}/api/worker/upload",
-                params={"job_id": job_id, "worker_id": worker_id,
+                params={"job_id": job_id, "attempt_id": attempt_id,
+                        "worker_id": worker_id,
                         "filename": f.name, "sha256": h},
                 files={"file": (f.name, fh)},
                 timeout=120,
@@ -407,11 +568,27 @@ def main():
             continue
 
         job_id = data["job_id"]
-        spec = data.get("spec", {})
-        print(f"\n[worker] 接到任务 {job_id} ({data.get('mode')})")
+        attempt_id = str(data.get("attempt_id") or "").strip()
+        if not attempt_id:
+            # Do not execute work that cannot be bound to one retry attempt.
+            # A server old enough to omit this field is not protocol-safe.
+            print(f"[worker] 任务 {job_id} 缺少 attempt_id，拒绝执行")
+            time.sleep(args.poll_interval)
+            continue
+        # The lease response is the authority for execution identity.  Clone
+        # the spec and bind its process environment to the same attempt so a
+        # stale persisted spec cannot write a ledger for another retry.
+        spec = dict(data.get("spec") or {})
+        env_extra = dict(spec.get("env_extra") or {})
+        env_extra["MAP_PIPELINE_RUN_ID"] = job_id
+        env_extra["MAP_PIPELINE_ATTEMPT_ID"] = attempt_id
+        spec["env_extra"] = env_extra
+        print(f"\n[worker] 接到任务 {job_id} / {attempt_id} "
+              f"({data.get('mode')})")
 
         def send_heartbeat(log_tail: str, progress: dict | None = None) -> bool:
-            payload = {"job_id": job_id, "worker_id": args.worker_id,
+            payload = {"job_id": job_id, "attempt_id": attempt_id,
+                       "worker_id": args.worker_id,
                        "log_tail": log_tail}
             payload.update(progress or {})
             response = session.post(
@@ -430,8 +607,8 @@ def main():
         if ok and produced:
             try:
                 manifests = upload_files(
-                    session, server, job_id, args.worker_id, produced,
-                    progress=send_heartbeat)
+                    session, server, job_id, attempt_id, args.worker_id,
+                    produced, progress=send_heartbeat)
             except Exception as e:
                 ok = False
                 err = f"上传失败: {e}"
@@ -443,6 +620,7 @@ def main():
         try:
             r = session.post(f"{server}/api/worker/finish",
                               json={"job_id": job_id,
+                                    "attempt_id": attempt_id,
                                     "worker_id": args.worker_id,
                                     "ok": ok, "error": err, "files": manifests},
                               timeout=15)

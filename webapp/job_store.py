@@ -12,10 +12,32 @@ import sqlite3
 import time
 from pathlib import Path
 from typing import Iterable
+from uuid import uuid4
 
 
 def _json(value) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def renew_pipeline_attempt(job: dict) -> tuple[str, str]:
+    """Give a reclaimed execution a fresh, isolated pipeline attempt."""
+
+    previous = str(job.get("pipeline_attempt_id") or "")
+    current = uuid4().hex[:12]
+    job["pipeline_attempt_id"] = current
+    job.pop("pipeline_ledger", None)
+    job["progress_pct"] = 0
+    for key in (
+            "stage_code", "stage_label", "stage_detail", "stage_current",
+            "stage_total", "last_heartbeat"):
+        job.pop(key, None)
+    spec = dict(job.get("spec") or {})
+    env_extra = dict(spec.get("env_extra") or {})
+    env_extra["MAP_PIPELINE_RUN_ID"] = str(job.get("id") or "")
+    env_extra["MAP_PIPELINE_ATTEMPT_ID"] = current
+    spec["env_extra"] = env_extra
+    job["spec"] = spec
+    return previous, current
 
 
 def worker_can_run(job: dict, capabilities: dict | None, *,
@@ -225,12 +247,15 @@ class JobStore:
                     job["status"] = "pending"
                     job["retry_count"] = int(job.get("retry_count") or 0) + 1
                     job["retry_reason"] = "worker_lease_expired"
+                    previous_attempt, new_attempt = renew_pipeline_attempt(job)
                     job.pop("worker_id", None)
                     job.pop("lease_expires", None)
                     self.save_job(job, conn=conn)
                     self.append_event(job["id"], "requeued", {
                         "reason": "worker_lease_expired",
                         "retry_count": job["retry_count"],
+                        "previous_attempt_id": previous_attempt,
+                        "attempt_id": new_attempt,
                     }, conn=conn)
                     reclaimed.append(job)
                 if job.get("status") == "pending" and worker_can_run(

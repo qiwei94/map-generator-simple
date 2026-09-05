@@ -47,6 +47,9 @@ from aesthetic.metrics import compute_metrics
 from aesthetic.presets import get_preset, list_presets
 from aesthetic.rerun_harness import CityHarness
 from aesthetic.review_render import render_review_bundle
+from aesthetic.scene_character import analyze_scene_character
+from aesthetic.scene_policy import resolve_scene_policy
+from aesthetic.building_mass_strategy import apply_building_mass_to_layers
 
 
 # ─── 风格变体定义 ─────────────────────────────────────────────────────
@@ -56,11 +59,13 @@ STYLE_VARIANTS = {
     "baseline": {
         "label": "默认（规则引擎）",
         "desc": "城市画像自动推导的基线参数",
+        "activate_building_mass": True,
         "delta": {},
     },
     "block_fill": {
         "label": "饱满街区",
         "desc": "密度达标街区整块填充，体量感强",
+        "activate_building_mass": True,
         "delta": {
             "bo_mode": "block_fill",
             "building_density_threshold": ("set", 0.003),
@@ -146,7 +151,8 @@ LANDSCAPE_STYLE_VARIANTS = {
 }
 
 
-def classify_scene_type(profile, requested_prototype: str) -> str:
+def classify_scene_type(profile, requested_prototype: str,
+                        external_urban_evidence=None) -> str:
     """Classify the visual scene from measured density, relief and water.
 
     The requested prototype is only a hint.  This keeps a sparse lake/mountain
@@ -155,6 +161,21 @@ def classify_scene_type(profile, requested_prototype: str) -> str:
     """
     road_density = float(getattr(
         profile, "road_density_km_per_km2", 0.0) or 0.0)
+    external = (external_urban_evidence
+                if isinstance(external_urban_evidence, dict) else {})
+    distributed_city = False
+    if external.get("status") == "evidence_only":
+        estimated_buildings = (
+            float(profile.building_density)
+            * float(getattr(profile, "area_km2", 0.0) or 0.0))
+        distributed_city = (
+            float(external.get("urban_network_support") or 0.0) >= 0.62
+            and float(external.get("road_presence_cell_fraction") or 0.0)
+            >= 0.55
+            and estimated_buildings >= 200
+            and float(profile.building_density) >= 5.0
+            and road_density >= 2.0
+        )
     # Some cities have poor OSM building coverage but a dense metropolitan
     # road network.  Do not misclassify them as mountains merely because the
     # requested prototype mentions terrain (Mexico City regression).
@@ -163,7 +184,7 @@ def classify_scene_type(profile, requested_prototype: str) -> str:
         and road_density >= 12
         and profile.water_ratio < 0.30
     )
-    if requested_prototype == "skyline" or urban_network:
+    if requested_prototype == "skyline" or urban_network or distributed_city:
         return "urban"
     sparse = profile.building_density < 200
     nature_evidence = (
@@ -303,15 +324,48 @@ def make_contact_sheet(entries: list, out_path: str, tile: int = 640,
 # ─── 单城市画廊 ───────────────────────────────────────────────────────
 
 def generate_city_gallery(city: str, styles: list, out_root: str,
-                          use_cache: bool = True) -> dict:
+                          use_cache: bool = True,
+                          amap_salience_mode: str = "cache") -> dict:
     preset = get_preset(city)
     out_dir = os.path.join(out_root, city)
     os.makedirs(out_dir, exist_ok=True)
 
-    harness = CityHarness(preset, use_cache=use_cache)
+    harness = CityHarness(
+        preset,
+        use_cache=use_cache,
+        amap_salience_mode=amap_salience_mode,
+    )
     harness.prepare()
     seed = harness.seed_params()
-    scene_type = classify_scene_type(harness.profile, preset.prototype)
+    external_urban = dict(
+        harness.ctx.get("external_urban_evidence", {}) or {})
+    scene_type = classify_scene_type(
+        harness.profile, preset.prototype, external_urban)
+    scene_character = analyze_scene_character(
+        harness.ctx.get("roads"),
+        harness.ctx.get("buildings"),
+        harness.ctx.get("water"),
+        harness.ctx["bbox_local"],
+        grid_size=8,
+        elevation_grid=harness.ctx.get("elevation_grid"),
+        nozzle_real_m=(
+            harness.printer_profile.extrusion_width_mm
+            / max(float(harness.ctx["scale"]), 1e-12)
+        ),
+        model_span_mm=max(
+            float(harness.ctx["bbox_local"][2]
+                  - harness.ctx["bbox_local"][0]),
+            float(harness.ctx["bbox_local"][3]
+                  - harness.ctx["bbox_local"][1]),
+        ) * float(harness.ctx["scale"]),
+        external_urban=external_urban,
+    )
+    scene_character["metrics"]["external_urban"] = external_urban
+    scene_policy = resolve_scene_policy(
+        scene_character,
+        printer_profile=harness.printer_profile,
+        activation="active",
+    )
     from aesthetic.framing import analyze_water_framing
     framing = analyze_water_framing(
         harness.ctx.get("water"), harness.ctx["bbox_local"],
@@ -348,10 +402,13 @@ def generate_city_gallery(city: str, styles: list, out_root: str,
         },
         "framing": framing,
         "city_signature": city_signature,
+        "external_urban_evidence": external_urban,
+        "scene_policy": scene_policy,
         "seed_params": seed,
         "styles": {},
     }
     sheet_entries = []
+    building_mass_preparation_cache = {}
 
     for style in styles:
         spec = variants[style]
@@ -359,6 +416,24 @@ def generate_city_gallery(city: str, styles: list, out_root: str,
         t0 = time.time()
         try:
             layers = harness.run_round(params)
+            building_mass = {
+                "status": "inactive",
+                "reason": "style keeps its native building expression",
+            }
+            if spec.get("activate_building_mass"):
+                building_mass = apply_building_mass_to_layers(
+                    layers,
+                    harness.ctx.get("buildings"),
+                    harness.ctx.get("roads"),
+                    harness.ctx.get("water"),
+                    harness.ctx["bbox_local"],
+                    printer_profile=harness.printer_profile,
+                    scene_policy=scene_policy,
+                    topology_tier=int(
+                        (scene_policy.get("garden_city_strategy", {}) or {})
+                        .get("urban_mass_topology_tier") or 2),
+                    preparation_cache=building_mass_preparation_cache,
+                )
             feature_evidence = validate_gallery_feature_evidence(
                 layers, scene_type)
             visible_roads = gpd.GeoDataFrame(
@@ -395,6 +470,7 @@ def generate_city_gallery(city: str, styles: list, out_root: str,
             "road_roles": dict(getattr(layers, "road_roles", {}) or {}),
             "feature_evidence": feature_evidence,
             "signature_preservation": signature_preservation,
+            "building_mass_strategy": building_mass,
             "renders": {"topdown": os.path.basename(bundle["topdown"]),
                         "height": os.path.basename(bundle["height"])},
             "wall_s": round(wall, 1),
@@ -427,6 +503,11 @@ def main():
                                          "style_gallery"))
     ap.add_argument("--no-cache", action="store_true",
                     help="禁用 PipelineCache（全量重算）")
+    ap.add_argument(
+        "--amap-salience", choices=["off", "cache", "network"],
+        default="cache",
+        help="国内道路骨架/场景交叉证据；不替换 OSM 几何",
+    )
     args = ap.parse_args()
 
     cities = ([c.strip() for c in args.cities.split(",") if c.strip()]
@@ -442,7 +523,8 @@ def main():
     for city in cities:
         print(f"\n{'=' * 60}\n  Gallery: {city}\n{'=' * 60}")
         generate_city_gallery(city, styles, args.out_dir,
-                              use_cache=not args.no_cache)
+                              use_cache=not args.no_cache,
+                              amap_salience_mode=args.amap_salience)
     print(f"\n[gallery] all done in {time.time() - t0:.1f}s "
           f"-> {args.out_dir}")
 

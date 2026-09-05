@@ -1,0 +1,29 @@
+[
+  {
+    "city": "杭州",
+    "bbox_wgs84": [30.13, 120.01, 30.36, 120.29],
+    "gdf_cache": "cache/pipeline/hero_westlake_25km_aesthetic/gdfs_v1_9b176ce8b7bc.pkl",
+    "candidate_evidence": "output/building_quality_multi_city_v1/building_mass_mid_frequency_v23/westlake_25km/westlake_25km_building_mass_evidence.json",
+    "reference_observation": "output/reference_block_grammar_observer_v1/observations/杭州.json"
+  },
+  {
+    "city": "北京",
+    "bbox_wgs84": [39.7907, 116.2606, 40.0168, 116.5536],
+    "gdf_cache": "cache/pipeline/measurement_beijing_25km_aesthetic/gdfs_v1_120423065f90.pkl",
+    "candidate_evidence": "output/building_quality_multi_city_v1/building_mass_mid_frequency_v23/beijing_25km/beijing_25km_building_mass_evidence.json",
+    "reference_observation": "output/reference_block_grammar_observer_v1/observations/北京.json"
+  },
+  {
+    "city": "芝加哥",
+    "bbox_wgs84": [41.7650535, -87.8587977, 41.9911465, -87.5571755],
+    "gdf_cache": "cache/pipeline/showcase_chicago_25km_aesthetic/gdfs_v1_4bfeedffe027.pkl",
+    "candidate_evidence": "output/building_quality_multi_city_v1/building_mass_mid_frequency_v23/chicago_25km/chicago_25km_building_mass_evidence.json",
+    "reference_observation": "output/reference_block_grammar_observer_v1/observations/芝加哥.json"
+  },
+  {
+    "city": "苏州",
+    "bbox_wgs84": [31.175258, 120.53419, 31.401342, 120.79711],
+    "building_geojson_dir": "cache/tiles/jiangsu-latest.osm.pbf-aeea635b16/building_geometry_v1",
+    "reference_observation": "output/reference_block_grammar_observer_v1/observations/苏州.json"
+  }
+]

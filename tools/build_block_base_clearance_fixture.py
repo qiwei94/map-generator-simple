@@ -44,14 +44,17 @@ def main() -> int:
     # A production-sized XY plate with one transformed-city-block surrogate.
     # Source metres intentionally equal model millimetres in this fixture.
     terrain = trimesh.creation.box(extents=[196.0, 176.0, 4.0])
-    structural_line = LineString([(0.0, -40.0), (0.0, 40.0)])
+    surface_line = LineString([(-10.0, -40.0), (-10.0, 40.0)])
+    major_line = LineString([(10.0, -40.0), (10.0, 40.0)])
     block_mesh, evidence = build_deepseek_block_base_v3(
         [box(-30.0, -20.0, 30.0, 20.0)],
         terrain,
         scale=1.0,
         brick_style=False,
-        clearance_lines=[structural_line],
+        clearance_lines=[surface_line, major_line],
         final_clearance_mm=DEFAULT_PRINTER_PROFILE.final_block_base_gap_mm,
+        major_clearance_lines=[major_line],
+        surface_clearance_mm=DEFAULT_PRINTER_PROFILE.surface_road_gap_mm,
         return_clearance_evidence=True,
     )
     if block_mesh is None or evidence is None or not evidence["passed"]:
@@ -67,7 +70,10 @@ def main() -> int:
         "printer_profile_id": DEFAULT_PRINTER_PROFILE.profile_id,
         "configured_min_gap_mm": DEFAULT_PRINTER_PROFILE.min_gap_mm,
         "extrusion_width_mm": DEFAULT_PRINTER_PROFILE.extrusion_width_mm,
-        "derivation": "max(min_gap_mm, 2 * extrusion_width_mm)",
+        "surface_road_gap_mm": DEFAULT_PRINTER_PROFILE.surface_road_gap_mm,
+        "derivation": (
+            "local=min_gap_mm over continuous substrate; "
+            "major=max(min_gap_mm,2*extrusion_width_mm)"),
     })
     artifact = args.output_dir / "block_base_clearance_fixture.3mf"
     export_deepseek_3mf(
@@ -97,7 +103,7 @@ def main() -> int:
         bbox_wgs84=(0.0, 0.0, 0.001, 0.001),
         artifact_path=artifact,
         params={"fixture": True},
-        source_features={"roads": 1},
+        source_features={"roads": 2},
         printable_features={"block_base": evidence["output_polygons"]},
         block_base={
             "requested_mode": "flat",
@@ -112,7 +118,7 @@ def main() -> int:
                 "block_base_thickness_mm": BLOCK_BASE_THICKNESS_MM,
             },
         ),
-        road_roles={"structural_candidates": 1},
+        road_roles={"structural_candidates": 2},
         pipeline="tools/build_block_base_clearance_fixture.py",
     )
     write_design_spec(args.output_dir, spec)

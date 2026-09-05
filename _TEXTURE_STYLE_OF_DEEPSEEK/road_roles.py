@@ -3422,12 +3422,19 @@ def select_road_roles(
     scale_mm_per_m: float | None = None,
     road_width_multiplier: float = 2.0,
     min_colored_strip_mm: float = 0.63,
+    surface_road_gap_mm: float = 0.55,
+    major_road_gap_mm: float = 0.84,
     visual_salience_guide=None,
 ) -> RoadRoleSelection:
     """Return role-specific GeoDataFrames and auditable candidate counts."""
 
     if topology_tier not in ROAD_TIERS:
         raise ValueError(f"unsupported topology road tier: {topology_tier}")
+    for name, value in (
+            ("surface_road_gap_mm", surface_road_gap_mm),
+            ("major_road_gap_mm", major_road_gap_mm)):
+        if not math.isfinite(float(value)) or float(value) <= 0:
+            raise ValueError(f"{name} must be finite and positive")
     lines = _line_features(roads)
     structural_tier = resolve_structural_tier(topology_tier, nozzle_real_m)
     topology = _highway_subset(lines, set(ROAD_TIERS[topology_tier]))
@@ -3485,6 +3492,8 @@ def select_road_roles(
         "width_policy": {
             "road_width_multiplier": float(road_width_multiplier),
             "min_colored_strip_mm": float(min_colored_strip_mm),
+            "surface_road_gap_mm": float(surface_road_gap_mm),
+            "major_road_gap_mm": float(major_road_gap_mm),
             "class_floor_factors": dict(_WIDTH_FACTORS),
         },
         "ink_budget": ink_budget,

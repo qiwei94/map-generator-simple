@@ -1,5 +1,6 @@
 import pandas as pd
 import pytest
+import geopandas as gpd
 from shapely.geometry import box
 
 from _TEXTURE_STYLE_OF_DEEPSEEK._landmark import LandmarkCategory
@@ -7,6 +8,7 @@ from _TEXTURE_STYLE_OF_DEEPSEEK._layer_preprocess import (
     BUILDING_HEIGHT_ROLE_POLICY_VERSION,
     _apply_subtraction_and_filter,
     _resolve_building_height_role,
+    _extract_BL,
 )
 
 
@@ -28,7 +30,7 @@ def _height(row, *, height, threshold=50.0,
 
 
 def test_policy_version_is_explicit():
-    assert BUILDING_HEIGHT_ROLE_POLICY_VERSION == "identity-anchor-background-v2"
+    assert BUILDING_HEIGHT_ROLE_POLICY_VERSION == "identity-anchor-mass-v3"
 
 
 def test_identity_with_verified_height_uses_exact_z():
@@ -56,6 +58,55 @@ def test_reliable_anonymous_vertical_outlier_is_visual_anchor():
 
     assert role == "visual_anchor_exact"
     assert height_mm > 3.5
+
+
+def test_exact_height_is_capped_by_final_height_to_width_ratio():
+    height_mm, role = _resolve_building_height_role(
+        pd.Series({
+            "building": "yes",
+            "height_source": "osm_height",
+        }),
+        box(0, 0, 10, 100),
+        area_m2=1000.0,
+        est_height_m=220.0,
+        height_top_thr=80.0,
+        category=LandmarkCategory.GEOMETRIC,
+        hotspot=False,
+        height_ceiling_m=300.0,
+        layer_height_mm=0.12,
+        narrow_threshold=100.0,
+        narrow_penalty_factor=1.0,
+        scale_mm_per_m=0.01,
+        maximum_height_to_width_ratio=4.0,
+    )
+
+    assert role == "visual_anchor_exact"
+    assert height_mm == pytest.approx(0.36)
+
+
+def test_anonymous_background_retention_routes_to_mass_not_bl():
+    buildings = gpd.GeoDataFrame(
+        {
+            "building": ["yes"],
+            "est_height": [30.0],
+            "height_source": ["osm_levels"],
+            "geometry": [box(0, 0, 40, 40)],
+        },
+        geometry="geometry",
+    )
+    bl, bo, categories, roles = _extract_BL(
+        buildings,
+        [box(-100, -100, 100, 100)],
+        False,
+        0.0,
+        scale_mm_per_m=0.01,
+        minimum_independent_width_mm=0.63,
+    )
+
+    assert bl == []
+    assert len(bo) == 1
+    assert categories == []
+    assert roles == []
 
 
 def test_anonymous_level_estimates_share_quiet_background_band():

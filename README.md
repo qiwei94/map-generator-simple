@@ -132,6 +132,26 @@ python generate_city_legacy.py ... --amap-salience network
 Z 或布尔指令；完整职责与验收规则见
 [doc/composition_spec.md](doc/composition_spec.md)。
 
+同一阶段还会保存 `scene_character.json` 与 `scene_policy.json`。前者测量海岸/河轴/
+水网、网格/环线/放射结构、建筑宽度与高度集中度、DEM 起伏、峰/脊/火山口/峡谷/
+平原地貌和数据置信度；后者把证据解析为版本化的城市或自然景观表达、三值材料
+角色和取舍顺序。`scene-character-v6` / `scene-policy-v6` 还会按 8×8 局部网格
+区分连续城市肌理、混合边缘、疑似建筑缺口和真实开放空间。默认仍为
+`audit_only`，只进入 CompositionSpec/DesignSpec 审计链；`active` 仅允许已经显式
+启用并带面积回退保护的有限消费者改变 mesh。设计与启用门槛见
+[doc/scene_policy.md](doc/scene_policy.md)。
+
+同一输出目录还会生成 `pipeline_measurement_report.json` 和
+`pipeline_measurement_report.html`。它们无损保存输入、CityProfile、完整
+SceneCharacter、预处理角色、ScenePolicy、生成 outcomes 与 acceptance 字段，并用
+作用矩阵区分“已应用、部分应用、仅策略、未接线、待验收”。review/draft 正常出口也
+会保存报告；正式 3MF 导出后再补齐 mesh 和 artifact 证据。完整报告只供管理员查看。
+
+正式 3MF 成功导出后，还会生成按 S0–S11 压缩的 `pipeline_observation.json` 和
+`pipeline_observation.html`。S11 在项目验证器和切片检查完成前始终标记为
+`pending`，不会把“没有报错”当成验收成功。字段契约与 consumer 说明见
+[doc/current_generation_pipeline.md](doc/current_generation_pipeline.md)。
+
 ### 3. 启动 Studio
 ```bash
 python webapp/server.py            # 默认 8787 端口

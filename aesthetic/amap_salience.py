@@ -28,6 +28,7 @@ from _TEXTURE_STYLE_OF_DEEPSEEK._water_supplement import (
 PALETTE_VERSION = "amap-style7-salience-v1"
 TEMPLATE_POLICY_VERSION = "amap-spatial-template-v3"
 COMPARISON_VERSION = "amap-salience-comparison-v1"
+URBAN_EVIDENCE_VERSION = "amap-urban-evidence-v1"
 
 # Exact style-7 anchors observed in real Beijing tiles.  A small RGB distance
 # absorbs antialiasing without admitting coloured metro lines or green parks.
@@ -36,6 +37,7 @@ _ROAD_PALETTES = {
     "arterial": ((241, 207, 95), (225, 173, 4), (242, 200, 65)),
     "context": ((246, 227, 163), (248, 210, 145), (233, 178, 83)),
 }
+_GREEN_PALETTE = ((200, 228, 157),)
 
 
 @dataclass(frozen=True)
@@ -45,6 +47,7 @@ class SalienceMasks:
     road_arterial: np.ndarray
     road_context: np.ndarray
     evidence: dict
+    green: np.ndarray | None = None
 
     @property
     def road_all(self) -> np.ndarray:
@@ -193,6 +196,100 @@ class AmapSalienceGuide:
         }
 
 
+def summarize_amap_urban_evidence(
+    reference: SalienceMasks,
+    *,
+    grid_size: int = 8,
+) -> dict:
+    """Summarize whether AMap shows a spatially distributed urban network.
+
+    This is deliberately a scene-classification cross-check, not a source of
+    replacement geometry.  A single motorway crossing a mountain should only
+    occupy a few grid cells; a city network should appear throughout the land
+    portion of the frame.  Building truth still comes from project vector
+    sources, while this raster evidence prevents sparse OSM coverage from
+    being mistaken for wilderness.
+    """
+
+    if grid_size < 3 or grid_size > 16:
+        raise ValueError("grid_size must be between 3 and 16")
+    shape = reference.water.shape
+    if len(shape) != 2 or min(shape) < grid_size:
+        raise ValueError("AMap masks must be a usable 2D raster")
+
+    road = reference.road_all.astype(bool)
+    arterial = (reference.road_major | reference.road_arterial).astype(bool)
+    water = reference.water.astype(bool)
+    land = ~water
+    land_pixels = max(1, int(land.sum()))
+    road_land_ratio = float((road & land).sum()) / land_pixels
+    green = (reference.green.astype(bool)
+             if reference.green is not None
+             else np.zeros(shape, dtype=bool))
+    green_fraction = float((green & land).sum()) / land_pixels
+
+    road_presence = []
+    arterial_presence = []
+    usable_land_cells = 0
+    height, width = shape
+    for row in range(grid_size):
+        y0 = row * height // grid_size
+        y1 = (row + 1) * height // grid_size
+        for column in range(grid_size):
+            x0 = column * width // grid_size
+            x1 = (column + 1) * width // grid_size
+            cell_land = land[y0:y1, x0:x1]
+            if float(cell_land.mean()) < 0.20:
+                continue
+            usable_land_cells += 1
+            cell_area = max(1, int(cell_land.size))
+            road_ratio = float((road[y0:y1, x0:x1] & cell_land).sum()) / cell_area
+            arterial_ratio = float(
+                (arterial[y0:y1, x0:x1] & cell_land).sum()) / cell_area
+            # The minimum is below one antialiased road across a normal cell,
+            # but above isolated palette noise after component filtering.
+            road_presence.append(road_ratio >= 0.001)
+            arterial_presence.append(arterial_ratio >= 0.0005)
+
+    road_cell_fraction = (
+        float(np.mean(road_presence)) if road_presence else 0.0)
+    arterial_cell_fraction = (
+        float(np.mean(arterial_presence)) if arterial_presence else 0.0)
+
+    def ramp(value, low, high):
+        return float(np.clip((value - low) / max(high - low, 1e-9), 0.0, 1.0))
+
+    # Spatial spread owns most of the score so one very thick expressway does
+    # not turn a natural scene into a city.  Ink is only corroborating evidence.
+    urban_support = (
+        0.58 * ramp(road_cell_fraction, 0.25, 0.70)
+        + 0.27 * ramp(arterial_cell_fraction, 0.10, 0.55)
+        + 0.15 * ramp(road_land_ratio, 0.008, 0.040)
+    )
+    return {
+        "version": URBAN_EVIDENCE_VERSION,
+        "status": "evidence_only",
+        "source": "amap_style7_cartographic_reference",
+        "grid_size": int(grid_size),
+        "usable_land_cells": int(usable_land_cells),
+        "water_fraction": round(float(water.mean()), 5),
+        "green_land_fraction": round(green_fraction, 5),
+        "road_land_ink_fraction": round(road_land_ratio, 5),
+        "road_presence_cell_fraction": round(road_cell_fraction, 5),
+        "arterial_presence_cell_fraction": round(
+            arterial_cell_fraction, 5),
+        "urban_network_support": round(float(urban_support), 5),
+        "constraint": (
+            "cross-source scene evidence only; never creates roads, building "
+            "geometry, mesh, Z values or booleans"
+        ),
+        "limitation": (
+            "AMap road styling measures cartographic urban spread, not legal "
+            "road class or authoritative building footprints"
+        ),
+    }
+
+
 def _palette_mask(rgb: np.ndarray, anchors, tolerance: float) -> np.ndarray:
     work = rgb.astype(np.int16)
     output = np.zeros(rgb.shape[:2], dtype=bool)
@@ -238,6 +335,12 @@ def extract_amap_salience_masks(
         mask &= ~water
         road_masks[name] = _remove_small_components(
             mask, min_road_component_pixels)
+    green = _palette_mask(rgb, _GREEN_PALETTE, 12.0)
+    green &= ~water
+    green &= ~(road_masks["major"]
+               | road_masks["arterial"]
+               | road_masks["context"])
+    green = _remove_small_components(green, min_road_component_pixels)
 
     pixels = float(rgb.shape[0] * rgb.shape[1])
     evidence = {
@@ -252,6 +355,7 @@ def extract_amap_salience_masks(
             float(road_masks["arterial"].sum()) / pixels, 6),
         "road_context_ratio": round(
             float(road_masks["context"].sum()) / pixels, 6),
+        "green_ratio": round(float(green.sum()) / pixels, 6),
         "warning": (
             "Style-7 colours express cartographic salience, not legal road "
             "classification or replacement geometry."
@@ -263,6 +367,7 @@ def extract_amap_salience_masks(
         road_arterial=road_masks["arterial"],
         road_context=road_masks["context"],
         evidence=evidence,
+        green=green,
     )
 
 

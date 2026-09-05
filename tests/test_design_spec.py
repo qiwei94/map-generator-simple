@@ -36,11 +36,18 @@ def test_full_design_spec_records_artifact_and_feature_evidence(tmp_path):
                     "visible_segments": 5},
         water_roles={"policy_version": "print-water-roles-v1",
                      "selected_groups": 2},
+        scene_policy={"policy_version": "scene-policy-v1",
+                      "archetype": "river_radial_lowrise"},
+        terrain={
+            "formal_qem_decimation": False,
+            "grid": {"method": "regular_raster_resample",
+                     "max_surface_edge_mm": 0.84},
+        },
     )
     path = write_design_spec(tmp_path, spec)
     saved = json.loads(open(path, encoding="utf-8").read())
 
-    assert saved["schema_version"] == "1.3"
+    assert saved["schema_version"] == "1.5"
     assert saved["artifact"]["filename"] == "model.3mf"
     assert saved["artifact"]["size_bytes"] == len(b"real-3mf-fixture")
     assert len(saved["artifact"]["sha256"]) == 64
@@ -55,6 +62,9 @@ def test_full_design_spec_records_artifact_and_feature_evidence(tmp_path):
     assert saved["evidence"]["building_height"]["store"]["fingerprint"] == "abc123"
     assert saved["evidence"]["building_height"]["mapping"]["policy_version"] == (
         "city-relative-log-layer-v1")
+    assert saved["scene_policy"]["archetype"] == "river_radial_lowrise"
+    assert saved["terrain"]["formal_qem_decimation"] is False
+    assert saved["terrain"]["grid"]["max_surface_edge_mm"] == 0.84
 
 
 def test_design_spec_serializes_printability_report(tmp_path):
@@ -73,6 +83,21 @@ def test_design_spec_serializes_printability_report(tmp_path):
                             encoding="utf-8").read())
     assert saved["printability"]["printer_profile"]["nozzle_diameter_mm"] == 0.4
     assert saved["printability"]["derived_xy_real_m"]["nozzle_diameter"] == 50.0
+
+
+def test_disabled_vegetation_is_source_evidence_not_printable_evidence():
+    layers = SimpleNamespace(
+        BL=[], BO=[], VL=[1, 2], VO=[1, 2, 3], WL=[], WO=[],
+        block_base=[], roads_lines=[],
+    )
+
+    enabled = layer_evidence(layers)
+    disabled = layer_evidence(layers, vegetation_enabled=False)
+
+    assert enabled["vegetation_landmarks"] == 2
+    assert enabled["vegetation_polygons"] == 3
+    assert disabled["vegetation_landmarks"] == 0
+    assert disabled["vegetation_polygons"] == 0
 
 
 @pytest.mark.parametrize("bbox", [

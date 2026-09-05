@@ -206,6 +206,7 @@ class TestOsmiumBinaryOverride:
         assert fetcher.osmium_available
         assert command[0] == sys.executable
         assert command[1].endswith("tools/osmium_pyosmium.py")
+        assert fetcher.osmium_backend_name() == "portable_pyosmium"
 
     def test_homebrew_standard_path_wins_when_worker_path_is_minimal(
             self, monkeypatch, tmp_path):
@@ -224,6 +225,7 @@ class TestOsmiumBinaryOverride:
 
         assert fetcher.osmium_available
         assert fetcher._get_osmium_command() == [str(executable)]
+        assert fetcher.osmium_backend_name() == "native_osmium"
 
     def test_portable_export_budget_handles_dense_road_extract(self):
         portable = [sys.executable, "/repo/tools/osmium_pyosmium.py"]

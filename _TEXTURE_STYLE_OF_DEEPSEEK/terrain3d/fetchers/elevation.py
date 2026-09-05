@@ -11,6 +11,8 @@ import logging
 import math
 import os
 import gzip
+import hashlib
+import importlib.util
 import zipfile
 import io
 import time
@@ -25,6 +27,37 @@ from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.config import CACHE_TTL_SECONDS, selec
 from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.utils import cache as cache_mgr
 
 logger = logging.getLogger(__name__)
+
+
+class ElevationDataError(RuntimeError):
+    """Raised when a DEM grid exists syntactically but has no usable signal."""
+
+
+def require_usable_elevation_grid(
+    grid: np.ndarray,
+    *,
+    source: str,
+    reject_all_zero: bool = True,
+) -> np.ndarray:
+    """Validate DEM identity before it may be cached or called ``ready``.
+
+    Zero-valued cells are valid around coasts, and negative elevations are
+    valid below sea level.  What is rejected is a grid with no finite samples
+    or a grid whose *entire* finite signal is zero, the historical signature
+    of an all-NaN source silently converted into a flat cache entry.
+    """
+
+    value = np.asarray(grid)
+    if value.ndim != 2 or value.size == 0:
+        raise ElevationDataError(
+            f"{source} returned an invalid DEM shape {value.shape!r}")
+    finite = value[np.isfinite(value)]
+    if finite.size == 0:
+        raise ElevationDataError(f"{source} returned no finite DEM samples")
+    if reject_all_zero and np.all(finite == 0):
+        raise ElevationDataError(
+            f"{source} returned an all-zero DEM with no terrain signal")
+    return value
 
 # Project-local DEM cache (populated by tools/manage_dem.py).
 # Keep separate from `_CACHE_DIR` (system cache) so users can ship a project
@@ -154,6 +187,16 @@ def _download_tile(lat: int, lon: int) -> str:
     )
     if os.path.exists(project_local):
         return project_local
+
+    # Historical downloads live in the repository-level ``cache/srtm``.
+    # ``select_cache_path`` may now resolve to the package-local cache, so
+    # ignoring this still-valid store caused an all-NaN grid followed by a
+    # prohibitively large Open Elevation request even though the exact HGT
+    # tile was already present on disk.
+    legacy_project_local = os.path.join(
+        _PROJECT_ROOT, "cache", "srtm", filename)
+    if os.path.exists(legacy_project_local):
+        return legacy_project_local
 
     os.makedirs(_CACHE_DIR, exist_ok=True)
     local_path = os.path.join(_CACHE_DIR, filename)
@@ -375,13 +418,101 @@ def _fetch_elevation_grid_from_srtm(south: float, west: float, north: float,
 
 # ==================== Main Grid Fetcher ====================
 
+ELEVATION_GRID_CACHE_VERSION = "physical-smoothing-v3"
+
+# DEM denoising is a source-quality operation, not an art-direction knob.  A
+# sigma expressed only in grid cells changes its real-world meaning whenever
+# the requested resolution changes.  Keep the legacy cell value as an upper
+# bound, but never blur more than this physical distance.
+ELEVATION_SMOOTHING_MAX_METERS = 60.0
+
+
+def _grid_spacing_m(south: float, west: float, north: float, east: float,
+                    shape: tuple[int, int]) -> tuple[float, float]:
+    """Approximate north/south and east/west spacing of a WGS84 grid."""
+    rows, cols = shape
+    mid_lat_rad = math.radians((south + north) * 0.5)
+    lat_m = abs(north - south) * 111_320.0 / max(1, rows - 1)
+    lon_m = (
+        abs(east - west) * 111_320.0 * max(0.01, abs(math.cos(mid_lat_rad)))
+        / max(1, cols - 1)
+    )
+    return float(lat_m), float(lon_m)
+
+
+def _resolved_smoothing_sigma(
+    requested_sigma_cells: float,
+    *,
+    south: float,
+    west: float,
+    north: float,
+    east: float,
+    shape: tuple[int, int],
+) -> tuple[float, float, float]:
+    """Resolve a stable, physically bounded Gaussian smoothing radius.
+
+    Returns ``(sigma_cells, representative_cell_m, sigma_m)``.  The physical
+    cap prevents a coarse cache grid from turning the legacy ``2.5`` setting
+    into a 200+ metre low-pass filter.
+    """
+    requested = max(0.0, float(requested_sigma_cells))
+    lat_m, lon_m = _grid_spacing_m(south, west, north, east, shape)
+    positive = [value for value in (lat_m, lon_m) if value > 0]
+    cell_m = float(sum(positive) / len(positive)) if positive else 0.0
+    if requested <= 0.0 or cell_m <= 0.0:
+        return 0.0, cell_m, 0.0
+    sigma_cells = min(requested, ELEVATION_SMOOTHING_MAX_METERS / cell_m)
+    # Preserve the historical guard against excessive kernels on tiny grids.
+    sigma_cells = min(sigma_cells, (shape[0] + shape[1]) / 200.0)
+    sigma_cells = max(0.0, float(sigma_cells))
+    return sigma_cells, cell_m, sigma_cells * cell_m
+
+
+def _smooth_elevation_grid(
+    grid: np.ndarray,
+    *,
+    south: float,
+    west: float,
+    north: float,
+    east: float,
+    requested_sigma_cells: float,
+) -> tuple[np.ndarray, dict]:
+    """Apply the one allowed DEM smoothing pass and return its evidence."""
+    sigma, cell_m, sigma_m = _resolved_smoothing_sigma(
+        requested_sigma_cells,
+        south=south,
+        west=west,
+        north=north,
+        east=east,
+        shape=grid.shape,
+    )
+    if sigma > 0.0:
+        grid = gaussian_filter(grid, sigma=sigma, mode="nearest")
+    evidence = {
+        "requested_sigma_cells": float(requested_sigma_cells),
+        "resolved_sigma_cells": float(sigma),
+        "representative_cell_m": float(cell_m),
+        "resolved_sigma_m": float(sigma_m),
+        "max_sigma_m": float(ELEVATION_SMOOTHING_MAX_METERS),
+        "passes": 1 if sigma > 0.0 else 0,
+    }
+    return grid, evidence
+
 def _grid_cache_path(south: float, west: float, north: float, east: float,
                      resolution: int) -> str:
     """Generate cache file path for an elevation grid."""
+    from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.config import (
+        ELEVATION_SMOOTHING_SIGMA,
+    )
     cache_base = select_cache_path(10)  # 预估网格缓存约10MB
     cache_dir = os.path.join(cache_base, "grids")
     os.makedirs(cache_dir, exist_ok=True)
-    key = f"{south:.6f}_{west:.6f}_{north:.6f}_{east:.6f}_{resolution}"
+    key = (
+        f"{ELEVATION_GRID_CACHE_VERSION}_"
+        f"s{float(ELEVATION_SMOOTHING_SIGMA):.3f}_"
+        f"sm{float(ELEVATION_SMOOTHING_MAX_METERS):.1f}_"
+        f"{south:.6f}_{west:.6f}_{north:.6f}_{east:.6f}_{resolution}"
+    )
     return os.path.join(cache_dir, f"elev_{key}.npy")
 
 
@@ -471,10 +602,18 @@ def fetch_elevation_grid(south: float, west: float, north: float, east: float,
         if cache_mgr.is_valid(cache_path, ttl_seconds):
             age_str = cache_mgr.format_age(cache_path)
             logger.info(f"Loading cached elevation grid ({age_str}): {cache_path}")
-            grid = np.load(cache_path)
-            logger.info(f"Cached grid: {grid.shape[0]}x{grid.shape[1]}, "
-                        f"Elevation: {np.nanmin(grid):.1f}m - {np.nanmax(grid):.1f}m")
-            return grid
+            try:
+                grid = require_usable_elevation_grid(
+                    np.load(cache_path), source=f"cached DEM {cache_path}")
+            except (OSError, ValueError, ElevationDataError) as exc:
+                logger.warning(
+                    "Ignoring unusable cached elevation grid %s: %s",
+                    cache_path, exc,
+                )
+            else:
+                logger.info(f"Cached grid: {grid.shape[0]}x{grid.shape[1]}, "
+                            f"Elevation: {np.nanmin(grid):.1f}m - {np.nanmax(grid):.1f}m")
+                return grid
 
     logger.info(f"Fetching elevation grid {rows}x{cols} "
                 f"({south:.4f},{west:.4f} -> {north:.4f},{east:.4f})")
@@ -485,9 +624,19 @@ def fetch_elevation_grid(south: float, west: float, north: float, east: float,
             elevation_file, south, west, north, east, rows, cols
         )
         grid = _fill_nodata(grid)
-        if ELEVATION_SMOOTHING_SIGMA > 0:
-            sigma = min(ELEVATION_SMOOTHING_SIGMA, (grid.shape[0] + grid.shape[1]) / 200.0)
-            grid = gaussian_filter(grid, sigma=sigma, mode="nearest")
+        grid, smoothing = _smooth_elevation_grid(
+            grid,
+            south=south, west=west, north=north, east=east,
+            requested_sigma_cells=ELEVATION_SMOOTHING_SIGMA,
+        )
+        if smoothing["passes"]:
+            logger.info(
+                "Applied elevation smoothing (sigma=%.3f cells / %.1fm)",
+                smoothing["resolved_sigma_cells"],
+                smoothing["resolved_sigma_m"],
+            )
+        grid = require_usable_elevation_grid(
+            grid, source=f"local DEM {elevation_file}")
         logger.info(f"Elevation range: {np.nanmin(grid):.1f}m - {np.nanmax(grid):.1f}m")
         return grid
 
@@ -545,10 +694,20 @@ def fetch_elevation_grid(south: float, west: float, north: float, east: float,
     grid = _fill_nodata(grid)
 
     # Smooth elevation to reduce blocky appearance from coarse DEM/API data
-    if ELEVATION_SMOOTHING_SIGMA > 0:
-        sigma = min(ELEVATION_SMOOTHING_SIGMA, (grid.shape[0] + grid.shape[1]) / 200.0)
-        grid = gaussian_filter(grid, sigma=sigma, mode="nearest")
-        logger.info(f"Applied elevation smoothing (sigma={sigma:.2f})")
+    grid, smoothing = _smooth_elevation_grid(
+        grid,
+        south=south, west=west, north=north, east=east,
+        requested_sigma_cells=ELEVATION_SMOOTHING_SIGMA,
+    )
+    if smoothing["passes"]:
+        logger.info(
+            "Applied elevation smoothing (sigma=%.3f cells / %.1fm)",
+            smoothing["resolved_sigma_cells"],
+            smoothing["resolved_sigma_m"],
+        )
+
+    grid = require_usable_elevation_grid(
+        grid, source="fetched elevation grid")
 
     # Cache the result
     cache_path = _grid_cache_path(south, west, north, east, resolution)
@@ -562,27 +721,117 @@ def fetch_elevation_grid(south: float, west: float, north: float, east: float,
 
 # ==================== Tile-level cache (Phase 2) ====================
 
-# 每块 0.05° 瓦片的网格点数（≈92m 采样，接近 SRTM3 精度）。
-# 跨请求复用：重叠/偏移请求只需拼接已缓存瓦片。
+# Legacy/default sample count for callers that use the private helpers
+# directly.  Production tiled fetches derive the per-tile resolution from the
+# requested full-grid resolution; this constant is no longer a fixed quality
+# ceiling.
 ELEV_TILE_RES = 61
+ELEV_TILE_CACHE_VERSION = "resolution-source-v3"
+ELEV_TILE_SAMPLING_VERSION = "regular-wgs84-nearest-v1"
 
 
-def _elev_tile_path(ix: int, iy: int) -> str:
+def _requested_tile_resolution(
+    resolution: int,
+    *,
+    ix0: int,
+    iy0: int,
+    ix1: int,
+    iy1: int,
+) -> int:
+    """Return samples per tile so the stitched long axis meets the request."""
+    requested = max(2, int(resolution))
+    tiles_x = max(1, ix1 - ix0 + 1)
+    tiles_y = max(1, iy1 - iy0 + 1)
+    intervals_per_tile = int(math.ceil(
+        (requested - 1) / max(tiles_x, tiles_y)))
+    return max(2, intervals_per_tile + 1)
+
+
+def _source_file_fingerprint(paths: list[str]) -> str:
+    """Cheap cache identity that changes when the installed DEM changes."""
+    digest = hashlib.sha256()
+    for path in sorted(paths):
+        stat = os.stat(path)
+        digest.update(os.path.abspath(path).encode("utf-8"))
+        digest.update(str(stat.st_size).encode("ascii"))
+        digest.update(str(stat.st_mtime_ns).encode("ascii"))
+    return digest.hexdigest()[:12]
+
+
+def _preferred_tile_source_identity(
+    south: float, west: float, north: float, east: float,
+) -> str:
+    """Resolve the local source identity before a raw tile cache lookup.
+
+    This deliberately performs no download.  If a source is installed later,
+    its identity changes and the previous lower-quality cache cannot mask it.
+    """
+    tile_lat_min = int(math.floor(south))
+    tile_lat_max = int(math.floor(math.nextafter(north, south)))
+    tile_lon_min = int(math.floor(west))
+    tile_lon_max = int(math.floor(math.nextafter(east, west)))
+
+    cop30_paths = [
+        _cop30_tile_path(lat, lon)
+        for lat in range(tile_lat_min, tile_lat_max + 1)
+        for lon in range(tile_lon_min, tile_lon_max + 1)
+    ]
+    if (cop30_paths and all(os.path.exists(path) for path in cop30_paths)
+            and importlib.util.find_spec("rasterio") is not None):
+        return f"cop30-{_source_file_fingerprint(cop30_paths)}"
+
+    srtm_paths = []
+    for lat in range(tile_lat_min, tile_lat_max + 1):
+        for lon in range(tile_lon_min, tile_lon_max + 1):
+            filename = _tile_filename(lat, lon)
+            candidates = (
+                os.path.join(DEM_CACHE_DIR, "srtm", _tile_dir(lat), filename),
+                os.path.join(_CACHE_DIR, filename),
+            )
+            existing = next((path for path in candidates
+                             if os.path.exists(path)), None)
+            if existing is not None:
+                srtm_paths.append(existing)
+    if srtm_paths:
+        sizes = {os.path.getsize(path) for path in srtm_paths}
+        if sizes == {_HGT_SIZE_1 * _HGT_SIZE_1 * 2}:
+            family = "srtm1"
+        elif sizes == {_HGT_SIZE_3 * _HGT_SIZE_3 * 2}:
+            family = "srtm3"
+        else:
+            family = "srtm-mixed"
+        return f"{family}-{_source_file_fingerprint(srtm_paths)}"
+    return "srtm-auto"
+
+
+def _elev_tile_path(ix: int, iy: int,
+                    resolution: int = ELEV_TILE_RES,
+                    source_identity: str = "auto",
+                    step: float = 0.05) -> str:
     """高程瓦片缓存路径（与全框 grids 缓存同目录下的 tiles/ 子目录）。"""
     cache_base = select_cache_path(10)
     d = os.path.join(cache_base, "grids", "tiles")
     os.makedirs(d, exist_ok=True)
-    return os.path.join(d, f"elevtile_{ix}_{iy}_{ELEV_TILE_RES}.npy")
+    # v1 could persist an all-zero fallback forever when DEM tiles were not
+    # installed yet.  Include the source policy in the key so installing a
+    # real local DEM cannot keep hitting those poisoned cache entries.
+    return os.path.join(
+        d,
+        f"elevtile_{ELEV_TILE_CACHE_VERSION}_{ELEV_TILE_SAMPLING_VERSION}_"
+        f"step{float(step):.6f}_{source_identity}_{ix}_{iy}_r{int(resolution)}.npy",
+    )
 
 
-def _compute_tile_elevation(ts: float, tw: float, tn: float, te: float) -> np.ndarray:
+def _compute_tile_elevation(ts: float, tw: float, tn: float, te: float,
+                            resolution: int = ELEV_TILE_RES) -> np.ndarray:
     """单瓦片高程网格（row0=south, col0=west）：不做平滑，只补缺。"""
     grid = _fetch_elevation_grid_from_cop30(ts, tw, tn, te,
-                                            ELEV_TILE_RES, ELEV_TILE_RES)
+                                            resolution, resolution)
     if grid is None or np.isnan(grid).sum() > grid.size * 0.5:
         grid = _fetch_elevation_grid_from_srtm(ts, tw, tn, te,
-                                               ELEV_TILE_RES, ELEV_TILE_RES)
-    return _fill_nodata(grid)
+                                               resolution, resolution)
+    return require_usable_elevation_grid(
+        _fill_nodata(grid), source=f"elevation tile {ts},{tw},{tn},{te}")
 
 
 def _stitch_tile_grids(tiles: dict, ix0: int, iy0: int,
@@ -601,7 +850,8 @@ def _stitch_tile_grids(tiles: dict, ix0: int, iy0: int,
 def fetch_elevation_grid_tiled(south: float, west: float, north: float, east: float,
                                resolution: int = 256,
                                step: float = None,
-                               use_cache: bool = True) -> np.ndarray:
+                               use_cache: bool = True,
+                               return_evidence: bool = False):
     """瓦片级高程取数：按 0.05° 网格瓦片缓存，拼接后返回量化框整框网格。
 
     与 fetch_elevation_grid 相同的网格约定（row0=south, col0=west）；
@@ -616,40 +866,92 @@ def fetch_elevation_grid_tiled(south: float, west: float, north: float, east: fl
     step = step or DEFAULT_TILE_STEP
     fs, fw, fn, fe = snap_bbox(south, west, north, east, step)
     ix0, iy0, ix1, iy1 = tile_range(fs, fw, fn, fe, step)
+    tile_resolution = _requested_tile_resolution(
+        resolution, ix0=ix0, iy0=iy0, ix1=ix1, iy1=iy1)
 
     tiles = {}
+    source_identities = {}
     n_hit = 0
     for iy in range(iy0, iy1 + 1):
         for ix in range(ix0, ix1 + 1):
-            p = _elev_tile_path(ix, iy)
+            ts, tw, tn, te = tile_bbox(ix, iy, step)
+            source_identity = _preferred_tile_source_identity(ts, tw, tn, te)
+            source_identities[(ix, iy)] = source_identity
+            p = _elev_tile_path(
+                ix, iy, tile_resolution, source_identity, step)
             if use_cache and os.path.exists(p):
                 try:
-                    tiles[(ix, iy)] = np.load(p)
+                    cached = require_usable_elevation_grid(
+                        np.load(p), source=f"cached elevation tile {p}")
+                    if cached.shape != (tile_resolution, tile_resolution):
+                        raise ElevationDataError(
+                            f"cached elevation tile {p} has shape "
+                            f"{cached.shape}, expected "
+                            f"{(tile_resolution, tile_resolution)}")
+                    tiles[(ix, iy)] = cached
                     n_hit += 1
                     continue
-                except Exception:
-                    pass
-            ts, tw, tn, te = tile_bbox(ix, iy, step)
-            g = _compute_tile_elevation(ts, tw, tn, te)
+                except (OSError, ValueError, ElevationDataError) as exc:
+                    logger.warning("Ignoring unusable elevation tile %s: %s", p, exc)
+            g = _compute_tile_elevation(
+                ts, tw, tn, te, tile_resolution)
+            if g.shape != (tile_resolution, tile_resolution):
+                raise ElevationDataError(
+                    f"computed elevation tile {(ix, iy)} has shape {g.shape}, "
+                    f"expected {(tile_resolution, tile_resolution)}")
             # 原子写；用文件句柄写避免 np.save 对字符串路径自动追加 .npy
             tmp_path = p + f".tmp{os.getpid()}"
             with open(tmp_path, 'wb') as fh:
                 np.save(fh, g)
             os.replace(tmp_path, p)
             tiles[(ix, iy)] = g
-    logger.info(f"Elevation tiles: {n_hit} hit / {len(tiles)} total")
+    logger.info(
+        "Elevation tiles: %d hit / %d total; %dx%d samples per tile",
+        n_hit, len(tiles), tile_resolution, tile_resolution,
+    )
 
     grid = _stitch_tile_grids(tiles, ix0, iy0, ix1, iy1)
 
-    if ELEVATION_SMOOTHING_SIGMA > 0:
-        sigma = min(ELEVATION_SMOOTHING_SIGMA, (grid.shape[0] + grid.shape[1]) / 200.0)
-        grid = gaussian_filter(grid, sigma=sigma, mode="nearest")
+    grid, smoothing = _smooth_elevation_grid(
+        grid,
+        south=fs, west=fw, north=fn, east=fe,
+        requested_sigma_cells=ELEVATION_SMOOTHING_SIGMA,
+    )
+    if smoothing["passes"]:
+        logger.info(
+            "Applied stitched elevation smoothing once "
+            "(sigma=%.3f cells / %.1fm)",
+            smoothing["resolved_sigma_cells"],
+            smoothing["resolved_sigma_m"],
+        )
 
-    return grid
+    grid = require_usable_elevation_grid(
+        grid, source="stitched elevation tile grid")
+    lat_spacing_m, lon_spacing_m = _grid_spacing_m(
+        fs, fw, fn, fe, grid.shape)
+    evidence = {
+        "cache_version": ELEV_TILE_CACHE_VERSION,
+        "sampling_version": ELEV_TILE_SAMPLING_VERSION,
+        "requested_resolution": int(resolution),
+        "tile_resolution": int(tile_resolution),
+        "tile_count": int(len(tiles)),
+        "cache_hits": int(n_hit),
+        "snapped_bbox_wgs84": [float(fs), float(fw), float(fn), float(fe)],
+        "stitched_shape": [int(grid.shape[0]), int(grid.shape[1])],
+        "effective_spacing_m": {
+            "latitude": float(lat_spacing_m),
+            "longitude": float(lon_spacing_m),
+        },
+        "source_identities": sorted(set(source_identities.values())),
+        "smoothing": smoothing,
+    }
+    return (grid, evidence) if return_evidence else grid
 
 
 def _fill_nodata(grid: np.ndarray) -> np.ndarray:
     """Fill NaN values in elevation grid using interpolation and median filter."""
+    grid = np.asarray(grid, dtype=np.float64).copy()
+    grid[~np.isfinite(grid)] = np.nan
     nan_mask = np.isnan(grid)
     nan_count = nan_mask.sum()
 
@@ -660,8 +962,8 @@ def _fill_nodata(grid: np.ndarray) -> np.ndarray:
     logger.info(f"Filling {nan_count}/{total} missing elevation values")
 
     if nan_count == total:
-        logger.warning("All elevation values are NaN, returning zeros")
-        return np.zeros_like(grid)
+        raise ElevationDataError(
+            "all elevation values are non-finite; refusing a flat zero DEM")
 
     rows, cols = grid.shape
     y_coords, x_coords = np.mgrid[0:rows, 0:cols]

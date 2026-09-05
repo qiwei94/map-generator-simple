@@ -10,12 +10,15 @@
     3. 地形用降采样 heightfield（默认 128²）+ 裙边，不追求 watertight
 
 消费 Stage 4.5 的 layers（与 3MF 同源，所见即所得的构图）。
+正式 pipeline 还必须显式传入 S8 的 TerrainSurfacePlan；预览地形
+只能从该不可变计划确定性降采样，不得再从原始 DEM 重算第二套 Z。
 """
 
 import time
 
 import numpy as np
 import trimesh
+from _TEXTURE_STYLE_OF_DEEPSEEK.config import DEFAULT_VEGETATION_ENABLED
 
 from _TEXTURE_STYLE_OF_DEEPSEEK.road_roles import (
     resolve_composed_road_width_m,
@@ -187,6 +190,83 @@ class _TerrainSampler:
         t = (self.grid[row, col] - self.zmin) / self.zrange
         return (self.z_base_mm
                 + (np.maximum(t, 0.0) ** self.z_gamma) * self.relief_mm_max)
+
+
+def _validate_surface_plan_context(plan, bbox_local, scale: float) -> None:
+    """Fail closed when preview coordinates do not describe ``plan``.
+
+    TerrainSurfacePlan is centered at the model origin.  Accepting a shifted
+    or differently-scaled bbox would make every draped layer sample the wrong
+    place while still carrying the right fingerprint, which is worse than a
+    visible failure.
+    """
+
+    xmin, ymin, xmax, ymax = (float(value) for value in bbox_local)
+    width_m = xmax - xmin
+    height_m = ymax - ymin
+    tolerance_m = max(1e-6, max(plan.width_m, plan.height_m) * 1e-9)
+    if abs(width_m - float(plan.width_m)) > tolerance_m:
+        raise ValueError("terrain surface plan width does not match preview")
+    if abs(height_m - float(plan.height_m)) > tolerance_m:
+        raise ValueError("terrain surface plan height does not match preview")
+    if abs(float(scale) - float(plan.scale_mm_per_m)) > 1e-12:
+        raise ValueError("terrain surface plan scale does not match preview")
+    if abs(xmin + xmax) > 2.0 * tolerance_m:
+        raise ValueError("terrain surface plan preview bbox must be X-centered")
+    if abs(ymin + ymax) > 2.0 * tolerance_m:
+        raise ValueError("terrain surface plan preview bbox must be Y-centered")
+
+
+class _TerrainSurfacePlanSampler:
+    """Local-metre sampler backed only by an immutable TerrainSurfacePlan.
+
+    The KD-tree and eight-neighbour maximum exactly mirror
+    ``sample_terrain_surface_plan_z``.  They are cached here because GLB
+    draping can issue thousands of small sampling calls.
+    """
+
+    def __init__(self, plan, bbox_local, scale: float):
+        from scipy.spatial import cKDTree
+
+        _validate_surface_plan_context(plan, bbox_local, scale)
+        self.plan = plan
+        self.scale = float(scale)
+        self.surface_plan_fingerprint = str(plan.fingerprint)
+        z_grid = np.asarray(plan.surface_z_grid_mm, dtype=np.float64)
+        x_axis = np.linspace(
+            -plan.width_m * self.scale / 2.0,
+            plan.width_m * self.scale / 2.0,
+            z_grid.shape[1],
+        )
+        y_axis = np.linspace(
+            -plan.height_m * self.scale / 2.0,
+            plan.height_m * self.scale / 2.0,
+            z_grid.shape[0],
+        )
+        xx, yy = np.meshgrid(x_axis, y_axis)
+        self._tree = cKDTree(np.column_stack([xx.ravel(), yy.ravel()]))
+        self._surface_z = z_grid.ravel()
+        self._neighbour_count = min(8, self._surface_z.size)
+
+    def z_mm(self, x, y) -> float:
+        return float(self.z_mm_vec(np.array([x]), np.array([y]))[0])
+
+    def z_mm_vec(self, xs, ys) -> np.ndarray:
+        xs = np.asarray(xs, dtype=np.float64)
+        ys = np.asarray(ys, dtype=np.float64)
+        if xs.shape != ys.shape:
+            raise ValueError("terrain sample x/y shapes must match")
+        shape = xs.shape
+        query_xy = np.column_stack([
+            xs.ravel() * self.scale,
+            ys.ravel() * self.scale,
+        ])
+        _distance, indices = self._tree.query(
+            query_xy, k=self._neighbour_count)
+        if self._neighbour_count == 1:
+            indices = indices[:, np.newaxis]
+        sampled = np.max(self._surface_z[indices], axis=1)
+        return sampled.reshape(shape)
 
 
 def _try_extrude(poly, height_m):
@@ -403,6 +483,122 @@ def _drape_lines(lines_with_width, sampler: _TerrainSampler, scale: float,
     return mesh
 
 
+def _closed_heightfield_mesh(xs_mm, ys_mm, surface_z_grid_mm,
+                             bottom_z_mm):
+    """Build the shared closed preview solid from already-resolved Z values."""
+
+    xs = np.asarray(xs_mm, dtype=np.float64)
+    ys = np.asarray(ys_mm, dtype=np.float64)
+    zn = np.asarray(surface_z_grid_mm, dtype=np.float64)
+    if xs.ndim != 1 or ys.ndim != 1 or len(xs) < 2 or len(ys) < 2:
+        raise ValueError("terrain preview axes must contain at least two points")
+    if zn.shape != (len(ys), len(xs)):
+        raise ValueError("terrain preview Z grid does not match its axes")
+    if not np.isfinite(zn).all():
+        raise ValueError("terrain preview Z grid must be finite")
+
+    ny, nx = zn.shape
+    xx, yy = np.meshgrid(xs, ys)
+    z_bot = float(bottom_z_mm)
+    n_top = ny * nx
+    top = np.column_stack([xx.ravel(), yy.ravel(), zn.ravel()])
+    idx = np.arange(n_top).reshape(ny, nx)
+
+    # ── 顶面（法线朝上）──
+    f_top = np.vstack([
+        np.column_stack([idx[:-1, :-1].ravel(), idx[1:, :-1].ravel(),
+                         idx[:-1, 1:].ravel()]),
+        np.column_stack([idx[:-1, 1:].ravel(), idx[1:, :-1].ravel(),
+                         idx[1:, 1:].ravel()]),
+    ])
+
+    # ── 边界环（从上方看绕一周，首尾不重复；行 0 = 南）──
+    ring = np.concatenate([
+        idx[0, :],
+        idx[1:ny - 1, nx - 1],
+        idx[ny - 1, ::-1],
+        idx[ny - 2:0:-1, 0],
+    ])
+    n_ring = len(ring)
+
+    # ── 裙边 + 平底──
+    bot_ring = np.column_stack([top[ring, 0], top[ring, 1],
+                                np.full(n_ring, z_bot)])
+    b0 = n_top
+    center_i = n_top + n_ring
+    center = np.array([[
+        (xs[0] + xs[-1]) / 2.0,
+        (ys[0] + ys[-1]) / 2.0,
+        z_bot,
+    ]])
+    i = np.arange(n_ring)
+    j = (i + 1) % n_ring
+    f_skirt = np.vstack([
+        np.column_stack([ring[i], ring[j], b0 + j]),
+        np.column_stack([ring[i], b0 + j, b0 + i]),
+    ])
+    f_bot = np.column_stack([np.full(n_ring, center_i), b0 + j, b0 + i])
+
+    verts = np.vstack([top, bot_ring, center])
+    faces = np.vstack([f_top, f_skirt, f_bot])
+    mesh = trimesh.Trimesh(vertices=verts, faces=faces, process=False)
+    mesh.fix_normals()
+    mesh.visual.vertex_colors = _COLORS["terrain"]
+    return mesh
+
+
+def _surface_plan_preview_grid(plan, grid_n=128):
+    """Return an exact, deterministic index subset of a semantic plan.
+
+    No interpolation, normalization, gamma, relief, or base-height decision is
+    permitted here.  Consequently every retained preview vertex has bitwise
+    identical Z to its S8 source cell.
+    """
+
+    source_z = np.asarray(plan.surface_z_grid_mm, dtype=np.float64)
+    if source_z.ndim != 2 or min(source_z.shape) < 2:
+        raise ValueError("terrain surface plan requires a 2D surface grid")
+    if int(grid_n) < 2:
+        raise ValueError("terrain preview grid_n must be at least two")
+    rows, cols = source_z.shape
+    row_indices = np.linspace(
+        0, rows - 1, min(int(grid_n), rows)).astype(np.int64)
+    col_indices = np.linspace(
+        0, cols - 1, min(int(grid_n), cols)).astype(np.int64)
+    x_full = np.linspace(
+        -plan.width_m * plan.scale_mm_per_m / 2.0,
+        plan.width_m * plan.scale_mm_per_m / 2.0,
+        cols,
+    )
+    y_full = np.linspace(
+        -plan.height_m * plan.scale_mm_per_m / 2.0,
+        plan.height_m * plan.scale_mm_per_m / 2.0,
+        rows,
+    )
+    subset = source_z[np.ix_(row_indices, col_indices)].copy()
+    evidence = {
+        "fingerprint": str(plan.fingerprint),
+        "sampling": "deterministic_index_subset",
+        "source_shape": [int(rows), int(cols)],
+        "preview_shape": [int(len(row_indices)), int(len(col_indices))],
+        "row_indices": row_indices.tolist(),
+        "column_indices": col_indices.tolist(),
+    }
+    return x_full[col_indices], y_full[row_indices], subset, evidence
+
+
+def _terrain_heightfield_from_surface_plan(plan, bbox_local, scale,
+                                           grid_n=128):
+    """Materialize a draft terrain solely from the S8 semantic surface."""
+
+    _validate_surface_plan_context(plan, bbox_local, scale)
+    xs, ys, surface_z, evidence = _surface_plan_preview_grid(plan, grid_n)
+    mesh = _closed_heightfield_mesh(
+        xs, ys, surface_z, bottom_z_mm=plan.terrain_base_z_mm)
+    mesh.metadata["terrain_surface_plan"] = evidence
+    return mesh
+
+
 def _terrain_heightfield(elevation_grid, bbox_local, scale, z_gamma,
                          relief_mm_max, thickness_mm=None, grid_n=128,
                          *, surface_base_mm=0.0, bottom_z_mm=None):
@@ -438,57 +634,11 @@ def _terrain_heightfield(elevation_grid, bbox_local, scale, z_gamma,
     ny, nx = zn.shape
     xs = np.linspace(xmin, xmax, nx) * scale
     ys = np.linspace(ymin, ymax, ny) * scale        # 行 0 = 南
-    xx, yy = np.meshgrid(xs, ys)
     if bottom_z_mm is None:
         if thickness_mm is None:
             raise ValueError("bottom_z_mm or thickness_mm is required")
         bottom_z_mm = -float(thickness_mm)
-    z_bot = float(bottom_z_mm)
-
-    n_top = ny * nx
-    top = np.column_stack([xx.ravel(), yy.ravel(), zn.ravel()])
-    idx = np.arange(n_top).reshape(ny, nx)
-
-    # ── 顶面（法线朝上）──
-    f_top = np.vstack([
-        np.column_stack([idx[:-1, :-1].ravel(), idx[1:, :-1].ravel(),
-                         idx[:-1, 1:].ravel()]),
-        np.column_stack([idx[:-1, 1:].ravel(), idx[1:, :-1].ravel(),
-                         idx[1:, 1:].ravel()]),
-    ])
-
-    # ── 底面：四个角就够（平面），避免重复网格 ──
-    # ── 边界环（从上方看绕一周，首尾不重复；行 0 = 南）──
-    ring = np.concatenate([
-        idx[0, :],                   # 南边：西 → 东
-        idx[1:ny - 1, nx - 1],       # 东边：南 → 北
-        idx[ny - 1, ::-1],           # 北边：东 → 西
-        idx[ny - 2:0:-1, 0],         # 西边：北 → 南
-    ])
-    n_ring = len(ring)
-
-    # ── 裙边：环上每点复制一份底部顶点 → 连续 quad 带（无缝）──
-    bot_ring = np.column_stack([top[ring, 0], top[ring, 1],
-                               np.full(n_ring, z_bot)])
-    b0 = n_top                       # 底部环起始索引
-    center_i = n_top + n_ring        # 底面中心点索引
-    center = np.array([[(xs[0] + xs[-1]) / 2, (ys[0] + ys[-1]) / 2, z_bot]])
-
-    i = np.arange(n_ring)
-    j = (i + 1) % n_ring             # 闭环
-    f_skirt = np.vstack([
-        np.column_stack([ring[i], ring[j], b0 + j]),
-        np.column_stack([ring[i], b0 + j, b0 + i]),
-    ])
-    # ── 底面：中心点扇形三角化 ──
-    f_bot = np.column_stack([np.full(n_ring, center_i), b0 + j, b0 + i])
-
-    verts = np.vstack([top, bot_ring, center])
-    faces = np.vstack([f_top, f_skirt, f_bot])
-    mesh = trimesh.Trimesh(vertices=verts, faces=faces, process=False)
-    mesh.fix_normals()
-    mesh.visual.vertex_colors = _COLORS["terrain"]
-    return mesh
+    return _closed_heightfield_mesh(xs, ys, zn, bottom_z_mm)
 
 
 _HILITE_COLOR = (226, 61, 61, 255)      # 标注红
@@ -638,16 +788,20 @@ def render_glb_preview(layers, ctx: dict, output_path: str,
                        water_gdf=None,
                        base_thickness_mm=None,
                        terrain_relief_mm=None,
-                       preview_quality="balanced") -> str:
+                       terrain_surface_plan=None,
+                       preview_quality="balanced",
+                       vegetation_enabled=DEFAULT_VEGETATION_ENABLED) -> str:
     """Draft GLB 导出主入口。
 
     Args:
         layers: preprocess_layers 产物（BL/BO/WL/WO/VL/VO/block_base/roads_lines）
         ctx: 需含 bbox_local（本地米）与 scale（mm/m）
         output_path: .glb 输出路径
-        elevation_grid: 可选 DEM 网格（None → 平面）
+        terrain_surface_plan: 正式 pipeline 必传；与 S8 同一不可变地形计划
+        elevation_grid: 仅供旧的独立草稿调用（None → 平面）
         markers: 可选 [(x_m, y_m), ...] 本地米坐标，附近最高处染红
         water_gdf: 可选已投影水体 GDF，LineString 大河按渲染宽度补面
+        vegetation_enabled: 植被覆盖层显式开关，与正式生成一致，默认关闭
     """
     # 函数级 import：吃 auto-params 运行时猴补丁
     from _TEXTURE_STYLE_OF_DEEPSEEK.config import (
@@ -666,25 +820,63 @@ def render_glb_preview(layers, ctx: dict, output_path: str,
     bbox_local = ctx["bbox_local"]
     scale = float(ctx["scale"])
     xmin, ymin, xmax, ymax = bbox_local
-    relief_mm_max = (TERRAIN_THICKNESS_MM if terrain_relief_mm is None
-                     else float(terrain_relief_mm))
-    slab_mm = (WATER_BASE_THICKNESS_MM if base_thickness_mm is None
-               else float(base_thickness_mm))
-    if not 0.4 <= slab_mm <= 3.0:
-        raise ValueError("base thickness must be between 0.4 and 3.0mm")
-    terrain_base_z = Z_WATER_BASE_MM + slab_mm
-
-    sampler = _TerrainSampler(elevation_grid, bbox_local, scale,
-                              Z_GAMMA, relief_mm_max, terrain_base_z)
     scene = trimesh.Scene()
 
-    # ── 地形 ──
-    scene.add_geometry(
-        _terrain_heightfield(elevation_grid, bbox_local, scale, Z_GAMMA,
-                             relief_mm_max, surface_base_mm=terrain_base_z,
-                             bottom_z_mm=Z_WATER_BASE_MM,
-                             grid_n=64 if fast else 128),
-        node_name="terrain")
+    # ── 地形：正式 pipeline 只消费 S8 的同一 surface plan ──
+    if terrain_surface_plan is not None:
+        conflicting = []
+        if elevation_grid is not None:
+            conflicting.append("elevation_grid")
+        if base_thickness_mm is not None:
+            conflicting.append("base_thickness_mm")
+        if terrain_relief_mm is not None:
+            conflicting.append("terrain_relief_mm")
+        if conflicting:
+            raise ValueError(
+                "terrain_surface_plan cannot be combined with legacy terrain "
+                "arguments: " + ", ".join(conflicting))
+        sampler = _TerrainSurfacePlanSampler(
+            terrain_surface_plan, bbox_local, scale)
+        terrain_mesh = _terrain_heightfield_from_surface_plan(
+            terrain_surface_plan,
+            bbox_local,
+            scale,
+            grid_n=64 if fast else 128,
+        )
+        scene.metadata["terrain_surface_plan_fingerprint"] = (
+            terrain_surface_plan.fingerprint)
+        print(
+            "  [glb] terrain surface plan: "
+            f"{terrain_surface_plan.fingerprint[:12]}… "
+            f"{terrain_mesh.metadata['terrain_surface_plan']['preview_shape']}"
+        )
+    else:
+        # Backward-compatible path for standalone gallery tools that have not
+        # joined the canonical S0–S11 pipeline.  The formal generator never
+        # enters this branch.
+        relief_mm_max = (
+            TERRAIN_THICKNESS_MM if terrain_relief_mm is None
+            else float(terrain_relief_mm))
+        slab_mm = (
+            WATER_BASE_THICKNESS_MM if base_thickness_mm is None
+            else float(base_thickness_mm))
+        if not 0.4 <= slab_mm <= 3.0:
+            raise ValueError("base thickness must be between 0.4 and 3.0mm")
+        terrain_base_z = Z_WATER_BASE_MM + slab_mm
+        sampler = _TerrainSampler(
+            elevation_grid, bbox_local, scale,
+            Z_GAMMA, relief_mm_max, terrain_base_z)
+        terrain_mesh = _terrain_heightfield(
+            elevation_grid,
+            bbox_local,
+            scale,
+            Z_GAMMA,
+            relief_mm_max,
+            surface_base_mm=terrain_base_z,
+            bottom_z_mm=Z_WATER_BASE_MM,
+            grid_n=64 if fast else 128,
+        )
+    scene.add_geometry(terrain_mesh, node_name="terrain")
 
     # ── 平板层（block_base / water / vegetation）──
     # 草稿几何简化容差：按区域宽度自适应（大区域粗一些，控制 GLB 体积）
@@ -705,6 +897,8 @@ def render_glb_preview(layers, ctx: dict, output_path: str,
          VEGETATION_THICKNESS_MM),
     ]
     for name, polys, z0, th in flat_specs:
+        if name == "vegetation" and not vegetation_enabled:
+            continue
         if not polys:
             continue
         mesh = _extrude_polys([(p, z0, th) for p in polys], sampler, scale,
@@ -813,10 +1007,16 @@ def render_glb_preview(layers, ctx: dict, output_path: str,
             scene.add_geometry(mesh, node_name="roads")
             print(f"  [glb] roads: {len(mesh.faces):,} faces")
 
-    # ── 建筑（BO 聚合高度 / BL 各自高度，压在 block_base 上）──
+    # ── 建筑（BO 可选双层城市质量 / BL 各自高度，压在 block_base 上）──
     bo_h = float(BUILDING_AGGREGATE_HEIGHT_MM)
-    bo_items = [(p, -Z_BUILDING_EMBED_MM, bo_h)
-                for p in _iter_polys(layers.BO)]
+    bo_heights = list(getattr(layers, "BO_heights", ()) or ())
+    if len(bo_heights) != len(layers.BO):
+        bo_heights = [bo_h] * len(layers.BO)
+    bo_items = [
+        (part, -Z_BUILDING_EMBED_MM, float(height))
+        for polygon, height in zip(layers.BO, bo_heights)
+        for part in _iter_polys([polygon])
+    ]
     bl_items = [(p, -Z_BUILDING_EMBED_MM, max(float(h), 0.5))
                 for p, h in layers.BL if p is not None and not p.is_empty]
     for name, items in (("buildings", bo_items), ("landmarks", bl_items)):

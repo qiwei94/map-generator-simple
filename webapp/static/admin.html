@@ -5,9 +5,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>旅程回忆 · 管理后台</title>
 <style>
-:root { --bg: #0f1117; --card: #1a1d27; --border: #2a2d3a; --text: #e0e0e0; --dim: #888; --accent: #e0a458; --green: #4caf50; --red: #e23d3d; --blue: #5b9bd5; }
+:root { --bg: #0f1117; --card: #1a1d27; --elev: #222631; --border: #2a2d3a; --text: #e0e0e0; --dim: #9296a2; --accent: #e0a458; --green: #72b58a; --red: #e26b5c; --blue: #6fa9dc; }
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body { background: var(--bg); color: var(--text); font: 14px/1.6 -apple-system, sans-serif; padding: 16px; }
+body > * { max-width: 1600px; margin-left: auto; margin-right: auto; }
 h1 { font-size: 18px; margin-bottom: 12px; }
 h1 span { color: var(--accent); }
 .stats { display: flex; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
@@ -22,6 +23,7 @@ th { background: #22252f; color: var(--dim); font-weight: 500; }
 .status.running { background: rgba(224,164,88,.15); color: var(--accent); }
 .status.done { background: rgba(76,175,80,.15); color: var(--green); }
 .status.failed { background: rgba(226,61,61,.15); color: var(--red); }
+.status.rejected { background: rgba(226,61,61,.15); color: var(--red); }
 .log-btn { background: none; border: 1px solid var(--border); color: var(--dim); padding: 2px 8px; border-radius: 4px; cursor: pointer; font-size: 11px; }
 .log-btn:hover { border-color: var(--accent); color: var(--accent); }
 .log-pre { background: #111; color: #aaa; padding: 8px; border-radius: 4px; font-size: 11px; max-height: 200px; overflow: auto; white-space: pre-wrap; margin-top: 4px; display: none; }
@@ -32,6 +34,51 @@ th { background: #22252f; color: var(--dim); font-weight: 500; }
 .section-title { margin: 28px 0 10px; font-size: 15px; }
 .quota-input { width: 78px; padding: 4px 6px; color: var(--text); background: #111; border: 1px solid var(--border); }
 .user-actions { display:flex; gap:5px; flex-wrap:wrap; }
+.pipeline-panel { margin-top: 28px; border: 1px solid var(--border); background: var(--card); }
+.pipeline-panel[hidden] { display: none; }
+.pipeline-head { padding: 18px 20px; border-bottom: 1px solid var(--border); display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
+.pipeline-kicker { color: var(--accent); font: 600 10px/1.2 ui-monospace, monospace; letter-spacing: .15em; text-transform: uppercase; }
+.pipeline-head h2 { margin-top: 5px; font-size: 22px; line-height: 1.25; }
+.pipeline-summary { margin-top: 4px; color: var(--dim); font-size: 12px; }
+.pipeline-actions { display: flex; gap: 8px; }
+.pipeline-layout { display: grid; grid-template-columns: minmax(270px, .62fr) minmax(520px, 1.38fr); min-height: 680px; }
+.pipeline-stages { border-right: 1px solid var(--border); padding: 8px 0; }
+.pipeline-stage { width: 100%; border: 0; border-bottom: 1px solid var(--border); background: transparent; color: var(--text); display: grid; grid-template-columns: 42px 1fr auto; gap: 10px; align-items: center; text-align: left; padding: 12px 16px; cursor: pointer; }
+.pipeline-stage:hover, .pipeline-stage.active { background: var(--elev); }
+.pipeline-stage.active { box-shadow: inset 3px 0 var(--accent); }
+.pipeline-stage .sid { color: var(--accent); font: 600 11px ui-monospace, monospace; }
+.pipeline-stage .stage-name { font-size: 13px; }
+.stage-state { color: var(--dim); font-size: 10px; white-space: nowrap; }
+.pipeline-stage.running .stage-state, .pipeline-stage.queued .stage-state { color: var(--accent); }
+.pipeline-stage.completed .stage-state { color: var(--green); }
+.pipeline-stage.failed .stage-state { color: var(--red); }
+.pipeline-stage.rejected .stage-state { color: var(--red); }
+.pipeline-detail { padding: 22px; min-width: 0; }
+.pipeline-detail-top { display: flex; justify-content: space-between; gap: 18px; align-items: flex-start; padding-bottom: 15px; border-bottom: 1px solid var(--border); }
+.pipeline-detail h3 { font-size: 20px; }
+.pipeline-detail .stage-time { color: var(--dim); font-size: 11px; text-align: right; }
+.io-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin: 18px 0; }
+.detail-block { min-width: 0; }
+.detail-block h4 { color: var(--dim); font-size: 10px; letter-spacing: .12em; text-transform: uppercase; margin-bottom: 7px; }
+.detail-block ul { padding-left: 18px; }
+.context-pre { background: #101218; border: 1px solid var(--border); padding: 14px; max-height: 430px; overflow: auto; white-space: pre-wrap; word-break: break-word; color: #bdc3ce; font: 11px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.artifact-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 9px; margin-bottom: 20px; }
+.artifact { min-width: 0; border: 1px solid var(--border); background: #151821; color: var(--text); text-decoration: none; padding: 9px; display: flex; flex-direction: column; gap: 5px; }
+.artifact:hover { border-color: var(--accent); }
+.artifact img { width: 100%; height: 112px; object-fit: cover; background: #0c0e13; }
+.artifact strong { font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.artifact small { color: var(--dim); font-size: 10px; }
+.pipeline-events { margin-top: 20px; }
+.event-row { display: grid; grid-template-columns: 145px 90px 1fr; gap: 10px; padding: 7px 0; border-bottom: 1px solid var(--border); font-size: 11px; }
+.event-row time, .event-row code { color: var(--dim); }
+.pipeline-empty { color: var(--dim); padding: 40px; text-align: center; }
+@media (max-width: 900px) {
+  .pipeline-layout { grid-template-columns: 1fr; }
+  .pipeline-stages { border-right: 0; border-bottom: 1px solid var(--border); }
+  .pipeline-stage { padding: 10px 12px; }
+  .io-grid { grid-template-columns: 1fr; }
+  .pipeline-head { flex-direction: column; }
+}
 </style>
 </head>
 <body>
@@ -39,9 +86,28 @@ th { background: #22252f; color: var(--dim); font-weight: 500; }
 <div class="notice" id="notice"></div>
 <div class="stats" id="stats"></div>
 <table>
-<thead><tr><th>ID</th><th>城市</th><th>模式</th><th>风格</th><th>状态</th><th>耗时</th><th>提交时间</th><th>日志</th></tr></thead>
+<thead><tr><th>ID</th><th>城市</th><th>模式</th><th>风格</th><th>状态</th><th>阶段</th><th>耗时</th><th>提交时间</th><th>内部观测</th></tr></thead>
 <tbody id="tbody"></tbody>
 </table>
+<section class="pipeline-panel" id="pipelinePanel" hidden>
+  <header class="pipeline-head">
+    <div>
+      <div class="pipeline-kicker">Internal generation observatory · admin only</div>
+      <h2 id="pipelineTitle">Pipeline 观测台</h2>
+      <div class="pipeline-summary" id="pipelineSummary">选择一个任务查看全过程</div>
+    </div>
+    <div class="pipeline-actions">
+      <button class="log-btn" id="pipelineRefresh" type="button">刷新观测</button>
+      <button class="log-btn" id="pipelineClose" type="button">关闭</button>
+    </div>
+  </header>
+  <div class="pipeline-layout">
+    <nav class="pipeline-stages" id="pipelineStages" aria-label="生成阶段"></nav>
+    <article class="pipeline-detail" id="pipelineDetail">
+      <div class="pipeline-empty">正在读取任务 Context 与产物…</div>
+    </article>
+  </div>
+</section>
 <h2 class="section-title">账号与月度额度</h2>
 <table>
 <thead><tr><th>邮箱</th><th>角色</th><th>状态</th><th>任务</th><th>已用 / 上限</th><th>管理</th></tr></thead>
@@ -49,6 +115,9 @@ th { background: #22252f; color: var(--dim); font-weight: 500; }
 </table>
 <script>
 let autoTimer = null;
+let selectedJobId = null;
+let selectedStageId = null;
+let pipelineReport = null;
 async function load() {
   try {
     const r = await fetch("/api/jobs?include_log=1");
@@ -78,15 +147,20 @@ async function load() {
         <td>${escHtml(j.mode)}</td>
         <td>${escHtml(j.style || "-")}</td>
         <td><span class="status ${escHtml(j.status)}">${escHtml(j.status)}</span></td>
-        <td>${j.elapsed_s}s</td>
+        <td>${escHtml(j.stage_label || "—")}</td>
+        <td>${formatDuration(j.elapsed_s)}</td>
         <td>${t}</td>
-        <td><button class="log-btn" onclick="toggleLog('${logId}')">查看</button>
+        <td><div class="user-actions">
+              <button class="log-btn" onclick="openPipeline('${escHtml(j.id)}')">Pipeline</button>
+              <button class="log-btn" onclick="toggleLog('${logId}')">日志</button>
+            </div>
             <pre class="log-pre" id="${logId}">${escHtml(j.log_tail || "(无日志)")}</pre></td>
       </tr>`;
     }).join("");
     await loadUsers();
+    if (selectedJobId) await loadPipeline(selectedJobId, false);
   } catch (e) {
-    document.getElementById("tbody").innerHTML = `<tr><td colspan="8" style="color:var(--red)">加载失败: ${e.message}</td></tr>`;
+    document.getElementById("tbody").innerHTML = `<tr><td colspan="9" style="color:var(--red)">加载失败: ${escHtml(e.message)}</td></tr>`;
     const notice = document.getElementById("notice");
     notice.style.display = "block";
     notice.innerHTML = `请先在<a href="/" target="_blank">产品页</a>使用管理员邮箱登录，再刷新本页。<br>${escHtml(e.message)}`;
@@ -126,9 +200,189 @@ function toggleLog(id) {
   const el = document.getElementById(id);
   el.style.display = el.style.display === "block" ? "none" : "block";
 }
+const STATUS_LABELS = {
+  queued: "排队", pending: "等待", running: "运行中", completed: "完成",
+  failed: "失败", rejected: "验收拒绝", not_applicable: "不适用",
+  pending_validation: "待正式验收", evidence_missing: "证据缺失",
+};
+function formatDuration(seconds) {
+  const value = Math.max(0, Number(seconds) || 0);
+  if (value < 60) return `${Math.round(value)}s`;
+  return `${Math.floor(value / 60)}m ${Math.round(value % 60)}s`;
+}
+function formatBytes(bytes) {
+  const value = Number(bytes) || 0;
+  if (value >= 1e6) return `${(value / 1e6).toFixed(1)} MB`;
+  if (value >= 1e3) return `${(value / 1e3).toFixed(1)} KB`;
+  return `${value} B`;
+}
+async function openPipeline(jobId) {
+  selectedJobId = jobId;
+  selectedStageId = null;
+  const url = new URL(location.href);
+  url.searchParams.set("job", jobId);
+  history.replaceState({}, "", url);
+  document.getElementById("pipelinePanel").hidden = false;
+  document.getElementById("pipelineDetail").innerHTML =
+    '<div class="pipeline-empty">正在读取任务 Context 与产物…</div>';
+  await loadPipeline(jobId, true);
+}
+async function loadPipeline(jobId, scroll) {
+  if (!jobId) return;
+  try {
+    const r = await fetch(`/api/admin/jobs/${encodeURIComponent(jobId)}/pipeline`);
+    if (!r.ok) {
+      const detail = await r.json().catch(() => ({}));
+      throw new Error(detail.detail || `HTTP ${r.status}`);
+    }
+    pipelineReport = await r.json();
+    selectedJobId = jobId;
+    if (!selectedStageId || !pipelineReport.stages.some(s => s.id === selectedStageId)) {
+      selectedStageId = pipelineReport.current_stage_id || "S0";
+    }
+    renderPipeline();
+    if (scroll) document.getElementById("pipelinePanel").scrollIntoView({behavior:"smooth", block:"start"});
+  } catch (error) {
+    document.getElementById("pipelinePanel").hidden = false;
+    document.getElementById("pipelineDetail").innerHTML =
+      `<div class="pipeline-empty" style="color:var(--red)">${escHtml(error.message)}</div>`;
+  }
+}
+function renderPipeline() {
+  const report = pipelineReport;
+  if (!report) return;
+  const job = report.job || {};
+  document.getElementById("pipelinePanel").hidden = false;
+  document.getElementById("pipelineTitle").textContent =
+    `${job.city_title || job.city || "任务"} · ${job.id}`;
+  document.getElementById("pipelineSummary").textContent =
+    `${job.mode || "—"} · ${job.status || "—"} · ${job.progress_pct || 0}% · ` +
+    `${formatDuration(job.elapsed_s)} · 当前 ${report.current_stage_id || "—"} · ` +
+    `${report.artifacts.length} 个产物 · ` +
+    `${report.state_source === "ledger" ? "契约状态" : report.state_source === "exact_ledger_missing" ? "精确 Ledger 缺失" : "兼容推断"}` +
+    `${report.ledger_identity ? ` · r${report.ledger_identity.revision}` : ""}`;
+  document.getElementById("pipelineSummary").title = report.integrity?.message || "";
+  document.getElementById("pipelineStages").innerHTML = report.stages.map(stage => `
+    <button type="button" class="pipeline-stage ${escHtml(stage.status)} ${stage.id === selectedStageId ? "active" : ""}"
+            data-stage-id="${escHtml(stage.id)}">
+      <span class="sid">${escHtml(stage.id)}</span>
+      <span class="stage-name">${escHtml(stage.name)}</span>
+      <span class="stage-state">${escHtml(STATUS_LABELS[stage.status] || stage.status)}</span>
+    </button>`).join("");
+  renderStageDetail(selectedStageId);
+}
+function renderStageDetail(stageId) {
+  if (!pipelineReport) return;
+  const stage = pipelineReport.stages.find(item => item.id === stageId) || pipelineReport.stages[0];
+  selectedStageId = stage.id;
+  document.querySelectorAll(".pipeline-stage").forEach(button => {
+    button.classList.toggle("active", button.dataset.stageId === stage.id);
+  });
+  const artifacts = (stage.artifacts || []).map(artifact => {
+    const preview = artifact.kind === "image"
+      ? `<img src="${escHtml(artifact.url)}" alt="${escHtml(artifact.name)}" loading="lazy">` : "";
+    return `<a class="artifact" href="${escHtml(artifact.url)}" target="_blank" rel="noopener">
+      ${preview}<strong>${escHtml(artifact.name)}</strong>
+      <small>${escHtml(artifact.kind)} · ${formatBytes(artifact.size_bytes)}</small>
+    </a>`;
+  }).join("");
+  const events = (pipelineReport.events || []).slice(-12).reverse().map(event => `
+    <div class="event-row">
+      <time>${escHtml(event.created_at ? new Date(event.created_at).toLocaleString("zh-CN") : "—")}</time>
+      <code>${escHtml(event.type || "event")}</code>
+      <span>${escHtml(JSON.stringify(event.data || {}))}</span>
+    </div>`).join("");
+  const timing = [stage.started_at && `开始 ${new Date(stage.started_at).toLocaleString("zh-CN")}`,
+                  stage.completed_at && `完成 ${new Date(stage.completed_at).toLocaleString("zh-CN")}`]
+    .filter(Boolean).join("<br>") || "尚无时间证据";
+  const requiredKeys = (stage.required_context_keys || [])
+    .map(key => `<code>${escHtml(key)}</code>`).join(" · ") || "无额外必需字段";
+  const handoff = stage.context_handoff || {};
+  const shortHash = value => value ? `${String(value).slice(0, 12)}…` : "—";
+  const handoffLabel = {
+    verified: "已验证",
+    root: "运行根输入",
+    pending: "尚未交接",
+    missing: "交接证据缺失",
+    mismatch: "哈希不一致",
+    unavailable: "无精确 Ledger",
+  }[handoff.status] || handoff.status || "未知";
+  const survival = stage.context && stage.context.feature_survival;
+  const survivalRows = survival && survival.roles
+    ? Object.entries(survival.roles).map(([role, item]) => `
+      <tr><td>${escHtml(role)}</td><td>${escHtml(item.source_count)}</td>
+      <td>${escHtml(item.final_count)}</td><td>${escHtml(item.status)}</td></tr>`).join("")
+    : "";
+  const survivalPanel = survivalRows ? `
+    <section class="detail-block"><h4>源要素非零存活门禁</h4>
+      <small>只证明来源语义族没有整体消失，不代表保留比例或视觉质量达标。</small>
+      <table><thead><tr><th>语义族</th><th>投影源数</th><th>最终层数</th><th>状态</th></tr></thead>
+      <tbody>${survivalRows}</tbody></table></section>` : "";
+  const runtimeFingerprintKeys = [
+    "final_layers_fingerprint",
+    "building_role_evidence_fingerprint",
+    "composition_spec_fingerprint",
+    "measurement_report_fingerprint",
+    "s7_review_fingerprint",
+    "mesh_bundle_fingerprint",
+    "mesh_summary_fingerprint",
+    "s8_materialization_fingerprint",
+    "geometry_gate_fingerprint",
+    "verified_mesh_bundle_fingerprint",
+    "artifact_bundle_fingerprint",
+  ];
+  const runtimeFingerprints = stage.context
+    ? runtimeFingerprintKeys.filter(key => stage.context[key]).map(key =>
+        `<code>${escHtml(key)}=${escHtml(shortHash(stage.context[key]))}</code>`).join(" · ")
+    : "";
+  const runtimeContext = stage.context && stage.context.domain_context_version
+    ? `<p>生产领域对象：<code>${escHtml(stage.context.domain_context_in || "—")}</code>
+        → <code>${escHtml(stage.context.domain_context_out || "—")}</code>
+        · ${escHtml(stage.context.domain_context_version)}</p>
+       ${runtimeFingerprints ? `<p>领域内容指纹：${runtimeFingerprints}</p>` : ""}`
+    : "";
+  document.getElementById("pipelineDetail").innerHTML = `
+    <div class="pipeline-detail-top">
+      <div><div class="pipeline-kicker">${escHtml(stage.id)} · ${escHtml(STATUS_LABELS[stage.status] || stage.status)}</div>
+        <h3>${escHtml(stage.name)}</h3></div>
+      <div class="stage-time">${timing}</div>
+    </div>
+    <div class="io-grid">
+      <section class="detail-block"><h4>输入</h4><ul>${(stage.input || []).map(v => `<li>${escHtml(v)}</li>`).join("")}</ul></section>
+      <section class="detail-block"><h4>输出</h4><ul>${(stage.output || []).map(v => `<li>${escHtml(v)}</li>`).join("")}</ul></section>
+    </div>
+    <section class="detail-block"><h4>Context 交接契约</h4>
+      <p><code>${escHtml(stage.context_in || "—")}</code> → <code>${escHtml(stage.context_out || "—")}</code></p>
+      <p>完成本 Stage 必须提供：${requiredKeys}</p>
+      <p>实际交接：<b>${escHtml(handoffLabel)}</b> · 输入 <code>${escHtml(shortHash(handoff.input_sha256))}</code>
+        · 前序输出 <code>${escHtml(shortHash(handoff.predecessor_output_sha256))}</code>
+        · 本级输出 <code>${escHtml(shortHash(handoff.output_sha256))}</code></p>
+      ${runtimeContext}
+      <small>状态来源：${escHtml(stage.state_source || "unknown")}；可视化只读，不回写生成参数。</small>
+    </section>
+    ${survivalPanel}
+    <section class="detail-block"><h4>本 Stage 产物</h4>
+      <div class="artifact-grid">${artifacts || '<div class="pipeline-empty">当前尚无可展示文件</div>'}</div></section>
+    <section class="detail-block"><h4>Context / 观测证据（只读）</h4>
+      <pre class="context-pre">${escHtml(JSON.stringify(stage.context || {}, null, 2))}</pre></section>
+    <section class="detail-block pipeline-events"><h4>最近持久化事件</h4>${events || '<div class="pipeline-empty">尚无事件</div>'}</section>`;
+}
+document.getElementById("pipelineStages").addEventListener("click", event => {
+  const button = event.target.closest("[data-stage-id]");
+  if (button) renderStageDetail(button.dataset.stageId);
+});
+document.getElementById("pipelineRefresh").onclick = () => loadPipeline(selectedJobId, false);
+document.getElementById("pipelineClose").onclick = () => {
+  selectedJobId = null; selectedStageId = null; pipelineReport = null;
+  document.getElementById("pipelinePanel").hidden = true;
+  const url = new URL(location.href); url.searchParams.delete("job");
+  history.replaceState({}, "", url);
+};
 function escHtml(s) { return String(s ?? "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/\"/g,"&quot;"); }
 load();
 autoTimer = setInterval(load, 5000);
+const initialJob = new URLSearchParams(location.search).get("job");
+if (initialJob && /^[a-zA-Z0-9]{6,16}$/.test(initialJob)) openPipeline(initialJob);
 </script>
 </body>
 </html>

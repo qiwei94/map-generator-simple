@@ -9,13 +9,35 @@
 - 评审锚定参考作品（city_demo）
 """
 
-from .presets import CityPreset, get_preset, list_presets
-from .loop import AestheticLoop, LoopResult
-
 __all__ = [
     "CityPreset",
     "get_preset",
     "list_presets",
     "AestheticLoop",
     "LoopResult",
+    "apply_building_height_hierarchy",
+    "apply_height_emphasis_zones",
 ]
+
+
+def __getattr__(name):
+    """Load the public loop API lazily.
+
+    Geometry preprocessing imports small bounded policy modules from this
+    package.  Eagerly importing the full rerun harness here creates a cycle
+    back into ``_layer_preprocess`` during a cold formal-generator start.
+    """
+
+    if name in {"CityPreset", "get_preset", "list_presets"}:
+        from . import presets
+        return getattr(presets, name)
+    if name in {"AestheticLoop", "LoopResult"}:
+        from . import loop
+        return getattr(loop, name)
+    if name == "apply_building_height_hierarchy":
+        from .building_height_hierarchy import apply_building_height_hierarchy
+        return apply_building_height_hierarchy
+    if name == "apply_height_emphasis_zones":
+        from .height_emphasis_zones import apply_height_emphasis_zones
+        return apply_height_emphasis_zones
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

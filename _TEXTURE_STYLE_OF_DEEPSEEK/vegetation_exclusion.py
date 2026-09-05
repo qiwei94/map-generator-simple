@@ -400,7 +400,155 @@ def build_vegetation_with_exclusions_manifold(vegetation_mesh: trimesh.Trimesh,
 from scipy.spatial import Delaunay
 from _TEXTURE_STYLE_OF_DEEPSEEK.block_base import _densify_ring
 
-_MAX_VEG_GRID_POINTS = 6000
+_MAX_VEG_GRID_POINTS = 120000
+
+
+def _triangulate_densified_polygon(
+    poly_mm: Polygon,
+    grid_step_mm: float,
+    max_surface_edge_mm: "float | None" = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Triangulate a polygon without bridging concavities or interior holes.
+
+    Drape vertices must be spatially dense: a boundary-only triangulation is
+    visually flat even when each vertex samples the terrain correctly.  This
+    helper inserts a regular interior grid, densifies every ring, then keeps
+    only Delaunay triangles that are fully covered by the source polygon.
+    The full-coverage test is important; a centroid-only test can retain a
+    triangle that crosses a narrow concavity or a hole.
+    """
+    if poly_mm.is_empty or poly_mm.area < 0.01:
+        return (np.empty((0, 2), dtype=np.float64),
+                np.empty((0, 3), dtype=np.int32))
+
+    effective_step = float(grid_step_mm)
+    estimated_pts = float(poly_mm.area / max(grid_step_mm ** 2, 1e-12))
+    if estimated_pts > _MAX_VEG_GRID_POINTS:
+        effective_step = float(
+            np.sqrt(poly_mm.area / _MAX_VEG_GRID_POINTS))
+
+    ring_points: list[np.ndarray] = []
+    for ring in [poly_mm.exterior, *poly_mm.interiors]:
+        coords = np.asarray(ring.coords, dtype=np.float64)[:, :2]
+        coords = _densify_ring(coords, effective_step)
+        if (len(coords) >= 2
+                and np.linalg.norm(coords[-1] - coords[0]) < 1e-8):
+            coords = coords[:-1]
+        if len(coords) >= 3:
+            ring_points.append(coords)
+    if not ring_points:
+        return (np.empty((0, 2), dtype=np.float64),
+                np.empty((0, 3), dtype=np.int32))
+
+    minx, miny, maxx, maxy = poly_mm.bounds
+    xs = np.arange(minx + effective_step * 0.5, maxx, effective_step)
+    ys = np.arange(miny + effective_step * 0.5, maxy, effective_step)
+    interior_pts = np.empty((0, 2), dtype=np.float64)
+    if len(xs) and len(ys):
+        gx, gy = np.meshgrid(xs, ys)
+        candidates = np.column_stack([gx.ravel(), gy.ravel()])
+        covered = np.asarray(
+            shapely.covers(poly_mm, shapely.points(candidates)), dtype=bool)
+        interior_pts = candidates[covered]
+
+    point_groups = [*ring_points]
+    if len(interior_pts):
+        point_groups.append(interior_pts)
+    all_pts = np.vstack(point_groups)
+    # Ring intersections and grid hits may produce exact duplicate vertices,
+    # which make scipy.spatial.Delaunay unstable.
+    all_pts = np.unique(np.round(all_pts, decimals=10), axis=0)
+    if len(all_pts) < 3:
+        return (np.empty((0, 2), dtype=np.float64),
+                np.empty((0, 3), dtype=np.int32))
+
+    tolerance = max(effective_step * 1e-8, 1e-9)
+    coverage_polygon = poly_mm.buffer(tolerance)
+    faces = np.empty((0, 3), dtype=np.int32)
+    refinement_limit = 32 if max_surface_edge_mm is not None else 1
+    refinement_maxima: list[float] = []
+    for _ in range(refinement_limit):
+        try:
+            simplices = Delaunay(all_pts).simplices
+        except Exception:
+            return (np.empty((0, 2), dtype=np.float64),
+                    np.empty((0, 3), dtype=np.int32))
+
+        triangle_polys = shapely.polygons(all_pts[simplices])
+        # A tiny numerical buffer accepts triangles whose vertices lie exactly
+        # on a ring while still rejecting any triangle that crosses a real
+        # hole or concavity.
+        keep = np.asarray(
+            shapely.covers(coverage_polygon, triangle_polys), dtype=bool)
+        faces = simplices[keep].astype(np.int32)
+        if len(faces):
+            kept_triangles = all_pts[faces]
+            twice_area = np.abs(
+                (kept_triangles[:, 1, 0] - kept_triangles[:, 0, 0])
+                * (kept_triangles[:, 2, 1] - kept_triangles[:, 0, 1])
+                - (kept_triangles[:, 1, 1] - kept_triangles[:, 0, 1])
+                * (kept_triangles[:, 2, 0] - kept_triangles[:, 0, 0])
+            )
+            min_twice_area = max(effective_step ** 2 * 1e-8, 1e-10)
+            faces = faces[twice_area > min_twice_area]
+        if len(faces) == 0 or max_surface_edge_mm is None:
+            break
+
+        face_triangles = all_pts[faces]
+        face_longest = np.maximum.reduce([
+            np.linalg.norm(
+                face_triangles[:, 0] - face_triangles[:, 1], axis=1),
+            np.linalg.norm(
+                face_triangles[:, 1] - face_triangles[:, 2], axis=1),
+            np.linalg.norm(
+                face_triangles[:, 2] - face_triangles[:, 0], axis=1),
+        ])
+        long_face_centroids = face_triangles[
+            face_longest > max_surface_edge_mm + 1e-6].mean(axis=1)
+        refinement_maxima.append(float(face_longest.max()))
+        edges = np.vstack([
+            faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]],
+        ])
+        edges = np.unique(np.sort(edges, axis=1), axis=0)
+        edge_lengths = np.linalg.norm(
+            all_pts[edges[:, 0]] - all_pts[edges[:, 1]], axis=1)
+        long_edges = edges[edge_lengths > max_surface_edge_mm + 1e-6]
+        if len(long_edges) == 0:
+            break
+
+        midpoints = (
+            all_pts[long_edges[:, 0]] + all_pts[long_edges[:, 1]]) * 0.5
+        midpoint_inside = np.asarray(
+            shapely.covers(coverage_polygon, shapely.points(midpoints)),
+            dtype=bool,
+        )
+        midpoints = midpoints[midpoint_inside]
+        refinement_points = np.vstack([
+            midpoints,
+            long_face_centroids,
+        ])
+        if len(refinement_points) == 0:
+            break
+        all_pts = np.unique(
+            np.round(np.vstack([all_pts, refinement_points]), decimals=10),
+            axis=0,
+        )
+
+    if max_surface_edge_mm is not None and len(faces):
+        triangles = all_pts[faces]
+        longest = np.maximum.reduce([
+            np.linalg.norm(triangles[:, 0] - triangles[:, 1], axis=1),
+            np.linalg.norm(triangles[:, 1] - triangles[:, 2], axis=1),
+            np.linalg.norm(triangles[:, 2] - triangles[:, 0], axis=1),
+        ])
+        actual = float(longest.max())
+        if actual > max_surface_edge_mm + 1e-4:
+            raise ValueError(
+                "vegetation triangulation exceeded max surface edge: "
+                f"{actual:.6f}mm > {max_surface_edge_mm:.6f}mm; "
+                f"iterations={len(refinement_maxima)}, "
+                f"maxima={refinement_maxima[-8:]}")
+    return all_pts, faces
 
 
 def _split_point_touching_topology(
@@ -510,134 +658,26 @@ def _polygon_to_draped_mesh(
     z_offset: float,
     thickness: float = VEGETATION_THICKNESS_MM,
     grid_step_m: float = 80.0,
+    max_surface_edge_mm: "float | None" = None,
 ) -> "trimesh.Trimesh | None":
     """Build a terrain-conforming vegetation plate for one polygon.
 
     Uses Delaunay triangulation + per-vertex terrain Z sampling so the plate
     follows mountain contours instead of being flat.
     """
-    from matplotlib.path import Path as MplPath
-
-    has_holes = len(poly.interiors) > 0
-
-    # Scale polygon exterior to mm
+    # Scale the complete polygon, including all interior rings, to mm.
     exterior_coords = np.array(poly.exterior.coords)[:, :2] * scale
-    poly_mm = Polygon(exterior_coords)
+    hole_coords = [
+        np.asarray(ring.coords, dtype=np.float64)[:, :2] * scale
+        for ring in poly.interiors
+    ]
+    poly_mm = Polygon(exterior_coords, hole_coords)
     if poly_mm.is_empty or poly_mm.area < 0.01:
         return None
-
-    # For polygons with holes, use earcut (handles holes natively)
-    if has_holes:
-        try:
-            from trimesh.creation import triangulate_polygon
-            hole_coords_mm = [np.array(h.coords)[:, :2] * scale for h in poly.interiors]
-            poly_with_holes_mm = Polygon(exterior_coords, hole_coords_mm)
-            verts_2d, faces_tri = triangulate_polygon(poly_with_holes_mm, engine="earcut")
-            if len(verts_2d) == 0 or len(faces_tri) == 0:
-                return None
-            all_pts = np.array(verts_2d, dtype=np.float64)
-            faces_top = np.array(faces_tri, dtype=np.int32)
-        except Exception:
-            return None
-    else:
-        # Adaptive grid step
-        grid_step_mm = grid_step_m * scale
-        minx, miny, maxx, maxy = poly_mm.bounds
-        effective_step = grid_step_mm
-        estimated_pts = poly_mm.area / (grid_step_mm ** 2)
-        if estimated_pts > _MAX_VEG_GRID_POINTS:
-            effective_step = np.sqrt(poly_mm.area / _MAX_VEG_GRID_POINTS)
-
-        # Interior grid points
-        xs = np.arange(minx + effective_step * 0.5, maxx, effective_step)
-        ys = np.arange(miny + effective_step * 0.5, maxy, effective_step)
-        if len(xs) == 0 or len(ys) == 0:
-            # Very small polygon — fall back to earcut
-            try:
-                from trimesh.creation import triangulate_polygon
-                verts_2d, faces_tri = triangulate_polygon(poly_mm, engine="earcut")
-                if len(verts_2d) == 0 or len(faces_tri) == 0:
-                    return None
-                all_pts = np.array(verts_2d, dtype=np.float64)
-                faces_top = np.array(faces_tri, dtype=np.int32)
-                all_pts, faces_top = _split_point_touching_topology(
-                    all_pts, faces_top)
-                n_total = len(all_pts)
-                # Sample terrain Z
-                tz = sample_terrain_z(terrain_mesh, all_pts[:, 0], all_pts[:, 1])
-                top_z = tz + z_offset
-                bot_z = tz + z_offset - thickness
-                top_verts = np.column_stack([all_pts[:, 0], all_pts[:, 1], top_z])
-                bot_verts = np.column_stack([all_pts[:, 0], all_pts[:, 1], bot_z])
-                vertices = np.vstack([top_verts, bot_verts])
-                faces_top_arr = faces_top
-                faces_bot_arr = np.column_stack([
-                    n_total + faces_top_arr[:, 0],
-                    n_total + faces_top_arr[:, 2],
-                    n_total + faces_top_arr[:, 1],
-                ])
-                # Boundary edges for side walls
-                edge_count: dict = {}
-                for fi in range(len(faces_top_arr)):
-                    a, b, c = int(faces_top_arr[fi, 0]), int(faces_top_arr[fi, 1]), int(faces_top_arr[fi, 2])
-                    for e in [(a, b), (b, c), (c, a)]:
-                        canon = (min(e), max(e))
-                        edge_count[canon] = edge_count.get(canon, 0) + 1
-                boundary_edges = []
-                for fi in range(len(faces_top_arr)):
-                    a, b, c = int(faces_top_arr[fi, 0]), int(faces_top_arr[fi, 1]), int(faces_top_arr[fi, 2])
-                    for e in [(a, b), (b, c), (c, a)]:
-                        canon = (min(e), max(e))
-                        if edge_count[canon] == 1:
-                            boundary_edges.append(e)
-                side_faces = []
-                for a, b in boundary_edges:
-                    ba, bb = n_total + a, n_total + b
-                    side_faces.append([a, ba, bb])
-                    side_faces.append([a, bb, b])
-                faces_arr = np.vstack([
-                    faces_top_arr,
-                    faces_bot_arr,
-                    np.array(side_faces, dtype=np.int32),
-                ])
-                return trimesh.Trimesh(vertices=vertices, faces=faces_arr, process=False)
-            except Exception:
-                return None
-
-        gx, gy = np.meshgrid(xs, ys)
-        grid_pts = np.column_stack([gx.ravel(), gy.ravel()])
-
-        mpl_path = MplPath(np.array(poly_mm.exterior.coords))
-        mask = mpl_path.contains_points(grid_pts)
-        interior_pts = grid_pts[mask]
-
-        # Densify boundary
-        boundary_coords = _densify_ring(exterior_coords, effective_step)
-        if len(boundary_coords) >= 2 and np.linalg.norm(boundary_coords[-1] - boundary_coords[0]) < 1e-6:
-            boundary_coords = boundary_coords[:-1]
-        if len(boundary_coords) < 3:
-            return None
-
-        # Combine boundary + interior
-        if len(interior_pts) > 0:
-            all_pts = np.vstack([boundary_coords, interior_pts])
-        else:
-            all_pts = boundary_coords.copy()
-        if len(all_pts) < 3:
-            return None
-
-        # Delaunay triangulation + centroid filter
-        try:
-            tri = Delaunay(all_pts)
-        except Exception:
-            return None
-
-        simplices = tri.simplices
-        centroids = all_pts[simplices].mean(axis=1)
-        centroid_mask = mpl_path.contains_points(centroids)
-        faces_top = simplices[centroid_mask].astype(np.int32)
-        if len(faces_top) == 0:
-            return None
+    all_pts, faces_top = _triangulate_densified_polygon(
+        poly_mm, grid_step_m * scale, max_surface_edge_mm)
+    if len(all_pts) == 0 or len(faces_top) == 0:
+        return None
 
     # Point-touching islands need independent indices before side walls are
     # added; otherwise their shared vertical edge becomes non-manifold.
@@ -697,6 +737,7 @@ def build_deepseek_vegetation_v3(
     VO_polys: List[Polygon],
     terrain_mesh: trimesh.Trimesh,
     scale: float,
+    max_surface_edge_mm: "float | None" = None,
 ) -> trimesh.Trimesh:
     """V3 vegetation builder — terrain-draped plates (per-vertex Z sampling).
 
@@ -722,7 +763,13 @@ def build_deepseek_vegetation_v3(
                 n_skipped += 1
                 continue
 
-            mesh = _polygon_to_draped_mesh(poly, terrain_mesh, scale, z_offset)
+            mesh = _polygon_to_draped_mesh(
+                poly,
+                terrain_mesh,
+                scale,
+                z_offset,
+                max_surface_edge_mm=max_surface_edge_mm,
+            )
             if mesh is not None:
                 parts.append(mesh)
                 n_total += 1

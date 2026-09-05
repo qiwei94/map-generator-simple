@@ -9,6 +9,7 @@ from aesthetic.amap_salience import (
     crop_mosaic_to_wgs84_bbox,
     extract_amap_salience_masks,
     extract_review_salience_masks,
+    summarize_amap_urban_evidence,
 )
 from shapely.geometry import LineString
 
@@ -20,6 +21,7 @@ def test_style7_palette_separates_road_tiers_and_transit_colours():
     image[60:64, 5:123] = (246, 227, 163)
     image[80:84, 5:123] = (23, 190, 176)  # metro colour, not a road tier
     image[95:125, 15:55] = (163, 204, 255)
+    image[95:125, 75:115] = (200, 228, 157)
 
     masks = extract_amap_salience_masks(
         image, min_road_component_pixels=4)
@@ -29,6 +31,7 @@ def test_style7_palette_separates_road_tiers_and_transit_colours():
     assert masks.road_context[62, 30]
     assert not masks.road_all[82, 30]
     assert masks.water[105, 30]
+    assert masks.green[105, 90]
 
 
 def test_review_adapter_keeps_black_water_separate_from_dark_gray_roads():
@@ -118,3 +121,45 @@ def test_guide_is_explicitly_not_applicable_outside_mainland_china():
     assert guide is None
     assert evidence["status"] == "not_applicable"
     assert "mainland-China-only" in evidence["reason"]
+
+
+def test_distributed_amap_roads_are_urban_scene_evidence():
+    shape = (160, 160)
+    roads = np.zeros(shape, dtype=bool)
+    for coordinate in range(10, 160, 20):
+        roads[coordinate:coordinate + 2, :] = True
+        roads[:, coordinate:coordinate + 2] = True
+    reference = SalienceMasks(
+        water=np.zeros(shape, dtype=bool),
+        road_major=roads,
+        road_arterial=np.zeros(shape, dtype=bool),
+        road_context=np.zeros(shape, dtype=bool),
+        evidence={},
+        green=np.ones(shape, dtype=bool),
+    )
+
+    evidence = summarize_amap_urban_evidence(reference, grid_size=8)
+
+    assert evidence["status"] == "evidence_only"
+    assert evidence["road_presence_cell_fraction"] == 1.0
+    assert evidence["urban_network_support"] >= 0.8
+    assert evidence["green_land_fraction"] > 0.8
+    assert "never creates" in evidence["constraint"]
+
+
+def test_one_amap_corridor_does_not_turn_landscape_into_city():
+    shape = (160, 160)
+    road = np.zeros(shape, dtype=bool)
+    road[78:82, :] = True
+    reference = SalienceMasks(
+        water=np.zeros(shape, dtype=bool),
+        road_major=road,
+        road_arterial=np.zeros(shape, dtype=bool),
+        road_context=np.zeros(shape, dtype=bool),
+        evidence={},
+    )
+
+    evidence = summarize_amap_urban_evidence(reference, grid_size=8)
+
+    assert evidence["road_presence_cell_fraction"] <= 0.25
+    assert evidence["urban_network_support"] < 0.4

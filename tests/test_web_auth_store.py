@@ -1,6 +1,8 @@
 """Passwordless account, multi-identity, and quota ledger contracts."""
 
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+import sqlite3
 import sys
 
 import pytest
@@ -96,6 +98,55 @@ def test_logout_revokes_session(store):
     store.revoke_session(token, now=1002)
 
     assert store.get_session_user(token, now=1003) is None
+
+
+def test_guest_session_token_is_opaque_and_three_uses_are_durable(store):
+    guest, token = store.create_guest_session(
+        quota_limit=3, now=1000, session_ttl_s=3600)
+
+    with sqlite3.connect(store.path) as conn:
+        stored_hash = conn.execute(
+            "SELECT token_hash FROM guest_sessions WHERE id=?", (guest.id,),
+        ).fetchone()[0]
+    assert token not in stored_hash
+    assert store.get_guest_session(token, now=1001).id == guest.id
+
+    for index in range(3):
+        reserved = store.reserve_guest_generation(
+            guest.id, f"guest-job-{index}", now=1010 + index)
+        assert reserved.quota_used == index + 1
+    with pytest.raises(AuthError, match="3 次免费生成机会已用完"):
+        store.reserve_guest_generation(guest.id, "guest-job-4", now=1020)
+
+    # Same job and refund are both idempotent, so retries cannot double-charge
+    # or manufacture extra opportunities.
+    duplicate = store.reserve_guest_generation(
+        guest.id, "guest-job-2", now=1021)
+    first_refund = store.refund_guest_generation(
+        guest.id, "guest-job-2", now=1022)
+    second_refund = store.refund_guest_generation(
+        guest.id, "guest-job-2", now=1023)
+    assert duplicate.quota_used == 3
+    assert first_refund.quota_used == 2
+    assert second_refund.quota_used == 2
+
+
+def test_guest_quota_is_atomic_under_concurrent_submissions(store):
+    guest, _ = store.create_guest_session(quota_limit=3, now=1000)
+
+    def reserve(index):
+        try:
+            store.reserve_guest_generation(
+                guest.id, f"concurrent-{index}", now=1010 + index)
+            return True
+        except AuthError:
+            return False
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        accepted = list(pool.map(reserve, range(8)))
+
+    assert sum(accepted) == 3
+    assert store.get_guest(guest.id).quota_used == 3
 
 
 def test_admin_controls_quota_and_account_status(store):

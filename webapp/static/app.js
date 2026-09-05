@@ -20,6 +20,7 @@ const state = {
   generationProfile: "classic",
   authConfig: null,
   account: null,
+  guest: null,
   job: null,           // {id, mode}
   /* 当前目标：预设城市 or 自定义区域 */
   target: { kind: "area", city: null, title: "自定义区域" },
@@ -52,6 +53,7 @@ function getSession() {
     photoPoints: [],       // [{lat, lon, name}] 照片 GPS 坐标（不含原图）
     journeyClusters: null, // [{lat, lon, name, count}]
     lastCity: null,        // 最近一次生成/查看的 city slug
+    lastJobId: null,       // 最近一次已验证产物所属的任务
     lastBbox: null,        // 最近取景框
   };
   _writeSession();
@@ -130,13 +132,16 @@ async function restoreSession() {
   }
 
   // 恢复产物展示
-  if (s.lastCity) {
+  if (s.lastJobId) {
     try {
-      const r = await fetchJSON(`/api/artifacts/${s.lastCity}`);
+      const r = await fetchJSON(`/api/jobs/${s.lastJobId}/artifacts`);
       lastArtifacts = r.artifacts;
+      lastArtifactJobId = s.lastJobId;
       renderViewer();
       renderDownloads();
     } catch (_) {}
+  }
+  if (s.lastCity) {
     // 恢复画廊
     try {
       state.gallery = await fetchJSON(`/api/gallery/${s.lastCity}`);
@@ -159,6 +164,7 @@ function persistState() {
     generationProfile: state.generationProfile,
     areaName: ($("areaName") || {}).value || "",
     lastCity: state.target.city || (lastArtifacts ? state.jobSlug : null),
+    lastJobId: lastArtifactJobId,
     lastBbox: map.state.map ? currentBbox() : null,
     photoPoints: map.photoPoint ? [{ lat: map.photoPoint[0], lon: map.photoPoint[1], name: "" }] : [],
     journeyClusters: map.journey ? map.journey.clusters.map(c => ({
@@ -182,20 +188,57 @@ async function fetchJSON(url, opts) {
   const r = await fetch(url, opts);
   if (!r.ok) {
     let msg = `HTTP ${r.status}`;
-    try { msg = (await r.json()).detail || msg; } catch (_) {}
-    if (r.status === 401) openAccountDialog();
-    throw new Error(msg);
+    let code = "";
+    try {
+      const payload = await r.json();
+      const detail = payload.detail;
+      if (detail && typeof detail === "object") {
+        msg = detail.message || msg;
+        code = detail.code || "";
+      } else if (detail) {
+        msg = detail;
+      }
+    } catch (_) {}
+    const error = new Error(msg);
+    error.status = r.status;
+    error.code = code;
+    const accountExpired = r.status === 401;
+    const guestBlocked = code === "guest_quota_exhausted" ||
+      code === "guest_session_invalid";
+    if (accountExpired) {
+      state.account = null;
+      renderAccount();
+      refreshAccount().catch(() => {});
+    } else if (code === "guest_quota_exhausted" && state.guest) {
+      state.guest = {
+        ...state.guest,
+        quota_used: state.guest.quota_limit,
+        quota_remaining: 0,
+      };
+      renderAccount();
+      refreshAccount().catch(() => {});
+    }
+    if (accountExpired || guestBlocked) {
+      const message = $("authMessage");
+      if (message) message.textContent = msg;
+      openAccountDialog(true);
+    }
+    throw error;
   }
   return r.json();
 }
 
 /* ---------------- 账号与我的任务 ---------------- */
 
-function openAccountDialog() {
+function openAccountDialog(focusEmail = false) {
   const dialog = $("accountDialog");
-  if (dialog.open) return;
-  if (dialog.showModal) dialog.showModal();
-  else dialog.setAttribute("open", "");
+  if (!dialog.open) {
+    if (dialog.showModal) dialog.showModal();
+    else dialog.setAttribute("open", "");
+  }
+  if (focusEmail && !state.account) {
+    window.requestAnimationFrame(() => $("authEmail").focus());
+  }
 }
 
 function closeAccountDialog() {
@@ -206,12 +249,33 @@ function closeAccountDialog() {
 
 function renderAccount() {
   const user = state.account;
+  const guest = state.guest;
+  const staticPreview = window.location.protocol === "file:";
   $("accountLoginView").hidden = Boolean(user);
   $("accountUserView").hidden = !user;
-  $("myTasksCard").hidden = !user;
+  $("myTasksCard").hidden = !(user || guest);
   if (!user) {
-    $("accountLabel").textContent = "登录";
-    $("accountQuota").textContent = "保存我的任务";
+    const limit = guest ? guest.quota_limit :
+      ((state.authConfig || {}).guest_generation_limit || 3);
+    const remaining = guest ? guest.quota_remaining : limit;
+    $("accountLabel").textContent = guest ? `游客 · ${remaining} 次` : "登录";
+    $("accountQuota").textContent = staticPreview
+      ? "请从网页服务打开"
+      : (remaining > 0 ? "登录可跨设备保存" : "体验额度已用完 · 登录继续");
+    $("guestQuotaLarge").textContent = `${remaining} / ${limit} 次`;
+    $("guestQuotaBlock").hidden = staticPreview;
+    $("guestQuotaBlock").classList.toggle("exhausted", remaining <= 0);
+    const emailEnabled = !staticPreview &&
+      (!state.authConfig || state.authConfig.email_enabled);
+    $("authEmail").disabled = !emailEnabled;
+    $("authCode").disabled = !emailEnabled;
+    $("btnSendCode").disabled = !emailEnabled;
+    $("btnVerifyCode").disabled = !emailEnabled;
+    $("btnGuestTasks").hidden = !guest;
+    $("authServiceMessage").hidden = emailEnabled;
+    $("authServiceMessage").textContent = staticPreview
+      ? "这是静态页面预览。请通过本机或公网网页服务打开，才能登录和使用游客额度。"
+      : (emailEnabled ? "" : "邮件登录服务尚未配置，请联系管理员启用后再登录。");
     return;
   }
   const shortEmail = user.email.length > 24
@@ -225,15 +289,21 @@ function renderAccount() {
 }
 
 async function refreshAccount() {
-  if (window.location.protocol === "file:") return;
+  if (window.location.protocol === "file:") {
+    state.authConfig = {guest_generation_limit: 3, email_enabled: false};
+    state.account = null;
+    state.guest = null;
+    renderAccount();
+    return;
+  }
   try {
     const config = await fetchJSON("/api/auth/config");
     state.authConfig = config;
     const result = await fetchJSON("/api/auth/me");
     state.account = result.user || null;
+    state.guest = result.guest || null;
     renderAccount();
-    if (state.account) await loadMyTasks();
-    else if (config.required) openAccountDialog();
+    if (state.account || state.guest) await loadMyTasks();
   } catch (_) {
     renderAccount();
   }
@@ -278,6 +348,8 @@ async function verifyEmailCode() {
       body: JSON.stringify({ email, code }),
     });
     state.account = result.user;
+    state.guest = null;
+    $("authMessage").textContent = "";
     renderAccount();
     await loadMyTasks();
     closeAccountDialog();
@@ -288,17 +360,20 @@ async function verifyEmailCode() {
 
 async function logoutAccount() {
   await fetchJSON("/api/auth/logout", { method: "POST" });
-  state.account = null;
-  renderAccount();
+  $("authMessage").textContent = "";
+  await refreshAccount();
 }
 
 async function loadMyTasks() {
-  if (!state.account) return;
+  if (!state.account && !state.guest) return;
   try {
     const result = await fetchJSON("/api/jobs?mine=true");
     const jobs = result.jobs || [];
+    const archiveHint = state.account
+      ? "点击即可继续"
+      : "仅保存在当前浏览器，登录后可跨设备找回";
     $("myTasksSummary").textContent = jobs.length
-      ? `共 ${jobs.length} 个，点击即可继续` : "还没有任务";
+      ? `共 ${jobs.length} 个 · ${archiveHint}` : "还没有任务";
     $("myTaskList").innerHTML = jobs.length ? jobs.map((job) => {
       const status = { pending: "排队中", running: "生成中", done: "已完成",
                        failed: "失败" }[job.status] || job.status;
@@ -325,6 +400,10 @@ $("authCode").onkeydown = (event) => {
 };
 $("btnLogout").onclick = logoutAccount;
 $("btnRefreshTasks").onclick = loadMyTasks;
+$("btnGuestTasks").onclick = () => {
+  closeAccountDialog();
+  $("myTasksCard").scrollIntoView({ behavior: "smooth", block: "start" });
+};
 $("btnOpenTasks").onclick = () => {
   closeAccountDialog();
   $("myTasksCard").scrollIntoView({ behavior: "smooth", block: "start" });
@@ -791,6 +870,7 @@ async function confirmArea() {
   if (!map.state.map) { initMap(); return; }
   // 切新区域 → 2D 图回初始状态（不放旧图/坏图）
   lastArtifacts = null;
+  lastArtifactJobId = null;
   $("preview2d").hidden = true;
   $("p2Topdown").hidden = true;
   $("p2Diag").hidden = true;
@@ -841,7 +921,10 @@ async function confirmArea() {
     pollJob();
   } catch (err) {
     btn.disabled = false;
-    alert("生成失败: " + err.message);
+    if (err.code !== "guest_quota_exhausted" &&
+        err.code !== "guest_session_invalid") {
+      alert("生成失败: " + err.message);
+    }
   }
 }
 
@@ -922,6 +1005,7 @@ function selectPlace(lm) {
   state.selectedStyle = null;
   state.gallery = null;
   lastArtifacts = null;
+  lastArtifactJobId = null;
   $("preview2d").hidden = true;
   renderTabs();
 
@@ -1617,7 +1701,10 @@ async function startJob(mode) {
     setBusy(true);
     pollJob();
   } catch (err) {
-    alert("启动失败: " + err.message);
+    if (err.code !== "guest_quota_exhausted" &&
+        err.code !== "guest_session_invalid") {
+      alert("启动失败: " + err.message);
+    }
   }
 }
 
@@ -1674,6 +1761,39 @@ function renderJobProgress(job) {
     estimate += " · 可复制任务链接稍后回来";
   }
   $("jobEstimate").textContent = estimate;
+  renderPublicPipeline(job.pipeline || null);
+}
+
+const PIPELINE_STATUS_LABELS = {
+  completed: "完成", running: "进行中", queued: "排队",
+  pending: "等待", pending_validation: "待验收",
+  failed: "失败", rejected: "未通过", not_applicable: "不适用",
+};
+
+function renderPublicPipeline(pipeline) {
+  const panel = $("jobPipeline");
+  if (!pipeline || !Array.isArray(pipeline.stages) || !pipeline.stages.length) {
+    panel.hidden = true;
+    $("jobPipelineStages").innerHTML = "";
+    return;
+  }
+  panel.hidden = false;
+  $("jobPipelineSource").textContent = pipeline.state_source === "verified_ledger"
+    ? "运行记录已验证"
+    : "根据总体进度估算";
+  $("jobPipelineStages").innerHTML = pipeline.stages.map((stage) => {
+    const active = stage.id === pipeline.current_stage_id ? " active" : "";
+    const status = PIPELINE_STATUS_LABELS[stage.status] || stage.status || "等待";
+    return `<li class="pipeline-step ${esc(stage.status || "pending")}${active}">
+      <span class="pipeline-step-id">${esc(stage.id)}</span>
+      <span class="pipeline-step-name">${esc(stage.name)}</span>
+      <span class="pipeline-step-state">${esc(status)}</span>
+    </li>`;
+  }).join("");
+  const current = pipeline.stages.find(
+    (stage) => stage.id === pipeline.current_stage_id) || pipeline.stages[0];
+  $("jobPipelineDetail").textContent = current
+    ? `${current.id} · ${current.detail || current.name}` : "";
 }
 
 async function pollJob() {
@@ -1728,7 +1848,7 @@ async function pollJob() {
     } else {
       hint.hidden = true;
     }
-    const { city, mode, region, slug } = state.job;
+    const { id: completedJobId, city, mode, region, slug } = state.job;
     state.jobSlug = slug;
     state.job = null;
     setBusy(false);
@@ -1754,9 +1874,6 @@ async function pollJob() {
             state.galleryBbox = [...state.pendingArea.bbox];
           }
           state.selectedStyle = null;
-          // 风格任务与模型任务共用区域 slug。找回已完成风格任务时，
-          // 同时恢复该区域后来生成的最新 GLB/PNG；否则预览区会永久空白。
-          await refreshArtifacts(state.jobSlug);
           renderStep3();
           renderViewer();
           $("step3").scrollIntoView({ behavior: "smooth", block: "start" });
@@ -1768,7 +1885,10 @@ async function pollJob() {
       }
       return;
     }
-    if (j.status === "done") { await refreshArtifacts(city); persistState(); }
+    if (j.status === "done") {
+      await refreshJobArtifacts(completedJobId);
+      persistState();
+    }
   } catch (err) {
     // A transient Wi-Fi/API interruption must not detach the browser from a
     // long-running job. Keep the token and resume with bounded backoff.
@@ -1864,11 +1984,13 @@ $("jobLookup").onkeydown = (e) => {
 };
 
 let lastArtifacts = null;
+let lastArtifactJobId = null;
 
-async function refreshArtifacts(city) {
+async function refreshJobArtifacts(jobId) {
   try {
-    const r = await fetchJSON(`/api/artifacts/${city}`);
+    const r = await fetchJSON(`/api/jobs/${jobId}/artifacts`);
     lastArtifacts = r.artifacts;
+    lastArtifactJobId = jobId;
   } catch (_) { return; }
   if (state.target.kind === "preset") await loadCities();
   renderViewer();
@@ -1876,9 +1998,10 @@ async function refreshArtifacts(city) {
 }
 
 function currentArtifacts() {
+  if (lastArtifacts) return lastArtifacts;
   const info = cityInfo();
   if (info) return info.artifacts;
-  return lastArtifacts;
+  return null;
 }
 
 function renderViewer() {

@@ -13,6 +13,7 @@ from tools.batch_generate_gallery import (
 
 def _profile(**overrides):
     values = {
+        "area_km2": 225.0,
         "building_density": 800.0,
         "water_ratio": 0.01,
         "elevation_range_m": 20.0,
@@ -69,6 +70,24 @@ def test_sparse_mountain_without_city_roads_remains_landscape():
     ), "terrain")
 
     assert scene == "landscape"
+
+
+def test_distributed_external_network_keeps_garden_city_in_urban_gallery():
+    scene = classify_scene_type(_profile(
+        area_km2=625.0,
+        building_density=52.0,
+        road_density_km_per_km2=7.0,
+        water_ratio=0.12,
+        elevation_range_m=331.0,
+        vegetation_ratio=0.43,
+    ), "landscape", {
+        "status": "evidence_only",
+        "urban_network_support": 0.91,
+        "road_presence_cell_fraction": 0.88,
+    })
+
+    assert scene == "urban"
+    assert variants_for_scene(scene) is STYLE_VARIANTS
 
 
 def _layers(**role_overrides):
