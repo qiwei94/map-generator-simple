@@ -92,9 +92,10 @@ def _terrain_patches(poly, terrain):
                     yield from _triangulate(piece)
 
 
-def _patch_mesh(poly, terrain):
+def _patch_mesh(poly, terrain, *, partition=None):
     points, lookup, faces = [], {}, []
-    for triangle in _terrain_patches(poly, terrain):
+    pieces = [poly] if partition is None else list(_parts(poly.intersection(partition))) + list(_parts(poly.difference(partition)))
+    for triangle in (tri for piece in pieces for tri in _terrain_patches(piece, terrain)):
         face = []
         for xy in triangle:
             # Merge roundoff at adjacent clipped triangle boundaries, in mm.

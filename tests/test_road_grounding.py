@@ -58,8 +58,7 @@ def test_bridge_follows_bank_plane_not_riverbed_and_keeps_xy(style):
 
 
 @pytest.mark.parametrize('bridge,reason', [
-    (LineString([(-.2,0),(1.5,0)]), '两岸'),
-    (LineString([(-1.5,0),(0,.2),(1.5,0)]), '弯桥')])
+    (LineString([(-.2,0),(.2,0)]), '陆地支撑')])
 def test_unsupported_bridges_are_blocked_not_deleted_or_draped(bridge, reason):
     layers, _, sampler = scene(bridge)
     ground = layers.surface_grounding['roads']
@@ -77,12 +76,21 @@ def test_no_source_bridge_never_invents_water_crossing():
     materialize_road_surfaces(layers, 1., sampler.z_mm_vec)
 
 
-def test_bank_cross_slope_is_bounded_not_hidden_by_raising_bridge():
-    layers, _, sampler = scene(LineString([(-1.5,0),(1.5,0)]), cross_slope=.8)
+@pytest.mark.parametrize('bridge,cross_slope', [
+    (LineString([(-1.5,0),(0,.2),(1.5,0)]), 0.),
+    (LineString([(-1.5,0),(1.5,0)]), .8)])
+def test_curved_or_cross_sloped_bridge_keeps_actual_dry_terrain_support(bridge,cross_slope):
+    from shapely import intersects_xy
+    layers, terrain, sampler = scene(bridge, cross_slope=cross_slope)
     support = layers.surface_grounding['roads']['support_evidence'][0]
-    assert support['status'] == 'blocked' and '横坡' in support['reason_zh']
-    with pytest.raises(ValueError, match='bridge support unresolved'):
-        materialize_road_surfaces(layers, 1., sampler.z_mm_vec)
+    assert support['status'] == 'ready'
+    assert support['support_policy'] == 'exact_dry_terrain_and_harmonic_wet_deck_v1'
+    mesh, _ = materialize_road_surfaces(layers, 1., sampler.z_mm_vec)
+    assert mesh.is_volume
+    for patch in layers.surface_grounding['roads']['patches']:
+        xy=patch['xy'];dry=~intersects_xy(layers.WL[0],xy[:,0],xy[:,1])
+        expected=sample_terrain_surface_plan_z(terrain,xy[dry,0],xy[dry,1])
+        np.testing.assert_allclose(patch['bottom_z'][dry],expected-.12,atol=1e-8)
 
 
 def test_bridge_report_distinguishes_plan_from_actual_and_final_contact():
@@ -94,7 +102,7 @@ def test_bridge_report_distinguishes_plan_from_actual_and_final_contact():
     report = states(build_geometry_inspection(layers, {'roads':mesh}))
     assert report['road_contact'] == report['bridge_support'] == 'passed'
     assert report['final_contact'] == report['slice_survival'] == 'pending'
-    layers, _, _ = scene(LineString([(-.2,0),(1.5,0)]))
+    layers, _, _ = scene(LineString([(-.2,0),(.2,0)]))
     report = states(build_geometry_inspection(layers))
     assert report['road_plan'] == report['bridge_support'] == 'failed'
 

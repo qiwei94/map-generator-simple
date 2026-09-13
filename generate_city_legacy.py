@@ -2319,6 +2319,7 @@ def _run_pipeline(argv=None):
             scale,
             base_thickness_mm=cli_args.base_thickness_mm,
             surface_thickness_mm=printer_profile.min_surface_height_mm,
+            exact_boundary=_shared_surface,
         )
         water_relief["status"] = "materialized"
     else:
@@ -2425,6 +2426,7 @@ def _run_pipeline(argv=None):
                 base_thickness_mm=cli_args.base_thickness_mm,
                 surface_levels_mm=water_relief["surface_levels_mm"],
                 surface_thickness_mm=water_relief["surface_thickness_mm"],
+                support_to_base=_shared_surface,
             )
             if water_mesh is not None:
                 print(f"  Water faces: {len(water_mesh.faces):,}")

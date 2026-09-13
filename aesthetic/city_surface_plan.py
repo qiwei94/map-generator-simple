@@ -60,7 +60,7 @@ def _clean_overlay_roundoff(polys, owners, scale):
         policy='numerical_overlay_roundoff_only')
 
 
-def prepare_negative_roads(layers, source_roads):
+def prepare_negative_roads(layers, source_roads, *, scale=None, bridge_gap_mm=None):
     from aesthetic.bridge_sources import extract_bridge_sources
     if source_roads is None:
         raise ValueError('negative-space-v1 requires source road evidence')
@@ -79,6 +79,12 @@ def prepare_negative_roads(layers, source_roads):
         'mutation': 'none',
     }
     layers.bridge_lines, bridges = extract_bridge_sources(source_roads)
+    if scale is not None:
+        from aesthetic.bridge_approaches import recover_bridge_approaches
+        approaches, proof = recover_bridge_approaches(layers.bridge_lines, source_roads,
+            unary_union(list(layers.WL) + list(layers.WO)), scale, bridge_gap_mm)
+        layers.bridge_lines.extend(approaches)
+        bridges['approach_recovery'] = proof
     return {**evidence, 'owner_stage': 'S6', 'bridge_sources': bridges}
 
 
@@ -203,9 +209,10 @@ def finalize_city_surfaces(layers, *, bbox_local, scale, printer_profile,
     if road_style not in {'printer-default', 'negative-space-v1', 'negative-space-fine-v1'}:
         raise ValueError('unknown surface road style')
     negative = road_style in {'negative-space-v1', 'negative-space-fine-v1'}
-    recovery = prepare_negative_roads(layers, source_roads) if negative else None
     from aesthetic.road_width_contract import resolve_road_width_contract
     road_profile, width_contract = resolve_road_width_contract(printer_profile, road_style)
+    recovery = prepare_negative_roads(layers, source_roads, scale=scale,
+        bridge_gap_mm=road_profile.final_block_base_gap_mm) if negative else None
 
     original = list(layers.block_base) + list(layers.BO)
     heights = surface_heights(layers)

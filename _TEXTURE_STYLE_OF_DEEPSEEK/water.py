@@ -160,28 +160,34 @@ def prepare_deepseek_water_relief(
         # boundary instead. Keep this explicit while city-scale cost is tested.
         from shapely.affinity import scale as scale_polygon
         from _TEXTURE_STYLE_OF_DEEPSEEK._geom_utils import mesh_to_manifold64, manifold64_to_mesh
-        result = terrain_mesh.copy()
+        cutters = []
+        top = max(float(terrain_mesh.bounds[1, 2]), terrain_base_z) + float(surface_thickness_mm)
         for poly, level in zip(all_polys, levels):
             if poly is None or poly.is_empty:
                 continue
             # Pair with support_to_base=True in the water builder. This is a
             # material partition, not two overlapping solids below a thin cap.
             bottom = terrain_base_z
-            top = max(float(result.bounds[1, 2]), bottom) + float(surface_thickness_mm)
             cutter = _extrude_water_manifold(scale_polygon(poly, xfact=scale, yfact=scale,
                                                           origin=(0, 0)), top-bottom)
             if cutter.is_empty():
                 raise ValueError('exact water recess produced an empty cutter')
-            raw = cutter.translate((0, 0, bottom)).to_mesh64()
-            tool = trimesh.Trimesh(vertices=np.asarray(raw.vert_properties)[:, :3],
-                                   faces=np.asarray(raw.tri_verts), process=False)
-            result = manifold64_to_mesh(mesh_to_manifold64(result) - mesh_to_manifold64(tool))
-            if result.is_empty or not result.is_watertight or not result.is_winding_consistent:
-                raise ValueError('exact water recess lost the terrain solid')
+            cutters.append(cutter.translate((0, 0, bottom)))
+        combined = manifold3d.Manifold.batch_boolean(cutters, manifold3d.OpType.Add)
+        result = manifold64_to_mesh(mesh_to_manifold64(terrain_mesh) - combined)
+        if result.is_empty or not result.is_watertight or not result.is_winding_consistent:
+            raise ValueError('exact water recess lost the terrain solid')
         terrain_mesh.vertices = result.vertices
         terrain_mesh.faces = result.faces
     else:
         terrain_mesh.vertices = verts
+    if terrain_mesh.metadata.get('ground_texture'):
+        from _TEXTURE_STYLE_OF_DEEPSEEK.prepared_surface import mesh_digest
+        texture = dict(terrain_mesh.metadata['ground_texture'])
+        texture['pre_water_mesh_sha256'] = texture['mesh_sha256']
+        texture['mesh_sha256'] = mesh_digest(terrain_mesh)
+        texture['water_recess'] = 'exact_polygon_boolean' if exact_boundary else 'grid_vertex_lowering'
+        terrain_mesh.metadata['ground_texture'] = texture
     print(
         f"  Water(v3): recessed {len(carved):,} terrain vertices for "
         f"{len(levels)} printable caps ({surface_thickness_mm:.2f}mm)"

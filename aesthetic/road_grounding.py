@@ -16,7 +16,7 @@ from aesthetic.surface_grounding import (
 )
 from aesthetic.bridge_sources import water_bridge_lines, bridge_corridor
 
-VERSION = 'road-grounding-and-bank-deck-v1'
+VERSION = 'road-grounding-and-bank-deck-v2'
 
 
 def _bridge_patch(poly, lines, scale, terrain, height, offset, water, gap):
@@ -118,7 +118,12 @@ def resolve_road_grounding(layers, scale, terrain):
         try:
             # Bridge width was frozen by the road width contract in S6.
             gap = layers.surface_plan_evidence['road_width_contract']['resolved_visual_widths']['major']
-            patch, evidence = _bridge_patch(poly, sources, scale, terrain, h, offset, water, gap)
+            try:
+                patch, evidence = _bridge_patch(poly, sources, scale, terrain, h, offset, water, gap)
+            except ValueError as straight_error:
+                from aesthetic.bridge_surface import bank_supported_surface
+                patch, evidence = bank_supported_surface(poly, sources, scale, terrain, h, offset, water, gap)
+                evidence['straight_policy_limitation'] = str(straight_error)
             patches.append(patch)
             supports.append(dict(polygon_index=i, **evidence))
         except ValueError as exc:
@@ -134,7 +139,7 @@ def resolve_road_grounding(layers, scale, terrain):
         bridge_polygon_count=len(bridges), bridge_support=supports,
         base_offset_mm=offset, height_mm=h, patch_triangles=sum(len(p['faces']) for p in patches),
         final_boolean_contact='pending', slicing='pending',
-        说明='道路沿冻结地形保持厚度并半厚嵌入；直桥按两岸建立桥面；不支持的桥保留阻断原因，不回退河床取高。')
+        说明='道路沿冻结地形保持厚度并半厚嵌入；直桥保留两岸平面，弯曲/多线桥按陆地约束插值；无来源或无支撑保留阻断。')
     return plan
 
 
