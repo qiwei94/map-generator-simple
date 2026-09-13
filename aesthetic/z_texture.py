@@ -24,7 +24,7 @@ class ZTexturePolicy:
     boundary_fade_mm: float = .15
     road_half_clearance_mm: float = .16
     overlap_mm: float = .12
-    max_edge_mm: float = .10
+    max_edge_mm: float = .20
     seed: int = 20260908
     max_faces: int = 2000000
 
@@ -72,10 +72,19 @@ def allowed_ground(layers,bbox,scale,policy):
         return [p.intersection(window) for p in polygons if p.intersects(window)]
     occupied=unary_union(local(list(layers.block_base)+list(layers.BO)+[p for p,h in layers.BL],clip))
     water=unary_union(local(list(layers.WL)+list(layers.WO),clip))
-    road_window=clip.buffer(policy.road_half_clearance_mm/scale)
-    roads=unary_union(local(list(layers.block_base_cut_lines)+list(layers.block_base_major_cut_lines),road_window))
-    guard=roads.buffer(policy.road_half_clearance_mm/scale)
-    return greens.difference(occupied.union(water).union(guard)).intersection(clip)
+    from shapely.strtree import STRtree
+    radius=policy.road_half_clearance_mm/scale
+    roads=list(layers.block_base_cut_lines)+list(layers.block_base_major_cut_lines)
+    tree=STRtree(roads)
+    fragments=[]
+    # Buffer source lines locally, before union. Buffering the globally noded
+    # street graph took 75 minutes for Paris; most of it is outside any green.
+    for green in _polygons(greens.difference(occupied).difference(water)):
+        window=box(*green.bounds).buffer(radius)
+        hits=tree.query(window,predicate='intersects')
+        guard=unary_union([roads[int(i)].intersection(window).buffer(radius) for i in hits])
+        fragments.append(green.difference(guard))
+    return unary_union(fragments).intersection(clip)
 
 
 def plan_ground_texture(layers,bbox,scale,terrain,payload):
@@ -83,29 +92,25 @@ def plan_ground_texture(layers,bbox,scale,terrain,payload):
     from _TEXTURE_STYLE_OF_DEEPSEEK.terrain import sample_terrain_surface_plan_z
     policy=ZTexturePolicy(**payload)
     allowed=allowed_ground(layers,bbox,scale,policy)
-    model=scale_geometry(allowed,xfact=scale,yfact=scale,origin=(0,0))
+    from shapely import set_precision
+    model=set_precision(set_precision(scale_geometry(allowed,xfact=scale,yfact=scale,origin=(0,0)),1e-8),0)
     plan=dict(version=VERSION,terrain_fingerprint=terrain.fingerprint,
               input_geometry_fingerprint=hashlib.sha256(model.wkb).hexdigest(),
               support_evidence=policy.payload(),patches=[])
     max_delta=0.;face_count=0
-    for poly in _polygons(model):
+    polygons=list(_polygons(model))
+    print(f'[texture] {len(polygons)} regions, {model.area:.1f} mm2, edge {policy.max_edge_mm} mm',flush=True)
+    for index,poly in enumerate(polygons):
+        if index%100==0:print(f'[texture] {index}/{len(polygons)}, {face_count} faces',flush=True)
         estimate=4*poly.area/policy.max_edge_mm**2+4*poly.length/policy.max_edge_mm
         if estimate+face_count>policy.max_faces:
             raise ValueError('ground texture estimated geometry budget exceeded; explicit coarser policy required')
         xy,f,_=_patch_mesh(poly,terrain)
         xyz=np.column_stack([xy,np.zeros(len(xy))])
-        # Uniform midpoint subdivision inside each already conforming patch
-        # preserves vertex identity at touching holes. Adaptive subdivision
-        # plus coordinate welding re-joined deliberately split boundary fans
-        # on real Paris green polygons and produced non-manifold edges.
-        tri=xyz[f]
-        maximum=max(float(np.linalg.norm(tri[:,1]-tri[:,0],axis=1).max()),
-                    float(np.linalg.norm(tri[:,2]-tri[:,0],axis=1).max()),
-                    float(np.linalg.norm(tri[:,2]-tri[:,1],axis=1).max()))
-        iterations=max(0,int(np.ceil(np.log2(maximum/policy.max_edge_mm))))
-        if face_count+len(f)*4**iterations>policy.max_faces:
-            raise ValueError('ground texture conforming subdivision budget exceeded; explicit coarser policy required')
-        for _ in range(iterations):xyz,f=trimesh.remesh.subdivide(xyz,f)
+        # Split long shared edges by index; avoid both whole-polygon over-
+        # refinement and the coordinate welding that breaks touching holes.
+        from aesthetic.surface_subdivision import refine_surface
+        xyz,f=refine_surface(xyz,f,policy.max_edge_mm,policy.max_faces-face_count)
         xy=xyz[:,:2]
         face_count+=len(f)
         if face_count>policy.max_faces:

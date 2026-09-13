@@ -127,3 +127,15 @@ def test_s8_rejects_missing_or_modified_texture_terrain():
     actual.vertices[0,2]+=.01
     with pytest.raises(ValueError,match='terrain: missing'):
         verify_materialized_city(layers,{'terrain':actual},None,1.)
+
+
+def test_local_edge_refinement_is_conforming_and_bounded():
+    from aesthetic.surface_subdivision import refine_surface
+    v=np.array([[0.,0.,0.],[2.,0.,0.],[2.,.1,0.],[0.,1.,0.]])
+    v,f=refine_surface(v,np.array([[0,1,2],[0,2,3]]),.2,10000)
+    edges=np.concatenate([f[:,[0,1]],f[:,[1,2]],f[:,[2,0]]])
+    unique,counts=np.unique(np.sort(edges,axis=1),axis=0,return_counts=True)
+    assert counts.max()==2
+    assert np.linalg.norm(v[unique[:,0]]-v[unique[:,1]],axis=1).max()<=.2+1e-9
+    border=unary_union([LineString(v[e,:2]) for e in unique[counts==1]])
+    assert border.hausdorff_distance(Polygon([(0,0),(2,0),(2,.1),(0,1)]).boundary)<1e-9
