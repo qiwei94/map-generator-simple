@@ -315,7 +315,7 @@ def test_required_measurement_families_never_silently_disappear():
     report = _build_report()
 
     assert report["schema_version"] == SCHEMA_VERSION
-    assert report["schema_version"] == "pipeline-measurement-report-v2"
+    assert report["schema_version"] == "pipeline-measurement-report-v3"
     for phase, names in REQUIRED_FAMILIES.items():
         assert set(report["measurements"][phase]) == set(names)
         for name in names:

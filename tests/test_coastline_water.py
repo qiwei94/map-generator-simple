@@ -95,6 +95,14 @@ def test_water_filter_and_cache_namespace_include_coastline():
             == "water_coastline_geometry_v3")
 
 
+def test_direct_cli_entry_materializes_coast_before_measurement():
+    source = (Path(__file__).resolve().parents[1] / 'generate_city_legacy.py').read_text()
+    fetch = source.index("water_gdf = (fetch_tiled_from_cli if snap_active else fetch_from_cli)")
+    normalize = source.index('water_gdf = materialize_coastal_water(water_gdf, (fs, fw, fn, fe))')
+    next_stage = source.index('# Stage 3: Fetch vegetation data', fetch)
+    assert fetch < normalize < next_stage
+
+
 def test_gallery_combined_cache_is_invalidated_for_coastline_data():
     source = (Path(__file__).resolve().parents[1] / "aesthetic" /
               "rerun_harness.py").read_text(encoding="utf-8")

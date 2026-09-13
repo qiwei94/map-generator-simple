@@ -1,5 +1,11 @@
 # 生成 Pipeline 架构审计与迁移说明
 
+> 历史审计。2026-09-05 新任务入口与 S6→S8 实际城市几何核对已更新，当前约束见
+> [canonical_surface_execution.md](canonical_surface_execution.md) 和
+> [current_generation_pipeline.md](current_generation_pipeline.md)。
+> 本文原始“未接通”条目保留审计背景，不作为新入口已实现能力的反证；
+> S0–S3 领域对象与大函数 effects 拆分仍未完成。
+
 > 审计日期：2026-08-31
 >
 > 审计对象：`aesthetic/pipeline_contract.py`、`aesthetic/pipeline_ledger.py`、

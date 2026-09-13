@@ -11,6 +11,27 @@ from typing import Iterable, List
 
 import numpy as np
 import manifold3d
+
+
+def mesh_to_manifold64(mesh):
+    """Preserve double precision at shared shoreline Boolean interfaces."""
+    import numpy as np
+    result = manifold3d.Manifold(manifold3d.Mesh64(
+        vert_properties=np.array(mesh.vertices, dtype=np.float64, order='C', copy=True),
+        tri_verts=np.array(mesh.faces, dtype=np.uint64, order='C', copy=True)))
+    if result.status() != manifold3d.Error.NoError:
+        raise ValueError(f'invalid solid for double-precision Boolean: {result.status()}')
+    return result
+
+
+def manifold64_to_mesh(solid):
+    import numpy as np
+    import trimesh
+    if solid.status() != manifold3d.Error.NoError:
+        raise ValueError(f'Boolean failed: {solid.status()}')
+    raw = solid.to_mesh64()
+    return trimesh.Trimesh(vertices=np.asarray(raw.vert_properties)[:, :3],
+                           faces=np.asarray(raw.tri_verts), process=False)
 from shapely.geometry import (
     LineString,
     MultiLineString,

@@ -107,7 +107,8 @@ def _hillshade(heightmap: np.ndarray, pixel_size: float,
 def render_review_bundle(layers, ctx: dict, road_width_multiplier: float,
                          out_dir: str, tag: str,
                          scene_type: str = "urban",
-                         vegetation_enabled: bool = False) -> dict:
+                         vegetation_enabled: bool = False,
+                         topdown_output_path: str = None) -> dict:
     """渲染评审图包。
 
     Returns:
@@ -123,6 +124,10 @@ def render_review_bundle(layers, ctx: dict, road_width_multiplier: float,
 
     raster_g = _Rasterizer(extent, GR, GR)   # 超采样（俯视）
     raster_d = _Rasterizer(extent, D, D)     # 原尺寸（DSM）
+    surface_plan = getattr(layers, "surface_plan_evidence", {}) or {}
+    if surface_plan.get("status") == "finalized":
+        from aesthetic.city_surface_plan import verify_surface_plan
+        verify_surface_plan(layers, float(ctx["scale"]))
 
     # ── masks（2x 栅格化 → 降到 G 得 [0,1] 覆盖率；2x 二值版用于合成）──
     def _mask2x(polys):
@@ -165,13 +170,18 @@ def render_review_bundle(layers, ctx: dict, road_width_multiplier: float,
     water_color = _WATER
 
     # ── 合成俯视（2x 栅格）──
-    img = np.full((GR, GR, 3), _PAPER, dtype=np.uint8)
-    img[block_2x] = _BLOCK_BASE
+    negative_space = surface_plan.get('road_style') in {'negative-space-v1', 'negative-space-fine-v1'}
+    img = np.full((GR, GR, 3), (160, 160, 157) if negative_space else _PAPER, dtype=np.uint8)
+    # Actual removed surfaces, below surviving buildings and water. Never
+    # paint an independently widened road network over the approved masses.
+    reveal_2x = _mask2x(getattr(layers, "surface_road_polygons", ()) or ())
+    img[reveal_2x] = (160, 160, 157) if negative_space else _ROAD_LOCAL
+    img[block_2x] = (247, 247, 245) if negative_space else _BLOCK_BASE
     img[veg_2x] = _VEGETATION
-    img[building_2x] = _BUILDING
+    img[building_2x] = (247, 247, 245) if negative_space else _BUILDING
 
     # 建筑描边（2x 下 1px，降采样后呈平滑过渡）
-    if building_2x.any():
+    if building_2x.any() and not negative_space:
         from scipy.ndimage import binary_erosion
         edge = building_2x & ~binary_erosion(building_2x)
         img[edge] = _BUILDING_EDGE
@@ -209,7 +219,9 @@ def render_review_bundle(layers, ctx: dict, road_width_multiplier: float,
                     draw.line(points, fill=color, width=width_px)
                     road_draw.line(points, fill=1, width=width_px)
 
-    if topology_lines:
+    if surface_plan.get("status") == "finalized":
+        road_canvas = Image.fromarray(reveal_2x.astype(np.uint8))
+    elif topology_lines:
         # The complete tier-4 topology is the visible street texture in the
         # reference language.  It is distinct from the much smaller ink-
         # budgeted foreground list and uses the exact lower-surface seam width
@@ -275,12 +287,13 @@ def render_review_bundle(layers, ctx: dict, road_width_multiplier: float,
 
     # 水体最后压上（纯黑）
     img2 = np.array(pil_img)
-    img2[water_2x] = water_color
+    visible_water = water_2x & ~reveal_2x if surface_plan.get('status') == 'finalized' else water_2x
+    img2[visible_water] = water_color
     pil_img = Image.fromarray(img2, mode="RGB")
 
     # 2x → 1x LANCZOS（抗锯齿的关键一步）
     pil_img = pil_img.resize((G, G), Image.LANCZOS)
-    topdown_path = os.path.join(out_dir, f"{tag}_topdown.png")
+    topdown_path = topdown_output_path or os.path.join(out_dir, f"{tag}_topdown.png")
     pil_img.save(topdown_path)
 
     # ── 高度视角（hillshade）──

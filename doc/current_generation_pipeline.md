@@ -1,5 +1,61 @@
 # 当前地图生成 Pipeline
 
+> 2026-09-08：用户批准 B＋C。新 C / block-first active 路线由 S5 冻结
+> `z_texture`，S6 生成低坡块平顶和来源绿地内微纹理计划，S7 GLB / S8 复用
+> 同一地形＋细节实体。DEM、道路缝宽、核心高度和 vegetation 默认关闭不变。
+> 本地接入与局部真实网格回归完成；未部署、未整城／切片验收。见
+> [`z_texture_BC_pipeline_20260908.md`](z_texture_BC_pipeline_20260908.md)。
+> 以下“未添加随机纹理”是早期记录；新版合成地表纹理只按上述显式政策启用。
+
+> 2026-09-06：道路接地与源线直桥岸点平面已接入新 S6/S8，普通道路按地形分片，
+> 直桥不跟随河床。复杂／缺岸桥明确阻断，最终组合和切片仍待验。
+> 见 [`road_grounding_item3_20260906.md`](road_grounding_item3_20260906.md)。
+
+> 2026-09-06：测量报告 v3 新增“几何完整性与接地检测”，区分造型测量、
+> 本次实体检测、最终组合／切片验收。S8 保存独立报告，管理员优先读取
+> S10 → S8 → S7，缺失证据不显示通过。见
+> [`geometry_inspection_report_20260906.md`](geometry_inspection_report_20260906.md)。
+
+> 2026-09-06 第三项进行中：冻结地形的取高已改为实际三角面插值，
+> 替换最近 8 点最高值，GLB/正式准备表面共用。本轮组合 101 项回归通过。
+> 新运行已在 S6 冻结街块接地与建筑平屋顶分片，S8/GLB 共用；旧快照仍为质心平挤出。
+> 道路、桥岸衔接及水体布尔裁切后接触尚未完成，不代表整项验收。
+> 见 [`z_grounding_item3_20260906.md`](z_grounding_item3_20260906.md)。
+
+> 2026-09-06 第二项：S6 道路宽度集中到 `road_width_contract.py`，区分负空间、
+> 正实体和多材料验证责任。0.28/0.42 与 0.55/0.84 分属显式视觉预设，硬件 profile
+> 与正式门槛未改。12 块单材料小样显示空槽和凸条不能共用宽度下限；多材料、坡地、
+> 弯道尚未验证。见 [`road_width_contract_20260906.md`](road_width_contract_20260906.md)。
+
+> 2026-09-06：第一项整改已增加显式 S6 `--urban-organization C` 与
+> `--surface-road-style negative-space-v1`，将连续性恢复、负空间裁切、分裂高度归属
+> 接入共享平面，PNG/GLB/3MF 共用；生产默认与打印阈值未变。
+> 当前是小范围自动回归，不是巴黎整城或切片验收。见
+> [`negative_space_s6_integration_20260906.md`](negative_space_s6_integration_20260906.md)。
+
+> 2026-09-06：地表微起伏属于正式产物应保留的几何细节，不以“低于打印层高”
+> 为删除理由。S8 `materialize_terrain_surface_plan` 在网格修复后逐点核对冻结的
+> TerrainSurfacePlan 顶面，偏差超过 1e-6 mm 即拒绝，并记录
+> `microrelief_preservation`。该检查只覆盖地形网格构建，不代表布尔裁切、上层覆盖
+> 后的最终可见表面或切片已验收。源 DEM 降噪策略未改，未添加随机纹理，vegetation
+> 仍默认关闭。受控 0.07 mm 起伏保留与错误层高取整拒绝测试通过；实际切片证据见
+> [`microrelief_slice_validation_20260906.md`](microrelief_slice_validation_20260906.md)。
+> 待完成：西溪局部最终组合模型的可见表面检查及实际切片；来源不足的风格化肌理
+> 需独立策略与土地用途约束，不能冒充真实 DEM。
+
+> 2026-09-05 最新执行约束：[`canonical_surface_execution.md`](canonical_surface_execution.md)。
+> 新任务主入口 `generate_model.py` 固定 canonical-v1。S6 的 shared-city-surface-v2
+> 固定城市块面、地标、连续道路面域及高度；S7/S8 共用严格挤出，核对实际产物而非仅输入。
+> prepared 路径禁用旧纹理/随机扰动，缓存绑定 PBF 和投影数据内容。以下 v1 及历史实验
+> 记录不代表最新整城验收；本次未部署。
+
+> 2026-09-05：巴黎阶段一致性修复（本地，未部署）。
+> 详见 [`shared_city_surface_plan.md`](shared_city_surface_plan.md)。所有 snap 模式的
+> S3 都按实际取景框、实际比例计算，snap 仅复用原始数据。
+> `--merge-layers` 下 S6 输出最终道路裁切的城市平面，S7/S8 共用同一几何指纹；
+> S8 不再随机旋转/平移或重新裁切该平面，不再把 BO 高度统一覆盖为 0.625 mm。
+> 非 merge 调用保留旧 builder 路径；不宣称已完成所有模式迁移或整城打印验收。
+
 > S5 高质量建筑数据保真过滤实验（2026-09-03）：
 > [`dense_source_filtering_v7.md`](dense_source_filtering_v7.md)。
 > 完整数据在打印下限处停止聚合的实验未通过芝加哥 A/B，默认关闭，未发布。
@@ -9,7 +65,7 @@
 > `tools/generate_terrain_diagnostic.py`。输出、测量项和验收阈值见
 > [`terrain_quality_diagnostic.md`](terrain_quality_diagnostic.md)。
 
-> 更新日期：2026-08-31
+> 当前执行契约更新日期：2026-09-05；下文带日期的实验记录保留原始状态。
 >
 > 范围：只描述数据、构图、几何、预览、3MF 导出、验收及其管理员只读观测投影；
 > 不包含账号、订单、队列、面向客户的 Web 展示和画廊发布。
@@ -48,13 +104,13 @@ flowchart TB
     S5["Stage 5 · S6–S8 下游 ScenePolicy 决策<br/>结合 SceneCharacter、printer profile 和参考 Demo 统计包络<br/>解析建筑粒度、高度与构图策略；不回改已完成的 S3"]
     C5["PipelineContext v5<br/>BaseLayers + SceneCharacter + ScenePolicy"]
 
-    S6["Stage 6 · 建筑中频与高度强调<br/>topology block 内有界聚合 → quiet/urban mass<br/>测量强调区 → 从已有聚合块中提拔少量 height mass<br/>轮廓不重写；不安全则 guarded fallback"]
-    C6["PipelineContext v6<br/>Final LayerPolygons<br/>BuildingMass / HeightHierarchy 证据"]
+    S6["Stage 6 · 建筑中频与共享城市平面<br/>topology block 内有界聚合 → quiet/urban mass → 高度角色<br/>批准道路最终裁切 → 连续道路面域及桥梁约束<br/>冻结块面/地标/道路轮廓、高度与指纹"]
+    C6["PipelineContext v6<br/>Final LayerPolygons + 城市平面/街缝<br/>BuildingMass / HeightHierarchy / SurfacePlan 证据"]
 
     S7["Stage 7 · 诊断证据与构图<br/>从 Final LayerPolygons 生成 PNG 与可选 Draft GLB<br/>输出 CompositionSpec 与测量报告；不构成独立硬门禁"]
     C7["PipelineContext v7<br/>ReviewArtifacts + CompositionSpec + 报告"]
 
-    S8["Stage 8 · 可打印网格生成<br/>地形 · 建筑 · 道路 · 水体 · 植被 · Block Base<br/>所有 builder 只消费 v7 已解析的图层和参数"]
+    S8["Stage 8 · 正式网格生成<br/>地形 · 建筑 · 道路 · 水体 · 可选植被 · Block Base<br/>城市块面/道路/地标严格挤出，不随机扰动或重切<br/>逐块核对 footprint / Z / 体积 / 数量及实际 mesh 指纹"]
     C8["PipelineContext v8<br/>SemanticMeshBundle + mesh 摘要"]
 
     S9["Stage 9 · 间隙、几何与来源存活门禁<br/>精确角色集 · 正顶点/面 · 有限 bounds · 水密 · 绕向<br/>Block Base 道路间隙 · 来源族不得静默归零"]
@@ -157,8 +213,10 @@ S4–S10 ledger handoff 直接从 Context 派生，不再由 loose locals 手写
 的 vertices/faces 内容计算 SHA-256，V9 在门禁前复核，S10 在导出前再次复核；V10 对
 六个已发布文件逐件读取稳定 inode/size/mtime 并计算 SHA-256。真实芝加哥小区域的 audit/active
 review-only 冒烟均通过，其中 active S6 实际生成 240 个 building-mass components。
-S11 的严格验收闭环已经接通；仍未统一的是 S0–S3、S7/S8/S10 effects、
-`generate_city.py`、`generate_cli.py` 和部分 gallery/fast-draft 入口。S9 当前是检查门禁，
+S11 的严格验收闭环已经接通；仍未统一的是 S0–S3 的领域对象、S7/S8/S10 effects、
+`generate_city.py` 和 `generate_cli.py` 的历史算法。2026-09-05 起网页普通任务与风格
+draft 已统一调用 `generate_model.py`；旧 gallery-draft 工具只保留为历史工具，
+西湖 quality profiles 仍是明确隔离的旧流程。上述接线尚未部署。S9 当前是检查门禁，
 不是通用 Manifold 修复 Stage；修复应在 S8 的显式 builder 中完成并留下证据。
 
 S1 的 DEM 获取现在默认 fail-closed：取数失败会终止生成，不再隐式使用全零平面。

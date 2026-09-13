@@ -159,7 +159,6 @@ class TestBuildDeepseekTerrain:
         from _TEXTURE_STYLE_OF_DEEPSEEK.terrain import (
             materialize_terrain_surface_plan,
             resolve_terrain_surface_plan,
-            sample_deepseek_terrain_z,
             sample_terrain_surface_plan_z,
         )
 
@@ -168,12 +167,14 @@ class TestBuildDeepseekTerrain:
         plan = resolve_terrain_surface_plan(
             grid, 1000.0, 1000.0, 0.1, max_surface_edge_mm=0.84)
         mesh = materialize_terrain_surface_plan(plan, area_km2=1.0)
-        xs = np.array([-30.0, 0.0, 24.0])
-        ys = np.array([18.0, 0.0, -22.0])
+        # Validate against real repaired top faces, not the legacy nearest-eight
+        # maximum sampler (which floats above slopes by ~0.06–0.07 mm here).
+        tops = mesh.triangles[mesh.face_normals[:, 2] > 0.01][::137]
+        points = np.einsum('ijk,j->ik', tops, [.2, .3, .5])
         assert np.allclose(
-            sample_terrain_surface_plan_z(plan, xs, ys),
-            sample_deepseek_terrain_z(mesh, xs, ys),
-            atol=0.03,
+            sample_terrain_surface_plan_z(plan, points[:, 0], points[:, 1]),
+            points[:, 2],
+            atol=1e-8,
         )
 
     def test_flat_grid_produces_watertight(self):

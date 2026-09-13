@@ -124,9 +124,11 @@ from aesthetic.scale_aware_topology import (
 PREPROCESS_POLICY_VERSION = (
     f"roads={ROAD_ROLE_POLICY_VERSION}|water={WATER_ROLE_POLICY_VERSION}"
     "|water_frame_clip=v1"
-    "|block_base_clearance=hierarchical-structural-road-v3"
+    "|physical_bridge_sources=v1"
+    "|block_base_clearance=eligible-shared-surface-v4"
     "|block_base_outer_face_guard=v2"
     "|city_block_partition=prenoded-atomic-grid-v1"
+    "|block_first_partition=complete-streets-v1"
     f"|building_height={HEIGHT_MAPPING_POLICY_VERSION}"
     "|building_height_roles=identity-anchor-mass-v3"
     f"|block_topology={SCALE_AWARE_TOPOLOGY_POLICY_VERSION}"
@@ -161,14 +163,27 @@ class LayerPolygons:
     # cut in the block-base builder.  The first cut happens before brick
     # rotation/shift and is therefore not sufficient proof of final clearance.
     block_base_cut_lines: List = field(default_factory=list)
+    # S3 owns the identity-complete road seam graph.  S5 may use a coarser
+    # ownership partition, but neither S5 nor S6 may replace this graph with
+    # an ink-budget or per-fragment selection.
+    seam_graph: List = field(default_factory=list)
     # Major arterials retain the conservative two-extrusion separation.  The
     # complete local topology above uses the narrower printable surface-road
     # reveal and remains physically supported by the terrain substrate.
     block_base_major_cut_lines: List = field(default_factory=list)
+    # Final planar cuts owned by S6; S7/S8 may not deform these footprints.
+    surface_road_reveals: List = field(default_factory=list)
+    surface_road_polygons: List = field(default_factory=list)
+    surface_road_bridge_indices: List = field(default_factory=list)
+    surface_plan_evidence: Dict = field(default_factory=dict)
+    surface_grounding: Dict = field(default_factory=dict)
     # Scale-aware blocks retained so later building-mass activation uses the
     # exact same topology as Block base instead of rebuilding a fixed road tier.
     city_blocks: List[Polygon] = field(default_factory=list)
     roads_lines: List[Tuple] = field(default_factory=list)
+    # Physical source bridges, NOT the landmark boolean in roads_lines tuples.
+    bridge_lines: List = field(default_factory=list)
+    bridge_source_evidence: Dict = field(default_factory=dict)
     road_roles: Dict = field(default_factory=dict)
     water_roles: Dict = field(default_factory=dict)
     building_height_evidence: Dict = field(default_factory=dict)
@@ -2022,6 +2037,7 @@ def preprocess_layers(
     utm_crs=None,
     origin: Optional[Tuple[float, float]] = None,
     merge_mode: bool = False,
+    block_first: bool = False,
     # --- auto-param overrides (None = use config defaults) ---
     road_tier_override: Optional[int] = None,
     density_threshold_override: Optional[float] = None,
@@ -2135,9 +2151,20 @@ def preprocess_layers(
     block_structure_roads = (
         road_roles.structural
         if len(road_roles.structural) > 0 else road_roles.topology)
+    seam_graph_roads = (road_roles.seam_graph
+                        if len(road_roles.seam_graph) > 0
+                        else block_structure_roads)
+    partition_tier = effective_road_tier
+    if block_first:
+        from .road_roles import select_block_partition_roads
+        block_structure_roads, partition_evidence = select_block_partition_roads(roads_gdf)
+        seam_graph_roads = block_structure_roads
+        partition_tier = 5  # includes pedestrian streets, already filtered above
+        road_roles.evidence['block_partition'] = partition_evidence
+        print(f'[block-first] full street partition: {len(block_structure_roads)} source lines', flush=True)
     if len(block_structure_roads) > 0:
         initial_city_blocks = _build_city_blocks(
-            block_structure_roads, wgdf, road_tier=effective_road_tier,
+            block_structure_roads, wgdf, road_tier=partition_tier,
             bbox_local=bbox_local)
     else:
         initial_city_blocks = []
@@ -2184,9 +2211,11 @@ def preprocess_layers(
             continue
         _major_seen.add(_key)
         major_cut_lines.append(_geometry)
-    if (len(block_structure_roads) > 0 and initial_city_blocks
+    if (not block_first and len(block_structure_roads) > 0 and initial_city_blocks
             and buildings_gdf is not None and len(buildings_gdf) > 0):
-        protected_cut_lines = list(protected_major.geometry)
+        # S5 is allowed to coarsen the *ownership* faces, never to merge over
+        # the S3 seam graph.  The final S6/S7 boolean uses the same graph.
+        protected_cut_lines = list(seam_graph_roads.geometry)
         protected_cut_lines.extend(list(road_roles.visible.geometry))
         city_blocks, eligible_structural_lines, topology_evidence = (
             coarsen_city_blocks_for_print(
@@ -2215,7 +2244,7 @@ def preprocess_layers(
         topology_evidence = {
             "policy_version": SCALE_AWARE_TOPOLOGY_POLICY_VERSION,
             "status": "not_applied",
-            "reason": "roads, blocks or buildings unavailable",
+            "reason": "block-first preserves road partitions" if block_first else "roads, blocks or buildings unavailable",
             "initial_blocks": len(initial_city_blocks),
             "final_blocks": len(city_blocks),
         }
@@ -2233,9 +2262,9 @@ def preprocess_layers(
             "structural" if len(road_roles.structural) > 0 else "topology"),
         "block_structure_features": int(len(block_structure_roads)),
         "surface_topology_features": int(len(road_roles.topology)),
-        "surface_road_source": (
-            "structural" if len(road_roles.structural) > 0 else "topology"),
-        "surface_road_features": int(len(block_structure_roads)),
+        "surface_road_source": "s3_complete_block_streets" if block_first else "s3_identity_complete_seam_graph",
+        "surface_road_features": int(len(seam_graph_roads)),
+        "ownership_partition_features": int(len(eligible_structural_lines)),
     })
     eligible_structural_gdf = gpd.GeoDataFrame(
         {"geometry": eligible_structural_lines},
@@ -2253,8 +2282,13 @@ def preprocess_layers(
 
     # ---- Step 3: BL ----
     t3 = time.time()
+    landmark_source = buildings_gdf
+    if block_first:
+        from aesthetic.block_first import landmark_candidates
+        landmark_source = landmark_candidates(buildings_gdf)
+        print(f'[block-first] landmark shortlist: {len(landmark_source) if landmark_source is not None else 0}', flush=True)
     BL_with_heights, BO_input_smalls, BL_categories, BL_height_roles = _extract_BL(
-        buildings_gdf, city_blocks, enable_hotspot, hotspot_relax,
+        landmark_source, city_blocks, enable_hotspot and not block_first, hotspot_relax,
         height_mode=height_mode,
         narrow_threshold=narrow_threshold,
         narrow_penalty_factor=narrow_penalty,
@@ -2314,6 +2348,15 @@ def preprocess_layers(
     # identical water geometry and no formal cap can enlarge the model XY span.
     WL_polys, wl_frame_clip = _clip_polygons_to_bbox(WL_polys, bbox_local)
     WO_polys, wo_frame_clip = _clip_polygons_to_bbox(WO_polys, bbox_local)
+    # S4 water handoff: later stages consume these exact, frame-clipped
+    # surfaces.  Water must not be re-ranked by road or building decisions.
+    water_role_evidence = dict(water_role_evidence)
+    water_role_evidence["stage_contract"] = {
+        "owner_stage": "S4", "status": "locked_before_final_surface_realization",
+        "WL_polygons": len(WL_polys), "WO_polygons": len(WO_polys),
+        "frame_clip": {"WL": wl_frame_clip, "WO": wo_frame_clip},
+        "later_stage_permission": "consume_only_no_reselection",
+    }
     water_role_evidence["finished_frame_clip"] = {
         "landmark": wl_frame_clip,
         "ordinary": wo_frame_clip,
@@ -2413,6 +2456,7 @@ def preprocess_layers(
         "block_base_polygons": len(block_base_polys),
         "visible_segments": len(roads_lines),
         "structural_selected": len(eligible_structural_lines),
+        "seam_graph_selected": len(seam_graph_roads),
         "structural_gap_model_mm": effective_printer.min_gap_mm,
         "structural_gap_real_m": effective_printer.min_gap_mm / scale,
         "scale_aware_topology": topology_evidence,
@@ -2421,6 +2465,8 @@ def preprocess_layers(
     print(f"[preprocess] _extract_roads: {time.time() - t9:.1f}s")
 
     # ---- Step 10: assemble ----
+    from aesthetic.bridge_sources import extract_bridge_sources
+    bridge_lines, bridge_source_evidence = extract_bridge_sources(roads_gdf)
     result = LayerPolygons(
         BL=filtered["BL"],
         BL_categories=BL_categories,
@@ -2432,15 +2478,15 @@ def preprocess_layers(
         WO=filtered["WO"],
         block_base=block_base_polys,
         block_base_classes=block_base_classes,
-        # Building aggregation may coarsen its ownership blocks.  The visible
-        # lower-surface street texture keeps the complete, continuous tier-3
-        # structural network (including residential/living streets) while
-        # excluding service-road hatch. Tier-4 remains source/topology
-        # evidence but is too dense for the reference visual language.
-        block_base_cut_lines=list(block_structure_roads.geometry),
+        # Do not reintroduce roads removed by scale-aware block coarsening.
+        # Ownership, preview and final material cuts share this decision.
+        seam_graph=list(seam_graph_roads.geometry),
+        block_base_cut_lines=list(seam_graph_roads.geometry),
         block_base_major_cut_lines=major_cut_lines,
         city_blocks=city_blocks,
         roads_lines=roads_lines,
+        bridge_lines=bridge_lines,
+        bridge_source_evidence=bridge_source_evidence,
         road_roles=road_role_evidence,
         water_roles=water_role_evidence,
         building_height_evidence=height_mapping,

@@ -50,7 +50,7 @@ def test_quality_profiles_use_isolated_westlake_entry(profile, block_mode):
     assert job["generation_profile"] == profile
 
 
-def test_classic_profile_keeps_legacy_entry(monkeypatch):
+def test_classic_profile_uses_canonical_entry(monkeypatch):
     monkeypatch.setattr(server, "_pbf_status", lambda bbox: {
         "state": "local", "pbf": "pbf_cache/zhejiang-latest.osm.pbf",
         "region": "zhejiang", "fetch": None,
@@ -62,7 +62,7 @@ def test_classic_profile_keeps_legacy_entry(monkeypatch):
     ))
 
     job = _queued_job(response)
-    assert job["spec"]["cmd"][1] == "generate_city_legacy.py"
+    assert job["spec"]["cmd"][1] == "generate_model.py"
     assert "--draft" in job["spec"]["cmd"]
     assert "--preview-fast" in job["spec"]["cmd"]
     assert "--no-vegetation" in job["spec"]["cmd"]
@@ -75,7 +75,7 @@ def test_classic_profile_keeps_legacy_entry(monkeypatch):
     assert server._bbox_side_km(job["bbox"]) > 20
 
 
-def test_custom_draft_reuses_selected_gallery_cache(monkeypatch, tmp_path):
+def test_custom_draft_keeps_style_inputs_but_cannot_bypass_canonical_pipeline(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "OUTPUT_DIR", tmp_path / "output")
     monkeypatch.setattr(server, "_pbf_status", lambda bbox: {
         "state": "local", "pbf": "pbf_cache/zhejiang-latest.osm.pbf",
@@ -97,19 +97,16 @@ def test_custom_draft_reuses_selected_gallery_cache(monkeypatch, tmp_path):
 
     job = _queued_job(response)
     cmd = job["spec"]["cmd"]
-    assert cmd[1] == "tools/generate_gallery_draft.py"
-    assert "--scene-type" in cmd
-    assert cmd[cmd.index("--scene-type") + 1] == "water_landscape"
+    assert cmd[1] == "generate_model.py"
+    assert '--params-json' in cmd
     assert "--png" not in cmd
-    assert job["fast_draft"] is True
+    assert job["fast_draft"] is False
     preview_arg = cmd[cmd.index("--bbox") + 1]
     preview_bbox = [float(value) for value in preview_arg.split(",")]
     assert server._bbox_side_km(preview_bbox) == pytest.approx(5.0, abs=0.02)
-    assert cmd[cmd.index("--source-bbox") + 1] == (
-        "29.5372,118.89,29.6728,119.045")
     assert job["bbox"] == [29.5372, 118.89, 29.6728, 119.045]
     assert job["preview_bbox"] == preview_bbox
-    assert "1–3 分钟" in server._job_duration_hint(job)
+    assert "1–3 分钟" not in server._job_duration_hint(job)  # no unmeasured cache-fast promise
 
 
 def test_classic_full_keeps_print_render_outputs():

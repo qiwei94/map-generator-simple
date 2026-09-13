@@ -138,6 +138,7 @@ def enforce_final_block_base_clearance(
     scale: float,
     clearance_mm: float,
     min_piece_area_m2: float = 10.0,
+    removed_geometry: "List | None" = None,
 ) -> Tuple[List[Polygon], "List[str] | None", Dict]:
     """Re-cut structural road seams after every block-base deformation.
 
@@ -210,6 +211,9 @@ def enforce_final_block_base_clearance(
                 local_cutters = list(matches)
             local_exclusion = unary_union(local_cutters)
             intrusion = poly.intersection(local_exclusion).area
+            if removed_geometry is not None and intrusion > 0:
+                removed_geometry.extend(_polygon_parts(
+                    poly.intersection(local_exclusion)))
             pre_intrusion += float(intrusion)
             if intrusion <= 0:
                 parts = [poly]
@@ -445,6 +449,10 @@ def build_deepseek_block_base_v3(
     major_clearance_lines: "List | None" = None,
     surface_clearance_mm: "float | None" = None,
     return_clearance_evidence: bool = False,
+    prepared_surface_evidence: "Dict | None" = None,
+    polygon_thicknesses_mm: "List | None" = None,
+    prepared_sample_z_m=None,
+    prepared_grounding_plan=None,
 ):
     """V3 block_base builder with optional Z-texture displacement.
 
@@ -452,6 +460,42 @@ def build_deepseek_block_base_v3(
     Otherwise falls back to flat manifold3d extrusion.
     """
     from shapely.geometry import box as shapely_box
+
+    if prepared_surface_evidence is not None:
+        from aesthetic.city_surface_plan import surface_fingerprint
+        if brick_style or final_clearance_mm is not None:
+            raise ValueError("S8 may not deform or re-cut a prepared S6 surface")
+        if polygon_thicknesses_mm is None:
+            raise ValueError("prepared surface requires its S6 relief values")
+        actual = surface_fingerprint(polys, scale, polygon_thicknesses_mm)
+        if (prepared_surface_evidence.get("status") != "finalized"
+                or actual != prepared_surface_evidence.get("geometry_fingerprint")):
+            raise ValueError("S8 surface geometry/heights differ from the S7 preview")
+        from .prepared_surface import materialize_flat_surfaces
+        if block_classes is not None and len(block_classes) != len(polys):
+            raise ValueError("block_classes must stay parallel to polys")
+        sampler = prepared_sample_z_m or (
+            lambda x, y: sample_terrain_z(terrain_mesh, x * scale, y * scale))
+        if prepared_surface_evidence.get('grounding') and prepared_grounding_plan is None:
+            raise ValueError('prepared S6 grounding cannot fall back to centroid extrusion')
+        if prepared_grounding_plan is not None:
+            from aesthetic.surface_grounding import materialize_grounding, require_terrain_binding
+            if prepared_grounding_plan['fingerprint'] != prepared_surface_evidence['grounding']['city']['fingerprint']:
+                raise ValueError('wrong prepared block grounding plan')
+            require_terrain_binding(prepared_grounding_plan, sampler)
+            result, materialization = materialize_grounding(
+                prepared_grounding_plan, polys, polygon_thicknesses_mm, scale)
+        else:
+            result, materialization = materialize_flat_surfaces(
+                polys, polygon_thicknesses_mm, scale, sampler)
+        proof = dict(prepared_surface_evidence)
+        proof['materialization'] = materialization
+        proof["status"] = "checked" if proof.get("cutter_features") else "not_applicable"
+        proof["plan_status"] = "finalized"
+        return ((result, proof)
+                if return_clearance_evidence else result)
+    if polygon_thicknesses_mm is not None:
+        raise ValueError("per-polygon heights require a prepared surface plan")
 
     if not polys:
         return (None, None) if return_clearance_evidence else None

@@ -4,6 +4,7 @@ import geopandas as gpd
 from types import SimpleNamespace
 from PIL import Image
 from shapely.geometry import box
+from aesthetic.scale_aware_topology import POLICY_VERSION as TOPOLOGY_POLICY_VERSION
 
 from tools.evaluate_building_mass_strategy import (
     _build_reference_comparison,
@@ -84,7 +85,7 @@ def _legacy_cache_payload():
         "model_span_mm": 196.0,
         "road_width_multiplier": 1.0,
         "road_role_policy": "print-road-roles-v14.0",
-        "topology_policy": "scale-aware-block-topology-v2",
+        "topology_policy": TOPOLOGY_POLICY_VERSION,
         "printer_profile": {"profile_id": "test"},
     }
     return common, {
@@ -95,7 +96,7 @@ def _legacy_cache_payload():
         },
         "blocks": [box(0, 0, 1, 1)],
         "evidence": {
-            "policy_version": "scale-aware-block-topology-v2",
+            "policy_version": TOPOLOGY_POLICY_VERSION,
             "target_min_model_mm": 1.3,
             "hard_floor_model_mm": 0.63,
             "boundary_inset_each_side_model_mm": 0.46,
@@ -126,6 +127,14 @@ def test_legacy_topology_cache_accepts_only_explicit_matching_controls():
 def test_parse_bbox_rejects_wrong_arity():
     with pytest.raises(Exception):
         _parse_bbox("1,2,3")
+
+
+def test_topology_cache_rejects_pre_validity_policy():
+    common, payload = _legacy_cache_payload()
+    payload['evidence']['policy_version'] = 'scale-aware-block-topology-v2'
+    assert not _legacy_topology_cache_is_compatible(
+        payload, common_key=common, target_min_model_mm=1.3,
+        hard_floor_model_mm=0.63, boundary_inset_model_mm=0.46)
 
 
 def test_raster_metrics_separate_fragment_count_from_fragment_ink():

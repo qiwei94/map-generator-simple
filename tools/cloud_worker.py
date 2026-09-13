@@ -45,6 +45,7 @@ from aesthetic.pipeline_contract import (  # noqa: E402
 _ALLOWED_ENTRYPOINTS = {
     "generate_city.py",
     "generate_city_legacy.py",
+    "generate_model.py",
     "tools/gen_area_gallery.py",
     "tools/generate_gallery_draft.py",
 }

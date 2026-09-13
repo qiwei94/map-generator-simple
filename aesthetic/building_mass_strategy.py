@@ -2196,11 +2196,10 @@ def build_building_mass_candidate(
         + policy.boundary_clearance_safety_nozzles)
     if downstream_final_clearance:
         # In the high-density two-layer route these polygons are merged into
-        # block_base, whose builder owns the final printable road cut.  Do not
+        # block_base through a final surface plan. Do not
         # erase the same street frontage a second time here: retain only the
-        # reserve needed for silhouette simplification.  The S8 block-base
-        # clearance audit remains the acceptance authority for the 0.84 mm
-        # physical seam.
+        # reserve needed for silhouette simplification. Canonical S6 now
+        # resolves the final plan before S7; S8 only materializes its proof.
         required_inset_nozzles = shape_reserve_nozzles
         policy = replace(
             policy, block_inset_nozzles=required_inset_nozzles)
@@ -2510,7 +2509,7 @@ def build_building_mass_candidate(
             "safety_reserve_nozzles": round(
                 policy.boundary_clearance_safety_nozzles, 5),
             "clearance_owner": (
-                "S8_final_block_base_cut"
+                "post_aggregation_surface_plan"
                 if downstream_final_clearance else "S6_building_mass"),
             "downstream_final_clearance": bool(
                 downstream_final_clearance),
@@ -2802,7 +2801,7 @@ def build_building_mass_candidate(
                     and minimum_two_sided_nozzles + 1e-6
                     >= 2.0 * physical_half_seam_nozzles)),
             "boundary_clearance_status": (
-                "delegated_to_S8_final_block_base_cut"
+                "delegated_to_final_surface_plan"
                 if downstream_final_clearance else "measured_in_S6"),
             "post_shape_printable_core_required": True,
             "formal_mesh_affected": False,

@@ -220,53 +220,24 @@ def _validate_surface_plan_context(plan, bbox_local, scale: float) -> None:
 class _TerrainSurfacePlanSampler:
     """Local-metre sampler backed only by an immutable TerrainSurfacePlan.
 
-    The KD-tree and eight-neighbour maximum exactly mirror
-    ``sample_terrain_surface_plan_z``.  They are cached here because GLB
-    draping can issue thousands of small sampling calls.
+    Uses the same piecewise-triangle interpolation as formal generation.
+    No nearest-neighbour maximum: that lifted geometry above sloping terrain.
     """
 
     def __init__(self, plan, bbox_local, scale: float):
-        from scipy.spatial import cKDTree
-
         _validate_surface_plan_context(plan, bbox_local, scale)
         self.plan = plan
         self.scale = float(scale)
         self.surface_plan_fingerprint = str(plan.fingerprint)
-        z_grid = np.asarray(plan.surface_z_grid_mm, dtype=np.float64)
-        x_axis = np.linspace(
-            -plan.width_m * self.scale / 2.0,
-            plan.width_m * self.scale / 2.0,
-            z_grid.shape[1],
-        )
-        y_axis = np.linspace(
-            -plan.height_m * self.scale / 2.0,
-            plan.height_m * self.scale / 2.0,
-            z_grid.shape[0],
-        )
-        xx, yy = np.meshgrid(x_axis, y_axis)
-        self._tree = cKDTree(np.column_stack([xx.ravel(), yy.ravel()]))
-        self._surface_z = z_grid.ravel()
-        self._neighbour_count = min(8, self._surface_z.size)
 
     def z_mm(self, x, y) -> float:
         return float(self.z_mm_vec(np.array([x]), np.array([y]))[0])
 
     def z_mm_vec(self, xs, ys) -> np.ndarray:
-        xs = np.asarray(xs, dtype=np.float64)
-        ys = np.asarray(ys, dtype=np.float64)
-        if xs.shape != ys.shape:
-            raise ValueError("terrain sample x/y shapes must match")
-        shape = xs.shape
-        query_xy = np.column_stack([
-            xs.ravel() * self.scale,
-            ys.ravel() * self.scale,
-        ])
-        _distance, indices = self._tree.query(
-            query_xy, k=self._neighbour_count)
-        if self._neighbour_count == 1:
-            indices = indices[:, np.newaxis]
-        sampled = np.max(self._surface_z[indices], axis=1)
-        return sampled.reshape(shape)
+        from .terrain import sample_terrain_surface_plan_z
+        return sample_terrain_surface_plan_z(
+            self.plan, np.asarray(xs, dtype=float) * self.scale,
+            np.asarray(ys, dtype=float) * self.scale)
 
 
 def _try_extrude(poly, height_m):
@@ -876,7 +847,40 @@ def render_glb_preview(layers, ctx: dict, output_path: str,
             bottom_z_mm=Z_WATER_BASE_MM,
             grid_n=64 if fast else 128,
         )
-    scene.add_geometry(terrain_mesh, node_name="terrain")
+    if (getattr(layers, 'surface_grounding', {}) or {}).get('ground_texture') is not None:
+        # The accepted ground texture cannot be covered by a coarser preview
+        # DEM. Both consumers use the identical frozen surface and union.
+        from .terrain import materialize_terrain_surface_plan
+        from aesthetic.z_texture import materialize_textured_terrain
+        terrain_mesh = materialize_textured_terrain(
+            materialize_terrain_surface_plan(terrain_surface_plan), layers, terrain_surface_plan)
+        terrain_mesh.visual.face_colors = [167, 167, 167, 255]
+    scene.add_geometry(terrain_mesh, node_name="terrain", geom_name="terrain")
+
+    # Prepared city surfaces have one executable XY/Z policy in S7 and S8.
+    # Fast previews may reduce terrain tessellation, never approved city XY.
+    shared_surface = (getattr(layers, 'surface_plan_evidence', {}) or {}).get('status') == 'finalized'
+    if shared_surface:
+        if terrain_surface_plan is None:
+            raise ValueError('prepared city preview requires the shared terrain plan')
+        from aesthetic.city_surface_plan import verify_surface_plan, surface_heights, materialize_road_surfaces
+        from aesthetic.city_surface_plan import materialize_city_role
+        surface = verify_surface_plan(layers, scale)
+        city_mesh, proof = materialize_city_role(layers, 'city', scale, sampler.z_mm_vec)
+        if city_mesh is not None:
+            city_mesh.visual.vertex_colors = _COLORS['block_base']
+            scene.add_geometry(city_mesh, node_name='block_base', geom_name='block_base')
+        road_mesh, road_proof = materialize_road_surfaces(layers, scale, sampler.z_mm_vec)
+        if road_mesh is not None:
+            road_mesh.visual.vertex_colors = _COLORS['roads']
+            scene.add_geometry(road_mesh, node_name='roads', geom_name='roads')
+        scene.metadata['city_surface_plan'] = dict(surface)
+        scene.metadata['city_surface_materialization'] = proof
+        scene.metadata['road_surface_materialization'] = road_proof
+        landmark_mesh, landmark_proof = materialize_city_role(layers, 'landmarks', scale, sampler.z_mm_vec)
+        if landmark_mesh is not None:
+            landmark_mesh.visual.vertex_colors = _COLORS['landmarks']
+            scene.add_geometry(landmark_mesh, node_name='landmarks', geom_name='landmarks')
 
     # ── 平板层（block_base / water / vegetation）──
     # 草稿几何简化容差：按区域宽度自适应（大区域粗一些，控制 GLB 体积）
@@ -897,6 +901,8 @@ def render_glb_preview(layers, ctx: dict, output_path: str,
          VEGETATION_THICKNESS_MM),
     ]
     for name, polys, z0, th in flat_specs:
+        if shared_surface and name == 'block_base':
+            continue
         if name == "vegetation" and not vegetation_enabled:
             continue
         if not polys:
@@ -969,7 +975,7 @@ def render_glb_preview(layers, ctx: dict, output_path: str,
             print(f"  [glb] water: {len(mesh.faces):,} faces")
 
     # ── 道路（贴地形 drape：随浮雕起伏，不悬浮）──
-    if layers.roads_lines:
+    if layers.roads_lines and not shared_surface:
         road_specs = []
         width_policy = getattr(layers, "road_roles", {}).get("width_policy", {})
         min_strip_mm = float(width_policy.get("min_colored_strip_mm", 0.63))
@@ -1020,6 +1026,8 @@ def render_glb_preview(layers, ctx: dict, output_path: str,
     bl_items = [(p, -Z_BUILDING_EMBED_MM, max(float(h), 0.5))
                 for p, h in layers.BL if p is not None and not p.is_empty]
     for name, items in (("buildings", bo_items), ("landmarks", bl_items)):
+        if shared_surface:
+            continue
         simplify_m = (draft_tol_m if fast and name == "buildings"
                       else draft_tol_m / 2.0 if fast else 0.0)
         mesh = _extrude_polys(items, sampler, scale, _COLORS[name],

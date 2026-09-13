@@ -322,6 +322,12 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description="统一城市 3MF 模型生成 (osmium CLI pipeline)"
     )
+    parser.add_argument('--pipeline-profile', choices=['canonical-v1', 'legacy'],
+                        default='legacy', help='canonical-v1 强制启用共享平面；legacy 仅兼容历史任务')
+    parser.add_argument('--surface-road-style', choices=['printer-default', 'negative-space-v1', 'negative-space-fine-v1'],
+                        default='printer-default', help='S6 负空间街缝实验；不代表已通过打印验收')
+    parser.add_argument('--urban-organization', choices=['default', 'C', 'block-first'], default='default',
+                        help='街区组织；block-first 普通街区直接成面，仅核心街区聚合建筑')
     parser.add_argument(
         '--preset', choices=list(PRESETS.keys()),
         help='使用内置城市预设（坐标+PBF 路径）'
@@ -364,7 +370,7 @@ def parse_args(argv=None):
     vegetation = parser.add_mutually_exclusive_group()
     vegetation.add_argument(
         '--vegetation', dest='no_vegetation', action='store_false',
-        help='显式开启植被覆盖层（默认关闭；源数据仍用于场景测量）'
+        help='显式开启植被覆盖层（默认关闭；源数据仍用于场景测量与开放空间保护）'
     )
     vegetation.add_argument(
         '--no-vegetation', dest='no_vegetation', action='store_true',
@@ -466,6 +472,12 @@ def parse_args(argv=None):
     )
 
     args = parser.parse_args(argv)
+    if args.pipeline_profile == 'canonical-v1':
+        if args.no_block_base:
+            parser.error('canonical-v1 requires block base; use legacy explicitly for historical experiments')
+        args.merge_layers = True
+        args.auto_params = True
+        args.scene_policy_mode = 'active'
 
     # 合并 preset + 显式参数
     if args.preset:
@@ -747,15 +759,36 @@ def _transform_layers_to_exact(layers, dx, dy, clip_box):
     layers.WO = _proc_list(layers.WO)
     layers.block_base = bb
     layers.block_base_classes = bb_cls
+    layers.city_blocks = _proc_list(layers.city_blocks)
+    # These are geometry, not metadata: leaving them in snap-local space
+    # shifts subsequent ownership and final road cuts relative to buildings.
+    for name in ("block_base_cut_lines", "block_base_major_cut_lines", "bridge_lines"):
+        transformed = []
+        for line in getattr(layers, name, ()):
+            cut = translate(line, xoff=dx, yoff=dy).intersection(clip)
+            if cut.geom_type == "LineString" and not cut.is_empty:
+                transformed.append(cut)
+            elif cut.geom_type == "MultiLineString":
+                transformed.extend(cut.geoms)
+        setattr(layers, name, transformed)
     layers.roads_lines = roads
     if getattr(layers, "road_roles", None):
         layers.road_roles["visible_segments"] = len(roads)
     return layers
 
 
-def _run_pipeline():
+def _require_exact_layer_scale(layers, scale, printer_profile):
+    """Fail at S3, not after S6 has interpreted an expanded cache's nozzle."""
+    import math
+    expected = float(printer_profile.nozzle_diameter_mm) / float(scale)
+    if not math.isclose(float(layers.nozzle_real_m), expected, rel_tol=1e-6):
+        raise ValueError(
+            "preprocess scale does not match requested frame; rebuild exact-frame cache")
+
+
+def _run_pipeline(argv=None):
     global _ACTIVE_PIPELINE_LEDGER
-    cli_args = parse_args()
+    cli_args = parse_args(argv)
     if not 0.4 <= cli_args.base_thickness_mm <= 3.0:
         raise SystemExit("--base-thickness-mm must be between 0.4 and 3.0")
     if cli_args.preview_fast and not cli_args.draft:
@@ -790,6 +823,9 @@ def _run_pipeline():
     if not os.path.exists(PBF_FILE):
         print(f"ERROR: PBF file not found: {PBF_FILE}")
         sys.exit(1)
+    from aesthetic.source_identity import file_content_identity, projected_sources_identity
+    _pbf_content_identity = file_content_identity(PBF_FILE)
+    print(f"  Execution profile: {cli_args.pipeline_profile}; PBF SHA256={_pbf_content_identity['sha256']}")
 
     print("=" * 70)
     print(f"  City: {CITY_NAME}")
@@ -882,6 +918,8 @@ def _run_pipeline():
         "scale_mm_per_m": round(float(scale), 12),
         "printer_profile_id": printer_profile.profile_id,
         "pbf": os.path.basename(PBF_FILE),
+        "pbf_content_identity": _pbf_content_identity,
+        "execution_profile": cli_args.pipeline_profile,
     })
     _ledger_stage_start("S1")
 
@@ -986,6 +1024,12 @@ def _run_pipeline():
         pbf_file=PBF_FILE
     )
 
+    # The direct CLI path returns directed coastlines, unlike fetch_water().
+    # Normalize them BEFORE S2 measurements and downstream cache/strategy
+    # decisions, so a coastal city never reaches S6 with only inland water.
+    from _TEXTURE_STYLE_OF_DEEPSEEK.terrain3d.fetchers.coastline import materialize_coastal_water
+    water_gdf = materialize_coastal_water(water_gdf, (fs, fw, fn, fe))
+
     water_fetch_time = time.time() - t2
 
     if water_gdf is None or len(water_gdf) == 0:
@@ -1003,6 +1047,7 @@ def _run_pipeline():
     print(f"\n[Stage 3] Fetching vegetation data...")
     t3 = time.time()
 
+    # Disabling vegetation solids must not erase scene/open-space evidence.
     if cli_args.preview_fast:
         print("  [preview-fast] vegetation source extraction skipped")
         vegetation_gdf = None
@@ -1399,6 +1444,19 @@ def _run_pipeline():
             (south, west, north, east),
             bbox_local,
         )
+        if (_amap_guide is not None
+                and _amap_evidence.get("preprocess_frame") == "snap"):
+            # Reuse the raster, but express its bounds in exact-local metres.
+            # Do not stretch the snap raster to the smaller requested bbox.
+            from copy import copy
+            _amap_guide = copy(_amap_guide)
+            _dx = _snap_origin[0] - origin[0]
+            _dy = _snap_origin[1] - origin[1]
+            _gx0, _gy0, _gx1, _gy1 = _amap_guide.bbox_local
+            _amap_guide.bbox_local = (
+                _gx0 + _dx, _gy0 + _dy, _gx1 + _dx, _gy1 + _dy)
+        _amap_evidence = {
+            **_amap_evidence, "preprocess_frame": "exact_within_snap"}
     else:
         _snap_origin = None
         _sxoff = _syoff = 0.0
@@ -1413,8 +1471,16 @@ def _run_pipeline():
           f"{_amap_evidence.get('status')} "
           f"({_amap_evidence.get('reason', 'reference ready')})")
 
+    if file_content_identity(PBF_FILE) != _pbf_content_identity:
+        raise ValueError('PBF changed during source extraction; refusing mixed-source cache')
+    _projected_content_identity = projected_sources_identity({
+        'buildings': buildings_gdf, 'roads': roads_gdf, 'water': water_gdf,
+        'vegetation': vegetation_gdf, 'landuse': landuse_gdf})
     _preprocess_parameters = {
-        "schema_version": "preprocess-parameters-v1",
+        "schema_version": "preprocess-parameters-v2-exact-frame",
+        "source_content_identity": _projected_content_identity,
+        "pbf_content_identity": _pbf_content_identity,
+        "execution_profile": cli_args.pipeline_profile,
         "policy_version": PREPROCESS_POLICY_VERSION,
         "composition_frame": _amap_evidence.get(
             "preprocess_frame", "snap" if snap_active else "exact"),
@@ -1429,6 +1495,7 @@ def _run_pipeline():
         "vegetation_enabled": bool(ENABLE_VEGETATION),
         "block_base_enabled": bool(ENABLE_BLOCK_BASE),
         "merge_block_layers": bool(MERGE_BLOCK_LAYERS),
+        "block_first": cli_args.urban_organization == 'block-first',
         "effective_overrides": dict(_preprocess_overrides),
         "resolved_params": (
             auto_resolved.to_dict() if auto_resolved is not None else {}),
@@ -1513,17 +1580,8 @@ def _run_pipeline():
 
     layers = None
     if snap_active:
-        # ---- snap 模式：preprocess 在量化框坐标系计算，跨请求缓存复用 ----
-        # 命中后平移回本次精确坐标系并裁到精确 bbox。
-        from shapely.affinity import translate as _sh_translate
-        def _gdf_to_snap(g):
-            if g is None or len(g) == 0:
-                return g
-            g2 = g.copy()
-            g2["geometry"] = g2["geometry"].apply(
-                lambda geom: _sh_translate(geom, xoff=_sxoff, yoff=_syoff))
-            return g2
-
+        # Raw snap sources remain reusable. Derived geometry is always keyed
+        # to the exact requested frame/scale, including overseas cities.
         _snap_cache = PipelineCache(
             f"snap_{fs:.4f}_{fw:.4f}_{fn:.4f}_{fe:.4f}",
             enabled=not cli_args.no_cache)
@@ -1533,86 +1591,42 @@ def _run_pipeline():
             "preprocess_parameters": _preprocess_parameters_fingerprint,
         }
 
-        if _amap_evidence.get("preprocess_frame") == "exact_within_snap":
-            # The raw fetch margin remains reusable, but an exact-frame AMap
-            # guide must rank exact-frame candidates.  Ranking the full snap
-            # frame changed which complete river group won in Shanghai and
-            # left a visible gap after clipping.  Clip raw data first and run
-            # all frame-dependent topology/salience decisions in the frame
-            # that is actually rendered.
-            print("[preprocess] exact-frame guide: clipping reusable snap "
-                  "sources before composition")
+        print("[preprocess] exact-frame composition: clipping reusable snap "
+              "sources before composition")
 
-            def _compute_layers_exact_within_snap():
-                return preprocess_layers(
-                    buildings_gdf=_clip_gdf_to_bbox(
-                        buildings_gdf, bbox_local),
-                    roads_gdf=_clip_gdf_to_bbox(roads_gdf, bbox_local),
-                    water_gdf=_clip_gdf_to_bbox(water_gdf, bbox_local),
-                    vegetation_gdf=_clip_gdf_to_bbox(
-                        vegetation_gdf, bbox_local),
-                    bbox_local=bbox_local,
-                    scale=scale,
-                    enable_hotspot=True,
-                    hotspot_relax=_hotspot_relax,
-                    area_km2=area_km2,
-                    landuse_gdf=_clip_gdf_to_bbox(landuse_gdf, bbox_local),
-                    narrow_threshold=cli_args.narrow_threshold,
-                    narrow_penalty=cli_args.narrow_penalty,
-                    bbox_wgs84=(south, west, north, east),
-                    utm_crs=utm_crs,
-                    origin=origin,
-                    printer_profile=printer_profile,
-                    amap_salience_guide=_amap_guide,
-                    **_preprocess_overrides,
-                )
-
-            layers = _snap_cache.get_or_compute(
-                "preprocess_exact_v1",
-                input_keys={
-                    **_common_cache_inputs,
-                    "exact_bbox": (
-                        f"{south:.7f},{west:.7f},{north:.7f},{east:.7f}"),
-                    "composition_frame": "exact_within_snap_v1",
-                },
-                compute_fn=_compute_layers_exact_within_snap,
-                label="preprocess(exact within snap)",
-            )
-        else:
-            def _compute_layers_snap():
-                return preprocess_layers(
-                    buildings_gdf=_gdf_to_snap(buildings_gdf),
-                    roads_gdf=_gdf_to_snap(roads_gdf),
-                    water_gdf=_gdf_to_snap(water_gdf),
-                    vegetation_gdf=_gdf_to_snap(vegetation_gdf),
-                    bbox_local=_snap_bbox_local,
-                    scale=_scale_snap,
-                    enable_hotspot=True,
-                    hotspot_relax=_hotspot_relax,
-                    area_km2=snap_info["area_km2"],
-                    landuse_gdf=_gdf_to_snap(landuse_gdf),
-                    narrow_threshold=cli_args.narrow_threshold,
-                    narrow_penalty=cli_args.narrow_penalty,
-                    bbox_wgs84=(fs, fw, fn, fe),
-                    utm_crs=utm_crs,
-                    origin=_snap_origin,
-                    printer_profile=printer_profile,
-                    amap_salience_guide=_amap_guide,
-                    **_preprocess_overrides,
-                )
-
-            layers = _snap_cache.get_or_compute(
-                "preprocess_v2",
-                input_keys=_common_cache_inputs,
-                compute_fn=_compute_layers_snap,
-                label="preprocess(snap)",
+        def _compute_layers_exact_within_snap():
+            return preprocess_layers(
+                buildings_gdf=_clip_gdf_to_bbox(buildings_gdf, bbox_local),
+                roads_gdf=_clip_gdf_to_bbox(roads_gdf, bbox_local),
+                water_gdf=_clip_gdf_to_bbox(water_gdf, bbox_local),
+                vegetation_gdf=_clip_gdf_to_bbox(vegetation_gdf, bbox_local),
+                bbox_local=bbox_local,
+                scale=scale,
+                enable_hotspot=True,
+                hotspot_relax=_hotspot_relax,
+                area_km2=area_km2,
+                landuse_gdf=_clip_gdf_to_bbox(landuse_gdf, bbox_local),
+                narrow_threshold=cli_args.narrow_threshold,
+                narrow_penalty=cli_args.narrow_penalty,
+                bbox_wgs84=(south, west, north, east),
+                utm_crs=utm_crs,
+                origin=origin,
+                printer_profile=printer_profile,
+                amap_salience_guide=_amap_guide,
+                block_first=cli_args.urban_organization == 'block-first',
+                **_preprocess_overrides,
             )
 
-            # snap 坐标系 → 精确坐标系，并裁剪到用户精确 bbox
-            _dx = _snap_origin[0] - origin[0]
-            _dy = _snap_origin[1] - origin[1]
-            layers = _transform_layers_to_exact(
-                layers, _dx, _dy, bbox_local)
+        layers = _snap_cache.get_or_compute(
+            "preprocess_exact_v1",
+            input_keys={
+                **_common_cache_inputs,
+                "exact_bbox": f"{south:.7f},{west:.7f},{north:.7f},{east:.7f}",
+                "composition_frame": "exact_within_snap_v2",
+            },
+            compute_fn=_compute_layers_exact_within_snap,
+            label="preprocess(exact within snap)",
+        )
     else:
         layers = preprocess_layers(
             buildings_gdf=buildings_gdf,
@@ -1632,8 +1646,10 @@ def _run_pipeline():
             origin=origin,
             printer_profile=printer_profile,
             amap_salience_guide=_amap_guide,
+            block_first=cli_args.urban_organization == 'block-first',
             **_preprocess_overrides,
         )
+    _require_exact_layer_scale(layers, scale, printer_profile)
     print(f"  {layers.summary()}")
     print(f"  Time: {time.time() - t45:.1f}s")
 
@@ -1734,6 +1750,7 @@ def _run_pipeline():
     print(f"\n[Pipeline S5] Resolving bounded scene policy...")
     _domain_context_v5 = run_s5_policy(
         _domain_context_v4,
+        urban_organization=cli_args.urban_organization,
         activation=(
             "active" if cli_args.scene_policy_mode == "active"
             else "audit_only"
@@ -1778,6 +1795,9 @@ def _run_pipeline():
         _domain_context_v5,
         height_emphasis_zones=bool(cli_args.height_emphasis_zones),
         merge_block_layers=bool(MERGE_BLOCK_LAYERS),
+        surface_road_style=cli_args.surface_road_style,
+        urban_organization=cli_args.urban_organization,
+        planar_only=bool(cli_args.review_only),
     )
     # S6 owns a cloned set of mutable layer containers.  Rebind all legacy
     # downstream consumers to that exact Context output; the cached S3 object
@@ -1938,7 +1958,9 @@ def _run_pipeline():
         "water_roles": dict(getattr(layers, "water_roles", {}) or {}),
         "composition_spec": _composition_spec,
     }
+    from aesthetic.geometry_inspection import build_geometry_inspection
     _measurement_initial_outcomes = {
+        "geometry_inspection": build_geometry_inspection(layers),
         "phase": "layers_ready_meshes_pending",
         "printable_features": layer_evidence(
             layers, vegetation_enabled=not cli_args.no_vegetation),
@@ -2257,6 +2279,12 @@ def _run_pipeline():
     _scene_character = thaw_json(_domain_context_v7.scene_character)
     _scene_policy = thaw_json(_domain_context_v7.scene_policy)
     water_relief = thaw_json(_domain_context_v7.water_relief_intent)
+    _shared_surface = (getattr(layers, 'surface_plan_evidence', {}) or {}).get('status') == 'finalized'
+    _prepared_sampler = None
+    if _shared_surface:
+        from _TEXTURE_STYLE_OF_DEEPSEEK.render_glb import _TerrainSurfacePlanSampler
+        _prepared_sampler = _TerrainSurfacePlanSampler(
+            terrain_surface_plan, bbox_local, scale).z_mm_vec
 
     # =====================================================================
     # Canonical S8: materialize the exact terrain plan consumed by S6, then
@@ -2277,6 +2305,8 @@ def _run_pipeline():
         min_surface_height_mm=printer_profile.min_surface_height_mm,
         surface_plan=terrain_surface_plan,
     )
+    from aesthetic.z_texture import materialize_textured_terrain
+    terrain_solid = materialize_textured_terrain(terrain_solid, layers, terrain_surface_plan)
     print(
         f"  Terrain: {len(terrain_solid.faces):,} faces, "
         f"surface={terrain_surface_plan.fingerprint[:12]}…"
@@ -2303,7 +2333,11 @@ def _run_pipeline():
     buildings_mesh = None
     landmarks_mesh = None
     terrain_solid_no_buildings = terrain_solid
-    if MERGE_BLOCK_LAYERS:
+    if _shared_surface:
+        from aesthetic.city_surface_plan import materialize_city_role
+        landmarks_mesh, _landmark_proof = materialize_city_role(
+            layers, 'landmarks', scale, _prepared_sampler)
+    elif MERGE_BLOCK_LAYERS:
         print(f"  MERGE_BLOCK_LAYERS=True: BO 将合入 block_base，此处只建 landmarks")
         if layers.BL:
             try:
@@ -2348,7 +2382,11 @@ def _run_pipeline():
     t6 = time.time()
 
     roads_mesh = None
-    if layers.roads_lines:
+    if _shared_surface:
+        from aesthetic.city_surface_plan import materialize_road_surfaces
+        roads_mesh, _road_surface_proof = materialize_road_surfaces(
+            layers, scale, _prepared_sampler)
+    elif layers.roads_lines:
         try:
             roads_mesh = build_deepseek_roads_v3(
                 layers.roads_lines,
@@ -2446,22 +2484,37 @@ def _run_pipeline():
             merged_polys = list(layers.block_base)
             merged_classes = list(layers.block_base_classes) if layers.block_base_classes else None
             merge_thickness = None
+            _surface_plan = getattr(layers, "surface_plan_evidence", {}) or {}
+            _surface_ready = _surface_plan.get("status") == "finalized"
+            _surface_heights = None
+            if _surface_ready:
+                from aesthetic.city_surface_plan import (
+                    surface_heights, verify_surface_plan)
+                verify_surface_plan(layers, scale)
+                _surface_heights = surface_heights(layers)
             if MERGE_BLOCK_LAYERS and layers.BO:
                 merged_polys.extend(layers.BO)
                 if merged_classes is not None:
                     merged_classes.extend(["unclassified"] * len(layers.BO))
-                merge_thickness = 0.625
+                merge_thickness = None if _surface_ready else 0.625
                 print(f"  MERGE: block_base({len(layers.block_base)}) + BO({len(layers.BO)}) "
                       f"= {len(merged_polys)} polys, thickness={merge_thickness}mm")
             block_base_mesh, block_base_clearance_evidence = build_deepseek_block_base_v3(
                 merged_polys, terrain_solid, scale,
+                brick_style=not _surface_ready,
                 bbox_local=bbox_local, thickness_mm=merge_thickness,
                 block_classes=merged_classes,
                 clearance_lines=layers.block_base_cut_lines,
-                final_clearance_mm=printer_profile.final_block_base_gap_mm,
+                final_clearance_mm=(
+                    None if _surface_ready else printer_profile.final_block_base_gap_mm),
                 major_clearance_lines=getattr(
                     layers, "block_base_major_cut_lines", []),
                 surface_clearance_mm=printer_profile.surface_road_gap_mm,
+                prepared_surface_evidence=(
+                    _surface_plan if _surface_ready else None),
+                polygon_thicknesses_mm=_surface_heights,
+                prepared_sample_z_m=_prepared_sampler,
+                prepared_grounding_plan=(getattr(layers, 'surface_grounding', {}) or {}).get('city'),
                 return_clearance_evidence=True)
             if block_base_clearance_evidence is not None:
                 block_base_clearance_evidence.update({
@@ -2500,6 +2553,22 @@ def _run_pipeline():
         'vegetation': vegetation_mesh,
         'block_base': block_base_mesh,
     }
+    # Persist actual checks before entering the next gate. A later S9 failure
+    # must not leave the administrator with only an optimistic S7 plan report.
+    _s8_inspection = build_geometry_inspection(layers, meshes)
+    _s8_measurement_report = build_measurement_report(
+        run=_measurement_run, source_features=_measurement_source_features,
+        scene_character=_scene_character, scene_policy=_scene_policy,
+        auto_parameter_evidence=_measurement_auto_evidence,
+        preprocess_evidence=_measurement_preprocess_evidence,
+        generation_outcomes={**_measurement_initial_outcomes,
+            "phase": "meshes_ready_before_s9", "geometry_inspection": _s8_inspection,
+            "meshes": summarize_meshes(meshes),
+            "block_base_clearance": block_base_clearance_evidence},
+        status="measurement_error" if _s8_inspection['status'] == 'error' else "generated_pending_validation")
+    _s8_measurement_paths = write_measurement_report(
+        OUTPUT_DIR, _s8_measurement_report,
+        stem=f"pipeline_measurement_report_s8.{_artifact_identity}")
     _domain_context_v8 = run_s8_mesh_materialization(
         _domain_context_v7,
         meshes=meshes,
@@ -2519,6 +2588,8 @@ def _run_pipeline():
                 attempt_id=_ACTIVE_PIPELINE_LEDGER.attempt_id,
             ),
         },
+        artifacts={"measurement_report_json": _s8_measurement_paths['json'],
+                   "measurement_report_html": _s8_measurement_paths['html']},
     )
     _ledger_stage_start("S9")
     print(f"\n[Pipeline S9] Checking printable mesh bundle...")
@@ -2725,6 +2796,7 @@ def _run_pipeline():
         preprocess_evidence=_measurement_preprocess_evidence,
         generation_outcomes={
             "phase": "artifact_exported_validation_pending",
+            "geometry_inspection": build_geometry_inspection(layers, meshes),
             "printable_features": _printable_features,
             "building_mass": _building_mass_evidence,
             "height_hierarchy": _height_hierarchy_evidence,
@@ -2941,11 +3013,11 @@ def _run_pipeline():
               f"png_path='{png_path_final}', verdict='accept'))\"")
 
 
-def main():
+def main(argv=None):
     """Run the generator and durably mark an interrupted Stage as failed."""
 
     try:
-        return _run_pipeline()
+        return _run_pipeline(argv)
     except BaseException as exc:
         _fail_active_pipeline(exc)
         raise

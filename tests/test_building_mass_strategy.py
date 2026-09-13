@@ -363,7 +363,7 @@ def test_merged_block_base_delegates_physical_road_clearance_once():
 
     seam = candidate.evidence["required_road_seam"]
     assert seam["final_gap_model_mm"] == 0.84
-    assert seam["clearance_owner"] == "S8_final_block_base_cut"
+    assert seam["clearance_owner"] == "post_aggregation_surface_plan"
     assert seam["downstream_final_clearance"] is True
     # S6 reserves only simplification movement and safety. The physical road
     # gap is cut after BO is merged into block_base, so it is not charged twice.
@@ -371,7 +371,7 @@ def test_merged_block_base_delegates_physical_road_clearance_once():
     boundaries = candidate.evidence["hard_boundaries"]
     assert boundaries["boundary_clearance_passed"] is None
     assert boundaries["boundary_clearance_status"] == (
-        "delegated_to_S8_final_block_base_cut")
+        "delegated_to_final_surface_plan")
 
 
 def test_shallow_gnaw_is_convexified_inside_area_and_topology_budget():

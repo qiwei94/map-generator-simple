@@ -67,6 +67,7 @@ def prepare_deepseek_water_relief(
     *,
     base_thickness_mm: float,
     surface_thickness_mm: float,
+    exact_boundary: bool = False,
 ) -> dict:
     """Recess terrain under printable water caps without a global boolean.
 
@@ -97,7 +98,7 @@ def prepare_deepseek_water_relief(
 
     terrain_base_z = Z_WATER_BASE_MM + float(base_thickness_mm)
     inset_mm = min(float(surface_thickness_mm) / 2.0, 0.12)
-    verts = terrain_mesh.vertices
+    verts = terrain_mesh.vertices.copy() if exact_boundary else terrain_mesh.vertices
     levels: list[float] = []
     carved: set[int] = set()
 
@@ -153,7 +154,34 @@ def prepare_deepseek_water_relief(
             verts[carve_idx, 2] = cap_bottom_z
             carved.update(int(i) for i in carve_idx)
 
-    terrain_mesh.vertices = verts
+    if exact_boundary:
+        # The legacy vertex-only recess pulls entire bank triangles down even
+        # when a bridge endpoint lies outside water. Cut at the actual polygon
+        # boundary instead. Keep this explicit while city-scale cost is tested.
+        from shapely.affinity import scale as scale_polygon
+        from _TEXTURE_STYLE_OF_DEEPSEEK._geom_utils import mesh_to_manifold64, manifold64_to_mesh
+        result = terrain_mesh.copy()
+        for poly, level in zip(all_polys, levels):
+            if poly is None or poly.is_empty:
+                continue
+            # Pair with support_to_base=True in the water builder. This is a
+            # material partition, not two overlapping solids below a thin cap.
+            bottom = terrain_base_z
+            top = max(float(result.bounds[1, 2]), bottom) + float(surface_thickness_mm)
+            cutter = _extrude_water_manifold(scale_polygon(poly, xfact=scale, yfact=scale,
+                                                          origin=(0, 0)), top-bottom)
+            if cutter.is_empty():
+                raise ValueError('exact water recess produced an empty cutter')
+            raw = cutter.translate((0, 0, bottom)).to_mesh64()
+            tool = trimesh.Trimesh(vertices=np.asarray(raw.vert_properties)[:, :3],
+                                   faces=np.asarray(raw.tri_verts), process=False)
+            result = manifold64_to_mesh(mesh_to_manifold64(result) - mesh_to_manifold64(tool))
+            if result.is_empty or not result.is_watertight or not result.is_winding_consistent:
+                raise ValueError('exact water recess lost the terrain solid')
+        terrain_mesh.vertices = result.vertices
+        terrain_mesh.faces = result.faces
+    else:
+        terrain_mesh.vertices = verts
     print(
         f"  Water(v3): recessed {len(carved):,} terrain vertices for "
         f"{len(levels)} printable caps ({surface_thickness_mm:.2f}mm)"
@@ -162,6 +190,8 @@ def prepare_deepseek_water_relief(
         "surface_levels_mm": levels,
         "carved_vertex_count": len(carved),
         "surface_thickness_mm": float(surface_thickness_mm),
+        "recess_method": "exact_polygon_boolean" if exact_boundary else "grid_vertex_lowering",
+        "requires_water_support_to_base": bool(exact_boundary),
     }
 
 
@@ -259,6 +289,7 @@ def build_deepseek_water_v3(
     base_thickness_mm: float | None = None,
     surface_levels_mm: list[float] | None = None,
     surface_thickness_mm: float = 0.24,
+    support_to_base: bool = False,
 ) -> trimesh.Trimesh:
     """V3 water builder.
 
@@ -326,6 +357,13 @@ def build_deepseek_water_v3(
                     terrain_base_z,
                     float(surface_levels_mm[i]) - h_mm,
                 )
+                if support_to_base:
+                    # Preserve the declared visible water top; fill underneath
+                    # to the shared base so a cap cannot float above a low DEM.
+                    h_mm = float(surface_levels_mm[i]) - terrain_base_z
+                    z_bottom_mm = terrain_base_z
+                    if h_mm <= 0:
+                        raise ValueError('supported water top must be above the base')
             h = h_mm / scale
             man = _extrude_water_manifold(poly, h)
             if man.is_empty():

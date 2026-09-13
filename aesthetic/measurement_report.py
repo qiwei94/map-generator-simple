@@ -18,10 +18,11 @@ import tempfile
 from typing import Any, Mapping
 
 
-SCHEMA_VERSION = "pipeline-measurement-report-v2"
-HTML_VERSION = "pipeline-measurement-report-html-v2"
+SCHEMA_VERSION = "pipeline-measurement-report-v3"
+HTML_VERSION = "pipeline-measurement-report-html-v3"
 
 STATUS_LABELS_ZH = {
+    "passed": "通过", "failed": "失败",
     "ready": "就绪", "partial": "部分就绪", "pending": "等待中",
     "unavailable": "不可用", "not_applicable": "不适用", "error": "错误",
     "measured": "已完成测量", "generated_pending_validation": "已生成，待验收",
@@ -39,6 +40,7 @@ PHASE_LABELS_ZH = {
 }
 
 FAMILY_LABELS_ZH = {
+    "geometry_inspection": "几何完整性与接地检测",
     "run": "运行配置", "provenance": "数据来源证据",
     "source_inventory": "原始要素清单", "city_profile": "城市配置画像",
     "scene_character": "场景特征", "external_evidence": "交叉数据证据",
@@ -73,7 +75,7 @@ REQUIRED_FAMILIES = {
     ),
     "outcomes": (
         "building_mass", "height", "terrain", "water_relief",
-        "block_base", "printability", "meshes",
+        "block_base", "printability", "meshes", "geometry_inspection",
     ),
     "acceptance": ("validator", "slicer"),
 }
@@ -83,6 +85,18 @@ REQUIRED_FAMILIES = {
 # guarantee that new fields are retained and visibly marked instead of being
 # silently dropped when the measurement schema grows.
 _IMPACT_RULES = (
+    {
+        "id": "z_texture",
+        "title": "平顶街块与局部地表微纹理",
+        "prefixes": ("scene_policy.z_texture", "building_mass.final_surface_plan.z_texture",
+                     "building_mass.final_surface_plan.grounding.ground_texture",
+                     "terrain.ground_texture"),
+        "consumers": ("S5 ZTexturePolicy", "S6 resolve_grounding / plan_ground_texture",
+                      "S7 GLB / S8 materialize_textured_terrain"),
+        "decision_outputs": ("低坡块顶抬平", "绿地允许区域", "微纹理幅度与尺度", "地形绑定指纹"),
+        "effect": "保持 XY 街缝与 DEM，低坡块顶抬平；仅来源绿地内生成有界微纹理，双端复用冻结表面。",
+        "forbidden": ("纹理跨入水面道路建筑", "重新开启树木实体", "声称已通过打印验收"),
+    },
     {
         "id": "building_block_grammar",
         "title": "建筑粒度与轮廓语法",
@@ -387,6 +401,10 @@ def _realized_status(impact_id: str, decisions: Mapping,
                      outcomes: Mapping) -> str:
     policy = decisions.get("scene_policy", {}) or {}
     active = policy.get("activation") == "active"
+    if impact_id == 'z_texture':
+        surface = (outcomes.get('building_mass', {}) or {}).get('final_surface_plan', {}) or {}
+        return ('applied_bounded_geometry' if surface.get('z_texture_status') == 'frozen_in_s6'
+                else 'policy_only' if policy.get('z_texture') else 'audit_only')
     mass_active = (outcomes.get("building_mass", {}) or {}).get(
         "status") == "active"
     height_outcome = outcomes.get("height_hierarchy", {}) or {}
@@ -808,6 +826,8 @@ def _build_realization_matrix(auto: Mapping, scene_policy: Mapping,
 def _family_status_from_payload(payload: Mapping, *,
                                 default: str = "ready") -> str:
     status = str(payload.get("status") or "").lower()
+    if status == "partial":
+        return "partial"
     if status in {"error", "failed", "invalid"}:
         return "error"
     if status in {"pending", "queued", "running"}:
@@ -922,6 +942,11 @@ def _build_families(*, run: Mapping, source_features: Mapping,
                 version=str(composition.get("schema_version") or "unknown")),
         },
         "outcomes": {
+            "geometry_inspection": _family(
+                _mapping(outcomes.get("geometry_inspection")),
+                status=_family_status_from_payload(
+                    _mapping(outcomes.get("geometry_inspection")), default="pending"),
+                version="geometry-inspection-v1"),
             "building_mass": _family(
                 _mapping(outcomes.get("building_mass")),
                 status=_family_status_from_payload(
@@ -1225,6 +1250,8 @@ summary{{cursor:pointer;padding:12px;font-weight:650}}pre{{white-space:pre-wrap;
 <div class="card"><span>影响链</span><b id="impactCount">0</b></div>
 <div class="card"><span>状态</span><b id="status" class="status">—</b></div></div>
 <h2>测量字段族覆盖</h2><div id="families" class="panel"></div>
+<h2>几何完整性与接地检测</h2><p class="muted">计划检查、实际实体检查、最终组合与切片验收分开显示。单项通过不代表整模型可打印。</p>
+<div class="table-wrap"><table><thead><tr><th>检测项</th><th>阶段／状态</th><th>检测范围</th><th>本次证据</th><th>边界说明</th></tr></thead><tbody id="geometry-checks"></tbody></table></div>
 <h2>测量 → 决策 → 实际消费者</h2><p class="muted">“字段已算出”不等于“本次已生效”。这里按真实调用链区分已应用、部分应用、仅策略、未接线与待验收。</p>
 <div class="table-wrap"><table><thead><tr><th>作用链</th><th>状态</th><th>实际执行模块</th><th>本次作用</th><th>结果证据 / 差异</th></tr></thead><tbody id="realizations"></tbody></table></div>
 <h2>测量如何影响生成（类别说明）</h2><div id="impacts"></div>
@@ -1240,6 +1267,8 @@ summary{{cursor:pointer;padding:12px;font-weight:650}}pre{{white-space:pre-wrap;
 const esc=s=>String(s??'').replace(/[&<>\"']/g,c=>({{'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":'&#39;'}}[c]));
 const fmt=v=>typeof v==='string'?v:JSON.stringify(v);
 const labels=report.labels_zh||{{}};const phaseLabel=v=>(labels.phases||{{}})[v]||v;const familyLabel=v=>(labels.families||{{}})[v]||v;const statusLabel=v=>(labels.statuses||{{}})[v]||v;
+const geo=report.generation_outcomes?.geometry_inspection;
+document.getElementById('geometry-checks').innerHTML=geo?.checks?.length?geo.checks.map(x=>`<tr><td>${{esc(x.title_zh)}}</td><td>${{esc(x.stage)}} · ${{esc(x.status==='measured'?'已测量（非验收）':statusLabel(x.status))}}</td><td>${{esc(x.scope_zh)}}</td><td><code>${{esc(fmt(x.evidence))}}</code></td><td>${{esc(x.reason_zh)}}</td></tr>`).join(''):'<tr><td colspan="5">待检测：本次报告未包含几何检测证据，不视为通过。</td></tr>';
 city.textContent=report.city||'—';leafCount.textContent=report.coverage.canonical_measurement_leaf_count||report.coverage.measurement_leaf_count;
 impactCount.textContent=report.impact_chains.length;status.textContent=report.status_label_zh||statusLabel(report.status);
 subtitle.textContent=`${{report.generated_at}} · 报告版本 ${{report.schema_version}} · ${{report.purpose_zh||'报告只读，不参与几何生成'}}`;

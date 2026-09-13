@@ -25,7 +25,7 @@ def test_layer_preprocess_cold_import_does_not_enter_aesthetic_loop_cycle():
     )
 
     assert result.returncode == 0, result.stderr
-    assert "block_topology=scale-aware-block-topology-v2" in result.stdout
+    assert "block_topology=scale-aware-block-topology-v3-valid-faces" in result.stdout
 
 
 def test_lazy_aesthetic_public_api_remains_compatible():

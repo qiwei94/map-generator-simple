@@ -516,6 +516,56 @@ def terrain_surface_plan_evidence(plan: TerrainSurfacePlan) -> dict:
         "detail_enhancement": dict(plan.detail_evidence),
         "formal_qem_decimation": False,
         "min_surface_height_mm": plan.min_surface_height_mm,
+        "microrelief_policy": {
+            "version": "preserve-planned-microrelief-v1",
+            "height_quantization": False,
+            "discard_below_layer_height": False,
+            "synthetic_texture": False,
+            "scope": "resolved_terrain_surface; not final exposed surface",
+            "print_visibility": "requires_actual_slicing_and_physical_review",
+        },
+    }
+
+
+def verify_terrain_microrelief(
+    plan: TerrainSurfacePlan, solid: trimesh.Trimesh,
+) -> dict:
+    """Verify resolved terrain Z survived mesh construction/repair, in mm.
+
+    This is not a slicer simulation or a claim that other semantic objects do
+    not cover terrain. Source conditioning precedes this contract and remains
+    responsible for distinguishing DEM noise from landform evidence.
+    """
+    ny, nx = plan.surface_z_grid_mm.shape
+    xx, yy = np.meshgrid(
+        np.linspace(-plan.width_m * plan.scale_mm_per_m / 2,
+                    plan.width_m * plan.scale_mm_per_m / 2, nx),
+        np.linspace(-plan.height_m * plan.scale_mm_per_m / 2,
+                    plan.height_m * plan.scale_mm_per_m / 2, ny),
+    )
+    expected = np.column_stack((xx.ravel(), yy.ravel(),
+                                plan.surface_z_grid_mm.ravel()))
+    vertices = np.asarray(solid.vertices)
+    if not len(vertices) or not np.isfinite(vertices).all():
+        raise ValueError("terrain microrelief: invalid mesh vertices")
+    distance, _ = cKDTree(vertices).query(expected)
+    tolerance_mm = 1e-6
+    max_error = float(np.max(distance))
+    if max_error > tolerance_mm:
+        raise ValueError(
+            "terrain microrelief lost during materialization: "
+            f"planned surface vertex deviation {max_error:.9f}mm"
+        )
+    return {
+        "version": "preserve-planned-microrelief-v1",
+        "status": "preserved_at_surface_vertices",
+        "sample_count": len(expected),
+        "max_vertex_deviation_mm": max_error,
+        "tolerance_mm": tolerance_mm,
+        "planned_peak_to_valley_mm": float(np.ptp(expected[:, 2])),
+        "height_quantization": False,
+        "scope": "terrain_mesh_before_water_booleans_and_other_layers",
+        "print_visibility": "not_validated_by_vertex_preservation",
     }
 
 
@@ -524,29 +574,38 @@ def sample_terrain_surface_plan_z(
     x_mm: np.ndarray,
     y_mm: np.ndarray,
 ) -> np.ndarray:
-    """Sample semantic Z with the same 8-neighbour rule as formal meshes."""
+    """Interpolate the frozen, uncarved terrain's actual triangle planes.
 
-    x_axis = np.linspace(
-        -plan.width_m * plan.scale_mm_per_m / 2.0,
-        plan.width_m * plan.scale_mm_per_m / 2.0,
-        plan.surface_z_grid_mm.shape[1],
-    )
-    y_axis = np.linspace(
-        -plan.height_m * plan.scale_mm_per_m / 2.0,
-        plan.height_m * plan.scale_mm_per_m / 2.0,
-        plan.surface_z_grid_mm.shape[0],
-    )
-    xx, yy = np.meshgrid(x_axis, y_axis)
-    source_xy = np.column_stack([xx.ravel(), yy.ravel()])
-    query_xy = np.column_stack([
-        np.asarray(x_mm, dtype=np.float64),
-        np.asarray(y_mm, dtype=np.float64),
-    ])
-    k = min(8, len(source_xy))
-    _distance, indices = cKDTree(source_xy).query(query_xy, k=k)
-    if k == 1:
-        indices = indices[:, np.newaxis]
-    return np.max(plan.surface_z_grid_mm.ravel()[indices], axis=1)
+    Matches terrain3d.processors.terrain._generate_grid_faces: each cell is
+    split along the south-east/north-west diagonal, not bilinearly blended.
+    Out-of-bounds points are errors; never extrapolate an unknown bank height.
+    This is a sampling primitive, not proof that a whole object is grounded.
+    """
+    xs, ys = np.asarray(x_mm, dtype=np.float64), np.asarray(y_mm, dtype=np.float64)
+    if xs.shape != ys.shape or not np.isfinite(xs).all() or not np.isfinite(ys).all():
+        raise ValueError('terrain sample x/y must have matching finite shapes')
+    grid = np.asarray(plan.surface_z_grid_mm)
+    rows, cols = grid.shape
+    width, height = plan.width_m * plan.scale_mm_per_m, plan.height_m * plan.scale_mm_per_m
+    if min(rows, cols) < 2 or min(width, height) <= 0:
+        raise ValueError('terrain interpolation requires a positive regular grid')
+    # Permit only floating-point roundoff at the exact outer boundary.
+    tol = 1e-8
+    if (np.any(np.abs(xs) > width / 2 + tol) or
+            np.any(np.abs(ys) > height / 2 + tol)):
+        raise ValueError('terrain sample outside frozen surface bounds')
+    gx = np.clip((xs / width + .5) * (cols - 1), 0, cols - 1)
+    gy = np.clip((ys / height + .5) * (rows - 1), 0, rows - 1)
+    ix = np.minimum(np.floor(gx).astype(int), cols - 2)
+    iy = np.minimum(np.floor(gy).astype(int), rows - 2)
+    u, v = gx - ix, gy - iy
+    sw, se = grid[iy, ix], grid[iy, ix + 1]
+    nw, ne = grid[iy + 1, ix], grid[iy + 1, ix + 1]
+    result = np.where(u + v <= 1, sw + u * (se - sw) + v * (nw - sw),
+                      ne + (1 - u) * (nw - ne) + (1 - v) * (se - ne))
+    if not np.isfinite(result).all():
+        raise ValueError('non-finite frozen terrain surface')
+    return result
 
 
 def measure_terrain_surface_mesh(mesh: trimesh.Trimesh) -> dict:
@@ -581,6 +640,8 @@ def measure_terrain_surface_mesh(mesh: trimesh.Trimesh) -> dict:
 def build_terrain_evidence(mesh: trimesh.Trimesh) -> dict:
     """Return final artifact evidence, including any post-build Z carving."""
     evidence = dict((mesh.metadata or {}).get("terrain_evidence") or {})
+    if (mesh.metadata or {}).get('ground_texture') is not None:
+        evidence['ground_texture'] = dict(mesh.metadata['ground_texture'])
     evidence["surface_mesh"] = measure_terrain_surface_mesh(mesh)
     if mesh is not None and len(mesh.vertices):
         z_min = float(mesh.vertices[:, 2].min())
@@ -760,6 +821,9 @@ def materialize_terrain_surface_plan(
             f"{max_actual:.6f}mm > {plan.max_surface_edge_mm:.6f}mm"
         )
     solid.metadata["terrain_evidence"]["surface_mesh"] = mesh_evidence
+    solid.metadata["terrain_evidence"]["microrelief_preservation"] = (
+        verify_terrain_microrelief(plan, solid)
+    )
 
     mapping = plan.height_mapping
     detail = plan.detail_evidence

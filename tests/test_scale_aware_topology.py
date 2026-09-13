@@ -50,6 +50,21 @@ def test_building_counts_query_blocks_against_centroid_index():
     assert _building_counts(blocks, buildings) == [2, 1]
 
 
+def test_invalid_input_faces_are_repaired_before_topology_predicates():
+    from shapely.geometry import Polygon
+    invalid = Polygon([(0, 0), (200, 200), (0, 200), (200, 0), (0, 0)])
+    assert not invalid.is_valid
+    blocks, _, evidence = coarsen_city_blocks_for_print(
+        [invalid], buildings=[box(45, 15, 55, 25)], cut_lines=[],
+        scale_mm_per_m=0.01, target_min_model_mm=0.63,
+        hard_floor_model_mm=0.63, boundary_inset_model_mm=0.0,
+        max_passes=0)
+    assert len(blocks) == 2
+    assert all(p.is_valid for p in blocks)
+    assert evidence['input_invalid_faces_repaired'] == 1
+    assert evidence['output_invalid_faces'] == 0
+
+
 def test_same_real_blocks_stay_separate_at_small_crop():
     final_blocks, retained, evidence = _run(15.0)
 

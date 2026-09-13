@@ -143,7 +143,7 @@ class OsmiumCLIFetcher:
         Geographic coordinates alone are not sufficient: asking a Zhejiang
         extract for Beijing creates a valid empty GeoJSON at the same bbox as
         the later correct Beijing request.  Bind every full-frame and tile
-        cache to the concrete PBF name, size, and modification timestamp so a
+        cache to the PBF content digest (memoized only within this process) so a
         wrong or updated regional source can never poison another request.
         """
 
@@ -151,8 +151,9 @@ class OsmiumCLIFetcher:
         basename = os.path.basename(absolute)
         stem = re.sub(r"[^A-Za-z0-9._-]+", "-", basename).strip("-._")
         try:
-            stat = os.stat(absolute)
-            identity = f"{basename}:{stat.st_size}:{stat.st_mtime_ns}"
+            from aesthetic.source_identity import file_content_identity
+            source = file_content_identity(absolute)
+            identity = f"{basename}:sha256:{source['sha256']}"
         except OSError:
             identity = f"{basename}:missing"
         digest = hashlib.sha1(identity.encode("utf-8")).hexdigest()[:10]

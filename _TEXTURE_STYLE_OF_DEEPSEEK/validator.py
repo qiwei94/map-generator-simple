@@ -725,7 +725,7 @@ def validate_3mf(
             required_gap = max(configured_gap, 2.0 * extrusion_width)
             hierarchical = (
                 clearance.get("policy_version")
-                == "hierarchical-surface-road-clearance-v2")
+                in {"hierarchical-surface-road-clearance-v2", "shared-city-surface-v1", "shared-city-surface-v2", "shared-city-surface-v3", "shared-city-surface-v4"})
             surface = clearance.get("surface_roads") or {}
             major = clearance.get("major_roads") or {}
             # The local-road reveal is a supported height/material boundary,

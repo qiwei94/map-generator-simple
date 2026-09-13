@@ -53,6 +53,15 @@ def render_from_layers(
     Returns:
         output_path on success.
     """
+    if (getattr(layers, 'surface_plan_evidence', {}) or {}).get('status') == 'finalized':
+        from aesthetic.review_render import render_review_bundle
+        plan = layers.surface_plan_evidence
+        out = Path(output_path)
+        bundle = render_review_bundle(
+            layers, {'bbox_local': plan['bbox_local_m'], 'scale': plan['scale_mm_per_m']},
+            1., str(out.parent), out.stem, vegetation_enabled=vegetation_enabled,
+            topdown_output_path=str(out))
+        return bundle['topdown']
     from tools.tune_buildings_v2 import render, classify_blocks
 
     t0 = time.time()

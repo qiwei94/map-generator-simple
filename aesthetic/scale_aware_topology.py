@@ -24,9 +24,10 @@ from shapely.geometry import (
 )
 from shapely.ops import unary_union
 from shapely.strtree import STRtree
+from shapely import make_valid
 
 
-POLICY_VERSION = "scale-aware-block-topology-v2"
+POLICY_VERSION = "scale-aware-block-topology-v3-valid-faces"
 
 
 @dataclass
@@ -308,10 +309,15 @@ def coarsen_city_blocks_for_print(
     if not 0 < max_merge_fraction_per_pass <= 0.5:
         raise ValueError("max_merge_fraction_per_pass must be in (0, 0.5]")
 
+    invalid_inputs = sum(not g.is_valid for g in blocks if g is not None)
     clean_blocks = [
-        block for geometry in blocks for block in _polygon_parts(geometry)
+        block for geometry in blocks
+        for block in _polygon_parts(
+            make_valid(geometry) if geometry is not None and not geometry.is_valid
+            else geometry)
         if block.area > 0
     ]
+    rejected_invalid_merges = 0
     counts = _building_counts(clean_blocks, buildings)
     records = [
         _BlockRecord(block, count)
@@ -425,7 +431,8 @@ def coarsen_city_blocks_for_print(
                 except GEOSException:
                     continue
                 merged_parts = _polygon_parts(merged)
-                if len(merged_parts) != 1:
+                if len(merged_parts) != 1 or not merged_parts[0].is_valid:
+                    rejected_invalid_merges += 1
                     continue
                 merged_width = _usable_short_axis_model_mm(
                     merged_parts[0],
@@ -464,7 +471,7 @@ def coarsen_city_blocks_for_print(
                     geometry = _safe_union(
                         [record.geometry, records[right].geometry])
                 parts = _polygon_parts(geometry)
-                if len(parts) == 1:
+                if len(parts) == 1 and parts[0].is_valid:
                     next_records.append(_BlockRecord(
                         parts[0],
                         record.building_count + records[right].building_count,
@@ -485,6 +492,8 @@ def coarsen_city_blocks_for_print(
         stop_reason = "maximum_passes_reached"
 
     final_blocks = [record.geometry for record in records]
+    if any(not polygon.is_valid for polygon in final_blocks):
+        raise ValueError("block topology produced an invalid final face")
     _, after = _block_statistics(
         records,
         scale_mm_per_m=scale_mm_per_m,
@@ -524,6 +533,9 @@ def coarsen_city_blocks_for_print(
         "minimum_target_road_interval_model_mm": round(
             float(target_min_model_mm + 2.0 * boundary_inset_model_mm), 5),
         "initial_blocks": len(clean_blocks),
+        "input_invalid_faces_repaired": int(invalid_inputs),
+        "invalid_merge_candidates_rejected": int(rejected_invalid_merges),
+        "output_invalid_faces": 0,
         "final_blocks": len(final_blocks),
         "merged_blocks": int(total_merges),
         "protected_edge_rejections": int(protected_edge_rejections),

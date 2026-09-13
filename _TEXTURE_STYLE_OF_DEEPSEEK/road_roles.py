@@ -173,6 +173,9 @@ class RoadRoleSelection:
     topology: gpd.GeoDataFrame
     structural: gpd.GeoDataFrame
     visible: gpd.GeoDataFrame
+    # S3's durable negative-space network.  Unlike ``visible`` this is not
+    # a paint decision; S5 uses it to protect street seams and S6/S7 cuts it.
+    seam_graph: gpd.GeoDataFrame
     evidence: dict[str, Any]
 
 
@@ -3512,9 +3515,122 @@ def select_road_roles(
         }),
         "fallback": fallback,
     }
+    seam_graph, seam_evidence = select_seam_graph(
+        lines, structural=structural, bbox_local=bbox_local,
+        nozzle_real_m=nozzle_real_m)
+    evidence["seam_graph"] = seam_evidence
     return RoadRoleSelection(
         topology=topology,
         structural=structural,
         visible=visible,
+        seam_graph=seam_graph,
         evidence=evidence,
     )
+
+
+def select_block_partition_roads(roads: gpd.GeoDataFrame):
+    """Street topology for block carriers, independent of visual budgets/scale.
+
+    Preserve every source segment of residential, local and pedestrian
+    streets, including unnamed segments. Only identical geometry is deduped;
+    parallel carriageways are not guessed into a new centreline.
+    """
+    lines = _line_features(roads)
+    allowed = set(ROAD_TIERS[3]) | {'pedestrian'}
+    selected = _highway_subset(lines, allowed).copy()
+    seen, keep = set(), []
+    for position, geom in enumerate(selected.geometry):
+        key = geom.normalize().wkb
+        if key not in seen:
+            seen.add(key)
+            keep.append(position)
+    result = selected.iloc[keep].copy()
+    return result, {
+        'policy': 'complete-block-streets-v1', 'owner_stage': 'S3',
+        'source_line_features': len(lines), 'selected_features': len(result),
+        'identical_duplicates_removed': len(selected)-len(result),
+        'allowed_highways': sorted(allowed),
+        'by_highway': ({str(k): int(v) for k, v in result.highway.value_counts().items()}
+                       if 'highway' in result else {}),
+        'visual_budget_applied': False, 'printer_scale_filter_applied': False,
+        'short_or_unnamed_filter_applied': False,
+        '说明': '完整街道负责分割街区；显著性仅决定主路强调，不删除分割街缝。',
+    }
+
+
+def select_seam_graph(lines: gpd.GeoDataFrame, *, structural: gpd.GeoDataFrame,
+                      bbox_local=None, nozzle_real_m: float = 0.0):
+    """Select S3's source-only, identity-complete negative-space network.
+
+    Tier-2 corridors are always retained.  Tier-3 corridors are admitted only
+    as complete physical OSM components where the tier-2 graph leaves a sparse
+    spatial cell.  This is intentionally independent of the visible-road ink
+    budget: a seam is a block boundary, not a dark road stroke.
+    """
+    if structural is None or structural.empty:
+        return structural.copy(), {"status": "empty", "selected_features": 0}
+    work = structural.reset_index(drop=True).copy()
+    tier2 = set(ROAD_TIERS[2])
+    # Full physical endpoint pairing is valuable for a small ROI but becomes
+    # quadratic around common metropolitan names ("Rue ...") on 25 km data.
+    # S3 therefore keeps every tier-2 source segment and uses a complete,
+    # stable semantic identity group only for the bounded tier-3 supplement.
+    # It never selects an individual named fragment from such a group.
+    selected = set(index for index, row in work.iterrows()
+                   if str(row.get("highway") or "") in tier2)
+    groups: dict[str, list[int]] = {}
+    for index, row in work.iterrows():
+        if str(row.get("highway") or "") in tier2:
+            continue
+        identity = _template_identity_for_row(row)
+        if identity:
+            groups.setdefault(identity, []).append(int(index))
+    # Keep component statistics as source parts.  Dissolving every named road
+    # in a 25 km metropolis before ranking them is needlessly expensive and
+    # does not improve selection; the selected output remains the untouched
+    # source features below.
+    tier3 = []
+    for positions in groups.values():
+        parts = [work.iloc[index].geometry for index in positions]
+        tier3.append((positions, sum(float(part.length) for part in parts), parts))
+    if bbox_local is None:
+        selected.update(index for positions, _, _ in tier3 for index in positions)
+        return work.iloc[sorted(selected)].copy(), {
+            "status": "unbounded_structural_fallback", "selected_features": len(selected),
+            "identity_grouping": {"method": "semantic_identity_complete_v1"},
+        }
+    cell_load: dict[int, int] = {}
+    for index in selected:
+        for cell in _sampled_grid_cells(work.iloc[index].geometry, bbox_local, _MID_FREQUENCY_GRID_SIZE):
+            cell_load[cell] = cell_load.get(cell, 0) + 1
+    candidates = []
+    # Only the longest semantic candidates can plausibly survive the bounded
+    # 64-corridor budget.  Avoid sampling every tiny named alley across a
+    # metropolis merely to reject it later.
+    tier3.sort(key=lambda item: (-item[1], min(item[0])))
+    for positions, length, parts in tier3[:512]:
+        cells = set().union(*(_sampled_grid_cells(
+            geometry, bbox_local, _MID_FREQUENCY_GRID_SIZE) for geometry in parts))
+        under = sum(cell_load.get(cell, 0) < 8 for cell in cells)
+        if length >= max(float(nozzle_real_m) * 4.0, 100.0) and under >= 2:
+            candidates.append((under, length, positions, cells))
+    candidates.sort(key=lambda item: (-item[0], -item[1], min(item[2])))
+    chosen = []
+    for under, length, positions, cells in candidates:
+        if len(chosen) >= _MID_FREQUENCY_MAX_CORRIDORS:
+            break
+        if sum(cell_load.get(cell, 0) < 8 for cell in cells) < 2:
+            continue
+        selected.update(positions); chosen.append((positions, length))
+        for cell in cells:
+            cell_load[cell] = cell_load.get(cell, 0) + 1
+    result = work.iloc[sorted(selected)].copy()
+    return result, {
+        "status": "selected", "policy": "identity_complete_seam_graph_v1",
+        "tier2_complete_features": int(sum(1 for index in selected if str(work.iloc[index].get("highway") or "") in tier2)),
+        "tier3_complete_corridors": len(chosen),
+        "tier3_complete_length_m": round(sum(length for _, length in chosen), 3),
+        "selected_features": len(result), "geometry_policy": "existing_osm_only_no_endpoint_invention",
+        "identity_grouping": {"method": "semantic_identity_complete_v1",
+                              "candidate_identities": len(groups)},
+    }

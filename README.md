@@ -2,6 +2,11 @@
 
 > 把一段旅程，凝固成一块独一无二的 3D 浮雕。
 
+> 生成入口更新（2026-09-05，本地未部署）：新任务使用 `generate_model.py`，固定
+> canonical-v1（自动参数、active 策略、共享最终平面）。旧西湖质量模式和实验脚本
+> 属历史兼容路径，不与主入口等价。执行契约与命令见
+> [`doc/canonical_surface_execution.md`](doc/canonical_surface_execution.md)。
+
 上传旅行照片 → 自动还原轨迹与停留点 → 挑选风格 → 生成可 3D 打印的城市浮雕模型。
 不是地图生成器，而是**回忆的实体化**：聊天式挖掘经历，3D 实体承载情绪，每一件都只属于它的主人。
 
@@ -26,7 +31,7 @@
 - **照片上限 10 张**：同一地点传太多无意义，前端截断 + 后端硬限。
 
 ### 定取景（Step 2）
-- 卫星底图（Esri World Imagery）+ 红色取景框，5 / 10 / 15 km 三挡。
+- 卫星底图（Esri World Imagery）+ 取景框，15 / 25 km 两档；快速 3D 为中心 5 km 预览。
 - 旅途名字由用户自己写，系统不代填。
 
 ### 挑风格（Step 3）
@@ -53,8 +58,9 @@
 ## 目录结构
 
 ```
-generate_city.py              # 当前正式西湖 25KM 3MF 入口
-generate_city_legacy.py       # 旧通用入口（Web/draft/任意 bbox 兼容）
+generate_model.py             # 新 full/review/draft 的 canonical 主入口
+generate_city.py              # 历史西湖质量模式专用入口
+generate_city_legacy.py       # 主入口底层实现 + 显式历史兼容
 _TEXTURE_STYLE_OF_DEEPSEEK/   # 几何预处理 + 渲染核心
   _layer_preprocess.py        #   图层预处理（BL/BO/WL/VO/roads…）
   render_glb.py               #   draft GLB 导出 + 落地后检 + 染红标注
@@ -123,8 +129,8 @@ python generate_city_legacy.py ... --amap-salience cache
 python generate_city_legacy.py ... --amap-salience network
 ```
 
-中国大陆以外会自动回退到 OSM-only。该开关仍处于代表城市验证阶段，不是 Web
-生产默认值。
+中国大陆以外会自动回退到 OSM-only。当前 Web 普通任务显式使用 `network`；离线
+CLI 应选择 `cache`，避免未命中时联网。是否上线以部署版本为准。
 
 预处理完成后会额外保存 `composition_spec.json`，明确记录主道路、次级走廊、连接
 段、结构背景以及主/次水体。评审图与正式道路 builder 消费同一角色化物理宽度，
@@ -162,7 +168,7 @@ STUDIO_PORT=9000 python webapp/server.py   # 自定义端口
 
 Studio 的“生成方式”保持相互隔离：
 
-- **经典通用**：沿用 `generate_city_legacy.py`，支持全部已配置区域和快速预览。
+- **经典通用**：新任务调用 `generate_model.py`，支持已配置区域和快速预览。
 - **西湖质量 · 平整填充**：调用 `generate_city.py`，输出独立到
   `output/westlake_quality_flat/`，block base 使用平整填充和 2 mm 边缘退让。
 - **西湖质量 · 纹理填充**：输出独立到

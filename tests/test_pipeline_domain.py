@@ -137,6 +137,15 @@ def _policy(context):
     )
 
 
+def test_accepted_z_style_is_s5_owned_only_for_active_C_route():
+    c=_observe(_context_v3())
+    def resolver(*args,**kwargs):return {'activation':kwargs['activation']}
+    active=run_s5_policy(c,activation='active',urban_organization='C',resolve=resolver)
+    assert active.scene_policy['z_texture']['amplitude_mm']==.07
+    assert 'z_texture' not in run_s5_policy(c,activation='audit_only',urban_organization='C',resolve=resolver).scene_policy
+    assert 'z_texture' not in run_s5_policy(c,activation='active',resolve=resolver).scene_policy
+
+
 def _building(context):
     def route(layers, **_kwargs):
         layers.BO.append("routed")
@@ -168,6 +177,38 @@ def _building(context):
         prepare_region=lambda *_args, **_kwargs: {"status": "prepared"},
         apply_emphasis=lambda *_args, **_kwargs: {"status": "active"},
     )
+
+
+@pytest.mark.parametrize('planar_only', [False, True])
+def test_s6_merge_mode_seals_surface_geometry_without_mutating_s3(planar_only):
+    from dataclasses import replace
+    from shapely.geometry import LineString, box
+    from _TEXTURE_STYLE_OF_DEEPSEEK._layer_preprocess import LayerPolygons
+    from _TEXTURE_STYLE_OF_DEEPSEEK.print_profile import DEFAULT_PRINTER_PROFILE
+    original = LayerPolygons(
+        BO=[box(0, 0, 40, 40)], BO_heights=[0.84],
+        block_base_cut_lines=[LineString([(20, 0), (20, 40)])])
+    v3 = _context_v3()
+    v3 = PipelineContextV3Runtime(
+        runtime=replace(v3.runtime, printer_profile=DEFAULT_PRINTER_PROFILE,
+                        terrain_surface_plan=SimpleNamespace(
+                            fingerprint=v3.runtime.terrain_surface_plan.fingerprint,
+                            surface_z_grid_mm=np.zeros((3, 3)), width_m=1000.,
+                            height_m=800., scale_mm_per_m=.2)),
+        layers=original)
+    v5 = _policy(_observe(v3))
+    v6 = run_s6_building_roles(
+        v5, merge_block_layers=True, planar_only=planar_only,
+        route_heroes=lambda *_a, **_kw: {'status': 'active'},
+        apply_mass=lambda *_a, **_kw: {'status': 'active'},
+        cap_heights=lambda *_a, **_kw: {'status': 'active'},
+        prepare_region=lambda *_a, **_kw: {},
+        apply_emphasis=lambda *_a, **_kw: {})
+    assert len(v3.layers.BO) == len(original.BO) == 1
+    assert len(v6.layers.BO) == 2
+    assert v6.layers.BO_heights == (0.84, 0.84)
+    assert v6.building_mass_evidence['final_surface_plan']['owner_stage'] == 'S6'
+    assert bool(v6.layers.surface_grounding) is (not planar_only)
 
 
 def _composition(v6):

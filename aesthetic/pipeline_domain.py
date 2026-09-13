@@ -23,6 +23,7 @@ import hashlib
 import json
 import math
 import os
+import numpy as np
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Callable, Mapping
@@ -277,6 +278,12 @@ def _update_semantic_hash(digest: Any, value: Any) -> None:
             digest.update(item_digest)
     elif hasattr(value, "wkb"):
         digest.update(bytes(value.wkb))
+    elif isinstance(value, np.ndarray):
+        if value.dtype.hasobject:
+            raise DomainContextError('object arrays are not valid stage geometry')
+        digest.update(value.dtype.str.encode('ascii'))
+        digest.update(str(value.shape).encode('ascii'))
+        digest.update(np.ascontiguousarray(value).tobytes())
     elif hasattr(value, "item"):
         _update_semantic_hash(digest, value.item())
     elif hasattr(value, "name") and isinstance(value.name, str):
@@ -681,6 +688,12 @@ class PipelineContextV8Runtime:
             raise DomainContextError(
                 "S8 cannot consume a terminal review/styles Context")
         mesh_map = {str(name): mesh for name, mesh in self.meshes.items()}
+        from aesthetic.city_surface_plan import verify_materialized_city
+        try:
+            verify_materialized_city(self.predecessor.layers, mesh_map,
+                                     self.block_base_clearance, self.predecessor.runtime.scale_mm_per_m)
+        except ValueError as exc:
+            raise DomainContextError(str(exc)) from exc
         if set(mesh_map) != set(SEMANTIC_MESH_ROLES):
             raise DomainContextError(
                 "S8 semantic mesh bundle must declare exactly: "
@@ -987,6 +1000,7 @@ def run_s5_policy(
     context: PipelineContextV4Runtime,
     *,
     activation: str,
+    urban_organization: str = 'default',
     resolve: Callable[..., Mapping[str, Any]] | None = None,
 ) -> PipelineContextV5Runtime:
     """Resolve a bounded policy from the exact S4 observation."""
@@ -1014,6 +1028,12 @@ def run_s5_policy(
     if not isinstance(policy, Mapping):
         raise DomainContextError("S5 resolver must return a Mapping")
     output = deepcopy(dict(policy))
+    if urban_organization == 'block-first':
+        from aesthetic.block_first import plan_blocks
+        output['block_first'] = plan_blocks(context.layers, context.runtime.sources.buildings)
+    if urban_organization in {'C', 'block-first'} and activation == 'active':
+        from aesthetic.z_texture import ZTexturePolicy
+        output['z_texture'] = ZTexturePolicy().payload()
     return PipelineContextV5Runtime(
         predecessor=context,
         scene_policy=output,
@@ -1026,6 +1046,9 @@ def run_s6_building_roles(
     *,
     height_emphasis_zones: bool = False,
     merge_block_layers: bool = False,
+    surface_road_style: str = 'printer-default',
+    urban_organization: str = 'default',
+    planar_only: bool = False,
     prepare_region: Callable[..., Mapping[str, Any]] | None = None,
     route_heroes: Callable[..., Mapping[str, Any]] | None = None,
     apply_mass: Callable[..., Mapping[str, Any]] | None = None,
@@ -1035,6 +1058,21 @@ def run_s6_building_roles(
     """Own and resolve final building polygons and relative height roles."""
 
     _require_exact_context(context, PipelineContextV5Runtime, "S6")
+    if surface_road_style != 'printer-default' and not merge_block_layers:
+        raise DomainContextError('negative surface style requires shared S6 surfaces')
+    if urban_organization not in {'default', 'C', 'block-first'}:
+        raise DomainContextError('unknown urban organization')
+    if urban_organization == 'C':
+        if not merge_block_layers or apply_mass is not None:
+            raise DomainContextError('C requires shared surfaces and no conflicting mass override')
+        from aesthetic.organization_experiment import adapter
+        apply_mass = adapter('C', context.runtime.sources)
+    if urban_organization == 'block-first':
+        if not merge_block_layers or apply_mass is not None:
+            raise DomainContextError('block-first requires shared surfaces and no mass override')
+        from functools import partial
+        from aesthetic.block_first import apply_block_first
+        apply_mass = partial(apply_block_first, sources=context.runtime.sources)
     _require_payload_fingerprint(
         stage_id="S6",
         name="SceneCharacter",
@@ -1169,6 +1207,18 @@ def run_s6_building_roles(
             "region-first candidate; refusing to label the baseline as the "
             f"experiment. Evidence: {emphasis_evidence}"
         )
+    if merge_block_layers:
+        from aesthetic.city_surface_plan import finalize_city_surfaces
+        mass_evidence["final_surface_plan"] = finalize_city_surfaces(
+            layers, bbox_local=runtime.bbox_local_m,
+            scale=runtime.scale_mm_per_m,
+            printer_profile=runtime.printer_profile,
+            road_style=surface_road_style, source_roads=sources.roads,
+            terrain_surface_plan=None if planar_only else runtime.terrain_surface_plan,
+            z_texture_policy=scene_policy.get('z_texture'))
+        mass_evidence['final_surface_plan']['geometry_scope'] = (
+            'planar_review_only; terrain_contact_and_slicing_pending' if planar_only
+            else 'planar_and_terrain_contact')
     return PipelineContextV6Runtime(
         predecessor=context,
         layers=layers,
@@ -1339,7 +1389,7 @@ def run_s8_mesh_materialization(
         required_roles.append("landmarks")
     if layers.BO and not merge_block_layers:
         required_roles.append("buildings")
-    if layers.roads_lines:
+    if final_layer_counts(layers)['roads']:
         required_roles.append("roads")
     if layers.WL or layers.WO:
         required_roles.append("water")
@@ -1355,12 +1405,19 @@ def run_s8_mesh_materialization(
     if source_fingerprint != context.runtime.fingerprints.source_feature_counts:
         raise ContextFingerprintMismatch(
             "S8 source feature counts do not match the carried S2 identity")
+    clearance = dict(block_base_clearance or {})
+    from aesthetic.city_surface_plan import POLICY_VERSION as SURFACE_POLICY_VERSION
+    if (getattr(layers, 'surface_plan_evidence', {}) or {}).get('policy_version') == SURFACE_POLICY_VERSION:
+        clearance['city_materialization'] = {
+            role: dict(mesh.metadata.get('surface_materialization', {}))
+            for role, mesh in meshes.items()
+            if role in {'block_base', 'roads', 'landmarks'} and mesh is not None}
     return PipelineContextV8Runtime(
         predecessor=context,
         meshes=dict(meshes),
         mesh_summary=summarize_meshes(meshes),
         water_relief=dict(water_relief),
-        block_base_clearance=dict(block_base_clearance or {}),
+        block_base_clearance=clearance,
         required_roles=tuple(required_roles),
         source_feature_counts=source_counts,
         final_layer_counts=final_counts,
@@ -1383,6 +1440,12 @@ def run_s9_mesh_gate(
     if actual_mesh != context.mesh_bundle_fingerprint:
         raise ContextFingerprintMismatch(
             "S9 received a mutated semantic mesh bundle")
+    from aesthetic.city_surface_plan import verify_materialized_city
+    try:
+        verify_materialized_city(context.predecessor.layers, context.meshes,
+                                 context.block_base_clearance, context.predecessor.runtime.scale_mm_per_m)
+    except ValueError as exc:
+        raise DomainContextError(str(exc)) from exc
     if require_gate is None:
         from aesthetic.pipeline_gates import require_semantic_mesh_bundle
         require_gate = require_semantic_mesh_bundle
@@ -1455,6 +1518,8 @@ def final_layer_counts(layers: Any) -> dict[str, int]:
         "WO": len(layers.WO),
         "VL": len(layers.VL),
         "VO": len(layers.VO),
-        "roads": len(layers.roads_lines),
+        "roads": (len(layers.surface_road_polygons)
+                  if (getattr(layers, 'surface_plan_evidence', {}) or {}).get('status') == 'finalized'
+                  else len(layers.roads_lines)),
         "block_base": len(layers.block_base),
     }

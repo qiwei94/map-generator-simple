@@ -1,6 +1,29 @@
-# Pipeline 全参数清单
+# Pipeline 参数索引与历史常量清单
 
-> 代码中所有写死的值、含义、来源、是否可自动化
+> 2026-09-05：下方数字表是历史盘点，不是当前运行的完整有效参数，也不能直接用于复现实验。
+> 最新执行边界见 [canonical_surface_execution.md](canonical_surface_execution.md)。
+
+## 当前有效参数从哪里读取
+
+新任务入口为 `generate_model.py`，固定 `canonical-v1`：开启 auto-params、active scene
+policy、merge-layers。植被实体默认关闭，源植被仍参与测量。历史入口不保证相同结果。
+
+| 参数层 | 解析/消费阶段 | 当前证据与约束 |
+|---|---|---|
+| bbox、模型跨度、printer profile、输入 PBF | S0–S2 | 精确 bbox/scale；完整 PBF SHA-256；不使用 snap 框比例代替取景比例 |
+| 基础配置、源测量自动参数、显式 params JSON | S2 → S3 | S2 冻结预处理参数快照，JSON 覆盖自动参数；以运行证据中的 effective 值为准 |
+| 场景测量与 ScenePolicy | S4 → S5 → S6 | 为下游解析聚合/高度策略；不回写已经完成的 S3 |
+| 道路街缝 | S6 → S7/S8 | `PrintProfile.surface_road_gap_mm` / `final_block_base_gap_mm`，默认约 0.55 / 0.84 mm；只作用于已批准 cut lines |
+| 道路厚度与偏移 | S6 → S7/S8 | `min_surface_height_mm` 与其负一半，默认 0.24 / -0.12 mm；不再消费下方旧道路 builder 的独立厚度 |
+| 普通建筑与地标高度 | S6 → S7/S8 | 冻结逐块高度；不将所有 BO 强制覆盖成旧 0.625 mm，也不在 S8 追加随机纹理 |
+| 地形高度与精度 | S2 的 TerrainSurfacePlan → S7/S8 | 使用共享高程映射；正式 QEM 禁用，采样边长受 printer profile 约束 |
+| B＋C 街块／地表 Z 纹理 | S5 → S6 → S7/S8 | C / block-first active 路线使用 `ZTexturePolicy`；坡差上限 0.24 mm、增量上限 0.07 mm、名义尺度 0.8 mm；详见 [接入说明](z_texture_BC_pipeline_20260908.md)，不回写 DEM、不启用树木实体 |
+
+复现一次运行需保存：命令参数、代码版本及未提交改动身份、输入数据摘要、
+`param_decision.json`、测量报告、`scene_policy.json`、SurfacePlan 证据和
+`design_spec.json`。常量表不能替代这些运行产物。城市几何一致不等于通过切片验收。
+
+## 历史常量盘点（下列内容未逐项重新校准）
 
 ---
 

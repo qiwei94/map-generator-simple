@@ -4,7 +4,7 @@ from __future__ import annotations
 
 轻量 FastAPI 后端，不 import 重管线（geopandas/trimesh），只做三件事：
 1. 扫描 output/ 下已有产物（画廊、draft GLB、3MF、param_decision）
-2. 以子进程方式触发 generate_city_legacy.py（通用 draft / full），异步跟踪任务
+2. 以子进程方式触发 generate_model.py（canonical draft / full），异步跟踪任务
 3. 托管前端静态页 + 产物文件
 
 启动：python webapp/server.py  （默认 0.0.0.0:8787，手机同局域网可访问）
@@ -1190,6 +1190,7 @@ _LAST_WORKER_OWNER: str | None = None
 _ALLOWED_WORKER_ENTRYPOINTS = {
     "generate_city.py",
     "generate_city_legacy.py",
+    "generate_model.py",
     "tools/gen_area_gallery.py",
     "tools/generate_gallery_draft.py",
 }
@@ -2472,7 +2473,7 @@ def api_generate(req: GenerateRequest, request: Request = None,
         pbf = st["pbf"]
         city_title = req.area.name.strip() or "自定义区域"
         fast_draft_context = {"bbox": bbox, "pbf": pbf}
-        base_cmd = [sys.executable, "generate_city_legacy.py",
+        base_cmd = [sys.executable, "generate_model.py",
                     "--bbox", f"{s},{w},{n},{e}", "--pbf", pbf,
                     "--city", city, "--auto-params"]
         # 记录区域信息，刷新后前端仍能展示
@@ -2487,7 +2488,7 @@ def api_generate(req: GenerateRequest, request: Request = None,
         city_title = PRESETS[city]["title"]
         quota_bbox = PRESETS[city]["bbox"]
         source_bbox = quota_bbox
-        base_cmd = [sys.executable, "generate_city_legacy.py", "--preset", city,
+        base_cmd = [sys.executable, "generate_model.py", "--preset", city,
                     "--auto-params"]
     elif req.city in _landmark_presets():
         # 景点目录城市：用 bbox + pbf 路径（与自定义区域相同）
@@ -2505,7 +2506,7 @@ def api_generate(req: GenerateRequest, request: Request = None,
         city = req.city
         city_title = lm_info["title"]
         fast_draft_context = {"bbox": bbox, "pbf": pbf}
-        base_cmd = [sys.executable, "generate_city_legacy.py",
+        base_cmd = [sys.executable, "generate_model.py",
                     "--bbox", f"{s},{w},{n},{e}", "--pbf", pbf,
                     "--city", city, "--auto-params"]
         area_dir = OUTPUT_DIR / city
@@ -2530,7 +2531,7 @@ def api_generate(req: GenerateRequest, request: Request = None,
             raise HTTPException(422, "中心预览区域地图数据尚未就绪")
         ps, pw, pn, pe = preview_bbox
         base_cmd = [
-            sys.executable, "generate_city_legacy.py",
+            sys.executable, "generate_model.py",
             "--bbox", f"{ps},{pw},{pn},{pe}",
             "--pbf", preview_status["pbf"],
             "--city", city, "--auto-params",
@@ -2566,6 +2567,7 @@ def api_generate(req: GenerateRequest, request: Request = None,
         }, ensure_ascii=False), encoding="utf-8")
 
     request_key = _request_key("generate", {
+        "execution_profile": "historical_quality" if quality_profile else "canonical-v1",
         "city": city,
         "vegetation_enabled": False,
         "mode": req.mode,
@@ -2614,30 +2616,9 @@ def api_generate(req: GenerateRequest, request: Request = None,
                                encoding="utf-8")
         cmd += ["--params-json", str(params_path)]
 
-    # 用户刚完成风格画廊时，快速预览直接复用同一个 CityHarness cache。
-    # 这条路径不再提取 draft 不消费的 landuse，也不重复生成诊断 PNG。
-    fast_draft = bool(
-        req.mode == "draft" and req.style and fast_draft_context
-        and gallery_meta and params_path
-    )
-    if fast_draft:
-        fast_bbox = fast_draft_context["bbox"]
-        cmd = [
-            sys.executable, "tools/generate_gallery_draft.py",
-            "--bbox", ",".join(str(value) for value in fast_bbox),
-            "--pbf", fast_draft_context["pbf"],
-            "--city", city,
-            "--prototype", gallery_meta.get("prototype", "landscape"),
-            "--scene-type", gallery_meta.get("scene_type", "urban"),
-            "--source-bbox", ",".join(
-                str(value) for value in fast_draft_context["source_bbox"]),
-            "--params-json", str(params_path),
-            "--base-thickness-mm",
-            f"{PRODUCT_BASE_THICKNESS_MM:.2f}",
-        ]
-        for mk in req.markers:
-            if len(mk) == 2:
-                cmd += ["--marker", f"{mk[0]},{mk[1]}"]
+    # Style parameters remain inputs to the canonical S2 resolver. Never
+    # replace the complete S0–S7 path with a historical gallery-cache draft.
+    fast_draft = False
 
     env = os.environ.copy()
     env["PYTHONIOENCODING"] = "utf-8"
@@ -2661,6 +2642,7 @@ def api_generate(req: GenerateRequest, request: Request = None,
         job = {"id": job_id, "city": city, "city_title": city_title,
                "mode": req.mode, "style": req.style,
                "generation_profile": profile, "exec": "worker",
+               "execution_profile": "historical_quality" if quality_profile else "canonical-v1",
                "pipeline_attempt_id": pipeline_attempt_id,
                "fast_draft": fast_draft,
                "request_key": request_key,
@@ -2689,6 +2671,7 @@ def api_generate(req: GenerateRequest, request: Request = None,
     job = {"id": job_id, "city": city, "city_title": city_title,
            "mode": req.mode, "style": req.style,
            "generation_profile": profile, "exec": "local",
+           "execution_profile": "historical_quality" if quality_profile else "canonical-v1",
            "pipeline_attempt_id": pipeline_attempt_id,
            "fast_draft": fast_draft,
            "request_key": request_key,

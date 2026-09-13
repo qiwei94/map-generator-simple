@@ -53,6 +53,30 @@ def test_25km_roles_keep_dense_topology_but_reduce_visible_material():
     assert roles.evidence["structural_tier"] == 3
 
 
+def test_seam_graph_is_independent_from_visible_ink_budget():
+    roads = _roads()
+    roles = select_road_roles(
+        roads, topology_tier=4, nozzle_real_m=51.0,
+        bbox_local=(0, 0, 1000, 1000), scale_mm_per_m=.008)
+    # A seam remains a structural negative-space decision even when the
+    # positive/visible road palette is deliberately sparse.
+    assert set(roles.seam_graph["highway"]) >= {"primary", "secondary", "tertiary"}
+    assert roles.evidence["seam_graph"]["geometry_policy"] == (
+        "existing_osm_only_no_endpoint_invention")
+
+
+def test_block_partition_keeps_all_local_segments_even_when_short_unnamed_or_duplicate():
+    from _TEXTURE_STYLE_OF_DEEPSEEK.road_roles import select_block_partition_roads
+    roads = _roads()
+    roads.loc[len(roads)] = ['pedestrian', LineString([(0,8),(100,8)])]
+    roads.loc[len(roads)] = ['residential', LineString([(0,9),(1,9)])]
+    roads.loc[len(roads)] = ['residential', LineString([(1,9),(0,9)])]
+    result, evidence = select_block_partition_roads(roads)
+    assert list(result.highway) == ['primary','secondary','tertiary','residential','pedestrian','residential']
+    assert evidence['identical_duplicates_removed'] == 1
+    assert not evidence['visual_budget_applied']
+
+
 def test_5km_roles_keep_more_structure_without_showing_footways():
     roles = select_road_roles(
         _roads(), topology_tier=5, nozzle_real_m=10.2)

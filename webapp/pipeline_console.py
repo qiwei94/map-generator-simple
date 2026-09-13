@@ -118,6 +118,8 @@ def _artifact_stage(name: str, *, mode: str = "full") -> str:
         # seventh member of the canonical S10 delivery bundle.
         return "RUN"
     if "pipeline_measurement_report" in lowered:
+        if "pipeline_measurement_report_s8." in lowered:
+            return "S8"
         # S4 owns the measurements themselves; the assembled, human-readable
         # report is an S7 diagnostic artifact in the canonical contract.
         return "S7"
@@ -264,7 +266,7 @@ def _attempt_sidecar_without_authority(name: str) -> bool:
     return any(name.startswith(prefix) for prefix in (
         "scene_character.", "scene_policy.", "composition_spec.",
         "design_spec.", "pipeline_measurement_report.",
-        "pipeline_measurement_report_s7.", "pipeline_observation.",
+        "pipeline_measurement_report_s7.", "pipeline_measurement_report_s8.", "pipeline_observation.",
         "acceptance_report.", "validator_report.",
     ))
 
@@ -568,6 +570,11 @@ def _measurement_report_context(report: Mapping) -> dict:
             "consumer_called", "applied_to_current_run",
             "actual_outcome_paths", "mismatch_reason", "hard_bounds",
         ) if row.get(key) is not None})
+    geometry = (report.get('generation_outcomes') or {}).get('geometry_inspection') or {}
+    geometry_summary = {key: geometry.get(key) for key in ('version', 'status', 'counts', 'summary_zh')}
+    geometry_summary['checks'] = [
+        {key: row.get(key) for key in ('id', 'title_zh', 'stage', 'status', 'scope_zh')}
+        for row in geometry.get('checks', [])[:32] if isinstance(row, Mapping)]
     return {
         "schema_version": report.get("schema_version"),
         "status": report.get("status"),
@@ -576,6 +583,7 @@ def _measurement_report_context(report: Mapping) -> dict:
         "coverage": coverage,
         "impact_chains": chains,
         "realization_matrix": realizations,
+        "geometry_inspection": geometry_summary,
         "detail": "完整逐项证据请打开本 Stage 的管理员测量报告产物",
     }
 
@@ -749,7 +757,7 @@ def _live_contexts(job: Mapping, public_job: Mapping, log_tail: str,
     measurement_report = _find_attempt_sidecar(
         ledger or {}, job, artifacts, output_root, "measurement_report_json",
         "pipeline_measurement_report.json",
-        preferred_stages=("S10", "S7"))
+        preferred_stages=("S10", "S8", "S7"))
     if measurement_report:
         observation_context = {
             "measurement_report": _measurement_report_context(
