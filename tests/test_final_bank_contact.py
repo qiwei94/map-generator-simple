@@ -45,3 +45,17 @@ def test_water_support_preserves_top_and_reaches_shared_base():
         base_thickness_mm=base,surface_levels_mm=[top],support_to_base=True)
     assert m.bounds[1,2]==__import__('pytest').approx(top)
     assert m.is_watertight and len(m.split())==1
+
+
+def test_water_refinement_preserves_solid_and_bounds_top_edges():
+    from _TEXTURE_STYLE_OF_DEEPSEEK.validator import _terrain_surface_edge_metrics
+    terrain=trimesh.creation.box(extents=[5,5,2])
+    original=terrain.copy()
+    kwargs=dict(base_thickness_mm=.4,surface_thickness_mm=.24,exact_boundary=True)
+    water=[box(-1,-1,1,1)]
+    prepare_deepseek_water_relief(original,water,[],1.,**kwargs)
+    prepare_deepseek_water_relief(terrain,water,[],1.,max_surface_edge_mm=.3,**kwargs)
+    assert terrain.is_watertight and terrain.is_winding_consistent
+    assert np.isclose(terrain.volume,original.volume,rtol=1e-10)
+    assert np.allclose(terrain.bounds,original.bounds)
+    assert _terrain_surface_edge_metrics(terrain.vertices,terrain.faces)['max_xy_edge_mm']<=.300001

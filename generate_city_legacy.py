@@ -2320,6 +2320,9 @@ def _run_pipeline(argv=None):
             base_thickness_mm=cli_args.base_thickness_mm,
             surface_thickness_mm=printer_profile.min_surface_height_mm,
             exact_boundary=_shared_surface,
+            max_surface_edge_mm=(printer_profile.terrain_max_surface_edge_mm
+                if _scene_policy.get('activation') == 'active'
+                and (_scene_policy.get('landscape_strategy') or {}).get('enabled') else None),
         )
         water_relief["status"] = "materialized"
     else:

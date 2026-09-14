@@ -2,11 +2,20 @@
 import numpy as np
 
 
-def refine_surface(vertices,faces,max_edge,max_faces):
+def refine_surface(vertices,faces,max_edge,max_faces, *, top_surface_only=False):
     for _ in range(24):
         edges=np.stack((faces[:,[0,1]],faces[:,[1,2]],faces[:,[2,0]]),axis=1)
         unique,inverse=np.unique(np.sort(edges.reshape(-1,2),axis=1),axis=0,return_inverse=True)
-        split=np.linalg.norm(vertices[unique[:,0]]-vertices[unique[:,1]],axis=1)>max_edge*(1+1e-10)
+        delta=vertices[unique[:,0]]-vertices[unique[:,1]]
+        split=np.linalg.norm(delta[:,:2] if top_surface_only else delta,axis=1)>max_edge*(1+1e-10)
+        if top_surface_only:
+            tri=vertices[faces]
+            normals=np.cross(tri[:,1]-tri[:,0],tri[:,2]-tri[:,0])
+            lengths=np.linalg.norm(normals,axis=1)
+            top=normals[:,2]>.05*lengths
+            eligible=np.zeros(len(unique),dtype=bool)
+            eligible[inverse.reshape(-1,3)[top].ravel()]=True
+            split &= eligible
         if not split.any():return vertices,faces
         inverse=inverse.reshape(-1,3);flags=split[inverse]
         if len(faces)+int(flags.sum())>max_faces:

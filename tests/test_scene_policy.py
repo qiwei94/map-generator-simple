@@ -355,6 +355,18 @@ def test_low_confidence_policy_is_explicitly_warning_bounded():
     assert policy["tradeoff_order"]["hard_constraints"][0] == "source_truth"
 
 
+@pytest.mark.parametrize('building_coverage,expected', [(0.00004, 'water_landscape'),(.08,'mixed')])
+def test_complete_inland_lake_without_coast_signal(building_coverage,expected):
+    report=_report(water={'largest_component_frame_fraction':.2616,
+        'largest_component_share':.98649,'largest_component_elongation':1.358,
+        'frame_edge_contact_count':0,'river_axis_score':.403},
+        buildings={'footprint_frame_coverage':building_coverage})
+    report['summary']['water_fraction']=.26518
+    policy=resolve_scene_policy(report)
+    assert policy['scene_class']==expected
+    assert policy['landscape_strategy']['enabled']==(expected=='water_landscape')
+
+
 def test_policy_is_deterministic_and_written_atomically(tmp_path):
     report = _report(water={"river_axis_score": 0.72})
     first = resolve_scene_policy(report, printer_profile={

@@ -68,6 +68,7 @@ def prepare_deepseek_water_relief(
     base_thickness_mm: float,
     surface_thickness_mm: float,
     exact_boundary: bool = False,
+    max_surface_edge_mm: float | None = None,
 ) -> dict:
     """Recess terrain under printable water caps without a global boolean.
 
@@ -179,6 +180,15 @@ def prepare_deepseek_water_relief(
             raise ValueError('exact water recess lost the terrain solid')
         terrain_mesh.vertices = result.vertices
         terrain_mesh.faces = result.faces
+        if max_surface_edge_mm is not None:
+            from aesthetic.surface_subdivision import refine_surface
+            vertices, faces = refine_surface(
+                np.asarray(terrain_mesh.vertices), np.asarray(terrain_mesh.faces),
+                float(max_surface_edge_mm), 2000000, top_surface_only=True)
+            terrain_mesh.vertices = vertices
+            terrain_mesh.faces = faces
+            if not terrain_mesh.is_watertight or not terrain_mesh.is_winding_consistent:
+                raise ValueError('water boundary refinement lost closed terrain topology')
     else:
         terrain_mesh.vertices = verts
     if terrain_mesh.metadata.get('ground_texture'):
@@ -198,6 +208,7 @@ def prepare_deepseek_water_relief(
         "surface_thickness_mm": float(surface_thickness_mm),
         "recess_method": "exact_polygon_boolean" if exact_boundary else "grid_vertex_lowering",
         "requires_water_support_to_base": bool(exact_boundary),
+        "post_boolean_max_surface_edge_mm": max_surface_edge_mm if exact_boundary else None,
     }
 
 

@@ -149,6 +149,16 @@ def _resolve_scene_class(scores: Mapping[str, float], report: Mapping) -> str:
                 or float(summary.get("water_fraction") or 0.0) >= 0.08):
             return "mixed"
         return "urban"
+    # A complete inland lake has no coast contact and need not look like a
+    # river network. Recognize its dominant polygon before the mixed fallback.
+    water_topology = metrics.get('water_topology', {}) or {}
+    if (building_coverage < 0.0025
+            and float(summary.get('dense_core_cell_fraction') or 0.) < .05
+            and float(water_topology.get('largest_component_frame_fraction') or 0.) >= .12
+            and float(water_topology.get('largest_component_share') or 0.) >= .75
+            and 0 < float(water_topology.get('largest_component_elongation') or 0.) <= 3.
+            and water_topology.get('frame_edge_contact_count') == 0):
+        return 'water_landscape'
     if ((scores["terrain"] >= 0.62 or landform_score >= 0.55)
             and building_coverage < 0.025):
         return "landscape"
