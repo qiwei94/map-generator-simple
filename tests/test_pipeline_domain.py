@@ -146,6 +146,21 @@ def test_accepted_z_style_is_s5_owned_only_for_active_C_route():
     assert 'z_texture' not in run_s5_policy(c,activation='active',resolve=resolver).scene_policy
 
 
+def test_landscape_policy_skips_city_texture_and_clears_s6_fill():
+    source = _context_v3()
+    context = run_s5_policy(_observe(source), activation='active',
+        urban_organization='block-first',
+        resolve=lambda *args, **kwargs: {
+            'activation': 'active', 'landscape_strategy': {'enabled': True}})
+    assert 'z_texture' not in context.scene_policy
+    assert 'block_first' not in context.scene_policy
+    final = _building(context)
+    assert not final.layers.block_base and not final.layers.BO
+    assert tuple(source.layers.block_base) == ('block',)
+    assert final.layers.BL
+    assert final.building_mass_evidence['landscape_geometry']['status'] == 'active'
+
+
 def _building(context):
     def route(layers, **_kwargs):
         layers.BO.append("routed")

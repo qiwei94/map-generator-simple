@@ -2729,6 +2729,8 @@ def _run_pipeline(argv=None):
     }
     _profile = profile.to_dict() if profile is not None else {}
     _block_base_enabled = not cli_args.no_block_base
+    from aesthetic.landscape_runtime import is_active_landscape
+    _landscape_active = is_active_landscape(_scene_policy)
     _printable_features = layer_evidence(
         layers, vegetation_enabled=not cli_args.no_vegetation)
     _printable_features.update({
@@ -2755,9 +2757,10 @@ def _run_pipeline(argv=None):
         },
         block_base={
             "requested_mode": "textured" if _block_base_enabled else "off",
-            "resolved_mode": "textured" if _block_base_enabled else "off",
+            "resolved_mode": "textured" if _block_base_enabled and not _landscape_active else "off",
             "policy_version": "legacy-explicit-v1",
-            "reason": ("enabled by the selected legacy visual profile"
+            "reason": ("disabled by active landscape policy" if _landscape_active else
+                       "enabled by the selected legacy visual profile"
                        if _block_base_enabled else "explicitly disabled by CLI"),
             "metrics": {
                 "polygon_count": len(layers.block_base),

@@ -424,8 +424,11 @@ def _validate_feature_survival(value: Mapping) -> None:
         raise ValueError(
             "S9 feature_survival must describe all semantic families")
     omissions = value.get("intentional_omissions")
+    allowed_omissions = {'vegetation'}
+    if (value.get('omission_basis') or {}).get('buildings') == 'active_landscape_policy':
+        allowed_omissions.add('buildings')
     if (not isinstance(omissions, (list, tuple))
-            or any(str(item) != "vegetation" for item in omissions)):
+            or any(str(item) not in allowed_omissions for item in omissions)):
         raise ValueError(
             "S9 feature_survival only permits an explicit vegetation omission")
     omitted = {str(item) for item in omissions}

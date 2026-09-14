@@ -32,6 +32,7 @@ def evaluate_feature_survival(
     final_layer_counts: Mapping[str, object],
     *,
     intentional_omissions: Iterable[str] = (),
+    scene_policy: Mapping | None = None,
 ) -> dict:
     """Prove that available semantic source families did not vanish.
 
@@ -44,7 +45,11 @@ def evaluate_feature_survival(
     """
 
     omitted = {str(value) for value in intentional_omissions}
-    unsupported = omitted - ALLOWED_INTENTIONAL_OMISSIONS
+    from aesthetic.landscape_runtime import is_active_landscape
+    allowed = set(ALLOWED_INTENTIONAL_OMISSIONS)
+    if is_active_landscape(scene_policy or {}):
+        allowed.add('buildings')
+    unsupported = omitted - allowed
     if unsupported:
         raise ValueError(
             "only vegetation may be intentionally omitted; unsupported: "
@@ -95,6 +100,8 @@ def evaluate_feature_survival(
         "source_counts_fingerprint": feature_source_counts_fingerprint(source),
         "passed": not errors,
         "intentional_omissions": sorted(omitted),
+        "omission_basis": ({'buildings': 'active_landscape_policy'}
+                           if 'buildings' in omitted else {}),
         "roles": roles,
         "errors": errors,
     }
@@ -148,6 +155,7 @@ def validate_semantic_mesh_bundle(
     source_feature_counts: Mapping[str, object] | None = None,
     final_layer_counts: Mapping[str, object] | None = None,
     intentional_omissions: Iterable[str] = (),
+    scene_policy: Mapping | None = None,
 ) -> dict:
     """Return explicit S9 evidence and never silently drop a required role."""
 
@@ -187,6 +195,7 @@ def validate_semantic_mesh_bundle(
         source_feature_counts or {},
         final_layer_counts or {},
         intentional_omissions=intentional_omissions,
+        scene_policy=scene_policy,
     )
     errors.extend(feature_survival["errors"])
 

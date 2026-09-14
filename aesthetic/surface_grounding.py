@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 import numpy as np
 import trimesh
 from shapely.affinity import scale as scale_geometry
@@ -200,12 +201,18 @@ def _conform_edges(xy, faces):
     return np.asarray(points), np.asarray(refined, dtype=np.int64)
 
 
+def _json_mapping(value):
+    if isinstance(value, Mapping):
+        return dict(value)
+    raise TypeError(f'Unsupported grounding evidence type: {type(value).__name__}')
+
+
 def grounding_digest(plan):
     digest = hashlib.sha256(json.dumps(
         {k: plan[k] for k in ('version', 'terrain_fingerprint', 'input_geometry_fingerprint')},
         sort_keys=True).encode())
     if 'support_evidence' in plan:
-        digest.update(json.dumps(plan['support_evidence'], sort_keys=True, allow_nan=False, default=str).encode())
+        digest.update(json.dumps(plan['support_evidence'], sort_keys=True, allow_nan=False, default=_json_mapping).encode())
     for patch in plan['patches']:
         digest.update(patch['mode'].encode())
         for key in ('xy', 'faces', 'boundary', 'bottom_z', 'top_z'):

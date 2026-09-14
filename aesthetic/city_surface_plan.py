@@ -385,12 +385,7 @@ def verify_surface_plan(layers, scale):
         for role in evidence['grounding']:
             if (role not in ground or grounding_digest(ground[role]) !=
                     evidence['grounding'][role]['fingerprint']):
-                # S8 may tessellate block_base for export; preserve the frozen
-                # S6 surface plan instead of rejecting the equivalent split.
-                # Export consumers may normalize geometry containers between
-                # S6 and S8; retain the frozen plan and let mesh validation
-                # catch actual topology failures.
-                continue
+                raise ValueError(f'grounding plan changed after S6: {role}')
     return evidence
 
 

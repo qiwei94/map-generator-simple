@@ -1028,6 +1028,9 @@ def run_s5_policy(
     if not isinstance(policy, Mapping):
         raise DomainContextError("S5 resolver must return a Mapping")
     output = deepcopy(dict(policy))
+    from aesthetic.landscape_runtime import is_active_landscape
+    if is_active_landscape(output):
+        urban_organization = 'default'
     if urban_organization == 'block-first':
         from aesthetic.block_first import plan_blocks
         output['block_first'] = plan_blocks(context.layers, context.runtime.sources.buildings)
@@ -1058,6 +1061,11 @@ def run_s6_building_roles(
     """Own and resolve final building polygons and relative height roles."""
 
     _require_exact_context(context, PipelineContextV5Runtime, "S6")
+    from aesthetic.landscape_runtime import is_active_landscape, suppress_urban_fill
+    landscape_mode = is_active_landscape(context.scene_policy)
+    if landscape_mode:
+        urban_organization = 'default'
+        surface_road_style = 'printer-default'
     if surface_road_style != 'printer-default' and not merge_block_layers:
         raise DomainContextError('negative surface style requires shared S6 surfaces')
     if urban_organization not in {'default', 'C', 'block-first'}:
@@ -1207,6 +1215,8 @@ def run_s6_building_roles(
             "region-first candidate; refusing to label the baseline as the "
             f"experiment. Evidence: {emphasis_evidence}"
         )
+    if landscape_mode:
+        mass_evidence['landscape_geometry'] = suppress_urban_fill(layers)
     if merge_block_layers:
         from aesthetic.city_surface_plan import finalize_city_surfaces
         mass_evidence["final_surface_plan"] = finalize_city_surfaces(
@@ -1400,6 +1410,10 @@ def run_s8_mesh_materialization(
         required_roles.append("block_base")
     final_counts = final_layer_counts(layers)
     omissions = ("vegetation",) if not vegetation_enabled else ()
+    from aesthetic.landscape_runtime import is_active_landscape
+    if (is_active_landscape(context.scene_policy)
+            and not final_counts.get('BL') and not final_counts.get('BO')):
+        omissions += ('buildings',)
     source_counts = dict(source_feature_counts)
     source_fingerprint = feature_source_counts_fingerprint(source_counts)
     if source_fingerprint != context.runtime.fingerprints.source_feature_counts:
@@ -1457,6 +1471,7 @@ def run_s9_mesh_gate(
         source_feature_counts=thaw_json(context.source_feature_counts),
         final_layer_counts=thaw_json(context.final_layer_counts),
         intentional_omissions=context.intentional_omissions,
+        scene_policy=thaw_json(context.predecessor.scene_policy),
     )
     if not isinstance(evidence, Mapping):
         raise DomainContextError("S9 gate must return a Mapping")

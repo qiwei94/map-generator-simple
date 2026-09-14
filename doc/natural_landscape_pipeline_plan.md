@@ -1,6 +1,20 @@
 # Natural landscape pipeline plan
 
-Status: phase 1 audit implementation complete; geometry activation pending
+Status: initial urban-fill suppression active; full landscape geometry validation pending
+
+## 2026-09-14 implementation update
+
+Active landscape policies now bypass S5 block-first planning and B+C ground
+microtexture. S6 removes synthetic block_base and aggregated BO mass from its
+owned layer clone before freezing surfaces; source landmarks, roads, vegetation,
+water, and the existing DEM terrain plan remain available. Urban and audit-only
+policies retain their previous behavior. The structural terrain base is unchanged.
+
+This is a bounded first activation, not completion of the geometry contract below.
+Full-lake framing, planar lake/shore mating, sparse/empty real-data generation,
+and PNG/3MF acceptance still require the Qinghai Lake trial. DEM sampling already
+has a 1024 grid-resolution ceiling for large frames; no additional subdivision
+system has been introduced. No real Qinghai Lake output is accepted yet.
 
 Updated: 2026-08-27
 
