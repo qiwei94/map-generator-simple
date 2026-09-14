@@ -40,3 +40,19 @@ AMAP_WATER_AUTO_FETCH=0 .venv/bin/python generate_model.py \
 
 回归：1202 passed、2 skipped、11 deselected；之后的完整内陆湖分类与
 水体针对性测试为 26 passed。
+
+## 最终结果
+
+`output/qinghai_full_lake_140km_v2/` 已完成完整 canonical S1–S10：
+
+- 总生成耗时 233.5 秒（本地已备齐数据；不含此前下载）。
+- 3MF 约 5.34 MB，XY 196 × 175.3 mm。
+- 地形 266,902 面，道路 175,564 面，水体 32,188 面；无城市底块和建筑。
+- 独立 `tools/validate_3mf.py`：`strict_passed=true`，零错误、零警告。
+- V15 最大地形表面边长 0.672 mm，超 2 mm/5 mm 的表面面片均为零。
+- `actual_oblique.png` / `actual_topdown.png` 从实际 3MF 渲染，
+  `actual_render.json` 记录输入文件和视角；全湖轮廓与周边山体可见。
+- `input_manifest.json`、`design_spec.json`、`validation.json` 与
+  `review_evidence.json` 随输出保留。
+
+观感交由用户审阅；已通过几何校验，未进行实际机器切片或实体试印。
