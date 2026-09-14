@@ -79,17 +79,26 @@ def allowed_ground(layers,bbox,scale,policy):
     if greens.is_empty:return greens
     def local(polygons,window):
         return [p.intersection(window) for p in polygons if p.intersects(window)]
-    occupied=clean(unary_union(local(list(layers.block_base)+list(layers.BO)+[p for p,h in layers.BL],clip)))
-    water=clean(unary_union(local(list(layers.WL)+list(layers.WO),clip)))
     from shapely.strtree import STRtree
     radius=policy.road_half_clearance_mm/scale
+    occupied_parts=list(layers.block_base)+list(layers.BO)+[p for p,h in layers.BL]
+    water_parts=list(layers.WL)+list(layers.WO)
+    occupied_tree=STRtree(occupied_parts)
+    water_tree=STRtree(water_parts)
     roads=list(layers.block_base_cut_lines)+list(layers.block_base_major_cut_lines)
     tree=STRtree(roads)
     fragments=[]
     # Buffer source lines locally, before union. Buffering the globally noded
     # street graph took 75 minutes for Paris; most of it is outside any green.
-    for green in _polygons(clean(greens.difference(occupied).difference(water))):
+    for green in _polygons(clean(greens)):
         window=box(*green.bounds).buffer(radius)
+        occ_hits=occupied_tree.query(window,predicate='intersects')
+        wat_hits=water_tree.query(window,predicate='intersects')
+        if len(occ_hits):
+            green=green.difference(unary_union([occupied_parts[int(i)].intersection(window) for i in occ_hits]))
+        if len(wat_hits):
+            green=green.difference(unary_union([water_parts[int(i)].intersection(window) for i in wat_hits]))
+        if green.is_empty: continue
         hits=tree.query(window,predicate='intersects')
         guard=unary_union([roads[int(i)].intersection(window).buffer(radius) for i in hits])
         fragments.append(green.difference(guard))
