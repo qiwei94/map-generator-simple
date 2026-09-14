@@ -205,7 +205,7 @@ def grounding_digest(plan):
         {k: plan[k] for k in ('version', 'terrain_fingerprint', 'input_geometry_fingerprint')},
         sort_keys=True).encode())
     if 'support_evidence' in plan:
-        digest.update(json.dumps(plan['support_evidence'], sort_keys=True, allow_nan=False).encode())
+        digest.update(json.dumps(plan['support_evidence'], sort_keys=True, allow_nan=False, default=str).encode())
     for patch in plan['patches']:
         digest.update(patch['mode'].encode())
         for key in ('xy', 'faces', 'boundary', 'bottom_z', 'top_z'):
