@@ -68,7 +68,12 @@ def allowed_ground(layers,bbox,scale,policy):
     from shapely import set_precision, make_valid
     clip=box(*bbox)
     def clean(g): return set_precision(make_valid(g), 1e-9)
-    greens=clean(unary_union([p.intersection(clip) for p in list(layers.VL)+list(layers.VO) if p.intersects(clip)]))
+    source_green=[p.intersection(clip) for p in list(layers.VL)+list(layers.VO) if p.intersects(clip)]
+    # A city-scale first model does not need thousands of tiny park slivers.
+    # Keep the largest source-backed regions; all occupied/water/road masks
+    # remain exact inside those regions.
+    source_green=sorted(source_green,key=lambda p:p.area,reverse=True)[:1200]
+    greens=clean(unary_union(source_green))
     if greens.is_empty:return greens
     def local(polygons,window):
         return [p.intersection(window) for p in polygons if p.intersects(window)]
