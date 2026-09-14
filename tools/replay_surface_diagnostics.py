@@ -17,13 +17,13 @@ def main():
     original = grounding._patch_mesh
     calls = 0
 
-    def record(poly, terrain):
+    def record(poly, terrain, **kwargs):
         nonlocal calls
         calls += 1
         if calls % 1000 == 0:
             print('Grounding polygons:', calls, flush=True)
         try:
-            return original(poly, terrain)
+            return original(poly, terrain, **kwargs)
         except Exception:
             with (a.output / 'failed_patch.pkl').open('xb') as stream:
                 pickle.dump({'poly': poly, 'terrain': terrain}, stream)

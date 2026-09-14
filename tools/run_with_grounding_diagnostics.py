@@ -22,11 +22,11 @@ def main():
     original = grounding._patch_mesh
     calls = 0
 
-    def record(poly, terrain):
+    def record(poly, terrain, **kwargs):
         nonlocal calls
         calls += 1
         try:
-            return original(poly, terrain)
+            return original(poly, terrain, **kwargs)
         except Exception:
             path = args.diagnostic_dir / ('grounding_failure_%d.pkl' % calls)
             with path.open('xb') as stream:
