@@ -72,7 +72,9 @@ def allowed_ground(layers,bbox,scale,policy):
     # A city-scale first model does not need thousands of tiny park slivers.
     # Keep the largest source-backed regions; all occupied/water/road masks
     # remain exact inside those regions.
-    source_green=sorted(source_green,key=lambda p:p.area,reverse=True)[:1200]
+    # Keep the first full-city pass responsive: the largest green regions carry
+    # the visible park/campus texture; tiny fragments add little at this scale.
+    source_green=sorted(source_green,key=lambda p:p.area,reverse=True)[:300]
     greens=clean(unary_union(source_green))
     if greens.is_empty:return greens
     def local(polygons,window):
