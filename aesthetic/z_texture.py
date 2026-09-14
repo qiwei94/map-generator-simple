@@ -65,13 +65,15 @@ def _polygons(g):
 
 def allowed_ground(layers,bbox,scale,policy):
     """Only source-backed green candidates; never city-wide decorative noise."""
+    from shapely import set_precision, make_valid
     clip=box(*bbox)
-    greens=unary_union([p.intersection(clip) for p in list(layers.VL)+list(layers.VO) if p.intersects(clip)])
+    def clean(g): return set_precision(make_valid(g), 1e-9)
+    greens=clean(unary_union([p.intersection(clip) for p in list(layers.VL)+list(layers.VO) if p.intersects(clip)]))
     if greens.is_empty:return greens
     def local(polygons,window):
         return [p.intersection(window) for p in polygons if p.intersects(window)]
-    occupied=unary_union(local(list(layers.block_base)+list(layers.BO)+[p for p,h in layers.BL],clip))
-    water=unary_union(local(list(layers.WL)+list(layers.WO),clip))
+    occupied=clean(unary_union(local(list(layers.block_base)+list(layers.BO)+[p for p,h in layers.BL],clip)))
+    water=clean(unary_union(local(list(layers.WL)+list(layers.WO),clip)))
     from shapely.strtree import STRtree
     radius=policy.road_half_clearance_mm/scale
     roads=list(layers.block_base_cut_lines)+list(layers.block_base_major_cut_lines)
@@ -79,7 +81,7 @@ def allowed_ground(layers,bbox,scale,policy):
     fragments=[]
     # Buffer source lines locally, before union. Buffering the globally noded
     # street graph took 75 minutes for Paris; most of it is outside any green.
-    for green in _polygons(greens.difference(occupied).difference(water)):
+    for green in _polygons(clean(greens.difference(occupied).difference(water))):
         window=box(*green.bounds).buffer(radius)
         hits=tree.query(window,predicate='intersects')
         guard=unary_union([roads[int(i)].intersection(window).buffer(radius) for i in hits])
