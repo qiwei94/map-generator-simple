@@ -34,6 +34,13 @@ V15 检测到水体布尔操作之后的地形长边（最大约 53.7 mm），
 
 回归：1201 passed、2 skipped、11 deselected；之后的说明文件修正相关测试 9 passed。
 
+最终 v3 同样完成 S10，耗时 125.0 秒，3MF 3.99 MB。
+独立校验确认 V14 声明问题已消除，只剩 V15 地形长边，零警告。
+当前诊断结论为 `rerun`（打印目的）；可作为大范围自然景观的观感样张查看。
+最终产物位于 `output/qinghai_southeast_85km_v3/`，包括
+`actual_oblique.png`、`actual_topdown.png`、`actual_render.json`、
+`validation.json`、`design_spec.json` 和实际 3MF。
+
 ## 复现
 
 ```sh
