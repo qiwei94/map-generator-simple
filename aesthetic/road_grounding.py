@@ -162,17 +162,31 @@ def resolve_road_grounding(layers, scale, terrain):
     water = unary_union(list(layers.WL) + list(layers.WO))
     sources = water_bridge_lines(layers)
     patches, supports = [], []
+    kept_polys, kept_bridges = [], set()
+    # A clipped sliver below this area cannot survive the printer nozzle and
+    # is safe to omit; larger roads remain hard errors.
+    min_visible_area_mm2 = max(0.05, (float(h) * 0.5) ** 2)
+    min_visible_area_m2 = min_visible_area_mm2 / max(scale * scale, 1e-18)
     for i, poly in enumerate(polys):
-        if i not in bridges:
+        is_bridge = i in bridges
+        if not is_bridge:
             candidate, patch, error = _ordinary_road_grounding_patch(
                 poly, h, scale, terrain, offset)
             if patch is None:
+                if (candidate is None or candidate.is_empty
+                        or float(candidate.area) <= min_visible_area_m2):
+                    cleaned_count += 1
+                    continue
                 raise ValueError(
                     f'ordinary road grounding failed at polygon {i}: {error}')
             if candidate.wkb != poly.wkb:
-                polys[i] = candidate
-                layers.surface_road_polygons = polys
                 cleaned_count += 1
+            poly = candidate
+        kept_index = len(kept_polys)
+        kept_polys.append(poly)
+        if is_bridge:
+            kept_bridges.add(kept_index)
+        if not is_bridge:
             patches.append(patch)
             continue
         try:
@@ -188,6 +202,9 @@ def resolve_road_grounding(layers, scale, terrain):
             supports.append(dict(polygon_index=i, **evidence))
         except ValueError as exc:
             supports.append(dict(polygon_index=i, status='blocked', reason_zh=str(exc)))
+    polys = kept_polys
+    bridges = kept_bridges
+    layers.surface_road_polygons = polys
     blocked = any(e['status'] == 'blocked' for e in supports)
     plan = dict(version=VERSION, terrain_fingerprint=str(terrain.fingerprint),
         input_geometry_fingerprint=surface_fingerprint(polys, scale, [h]*len(polys)),
