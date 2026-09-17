@@ -124,6 +124,7 @@ from aesthetic.scale_aware_topology import (
 PREPROCESS_POLICY_VERSION = (
     f"roads={ROAD_ROLE_POLICY_VERSION}|water={WATER_ROLE_POLICY_VERSION}"
     "|water_frame_clip=v1"
+    "|factual_surface_corridor=v1"
     "|physical_bridge_sources=v1"
     "|block_base_clearance=eligible-shared-surface-v4"
     "|block_base_outer_face_guard=v2"
@@ -1199,6 +1200,7 @@ def _extract_WL_WO(
     ordinary_polygon_drops = 0
     unprintable_surface_drops = 0
     landmark_polygon_demotions = 0
+    factual_corridor_surface_keeps = 0
     isolated_polygon_drops = 0
     # 可打印下限 = 1 喷嘴宽（0.5×nozzle_real 半宽）。历史 1.5× 把大框
     # （scale 小、nozzle_real 大）的城市河道全部撑到 ~200m 宽蓝带。
@@ -1265,6 +1267,20 @@ def _extract_WL_WO(
                 and is_water_landmark(row, area_m2=area))
         )
 
+    def _factual_surface_corridor(row) -> bool:
+        """Protect printable river/canal area pieces before area filtering.
+
+        OSM commonly splits one riverbank relation into unnamed polygons while
+        a named centreline carries the identity.  Per-polygon area thresholds
+        must not punch gaps through those factual surface corridors.
+        """
+        waterway = (str(row.get("waterway")).casefold()
+                    if _present(row, "waterway") else "")
+        water_kind = (str(row.get("water")).casefold()
+                      if _present(row, "water") else "")
+        return waterway in {"river", "canal", "riverbank"} or water_kind in {
+            "river", "canal", "riverbank"}
+
     for source_index, row in water_gdf.iterrows():
         geom = row.geometry
         if geom is None or geom.is_empty:
@@ -1287,7 +1303,11 @@ def _extract_WL_WO(
                     unprintable_surface_drops += 1
                     continue
                 landmark = is_water_landmark(row, area_m2=area)
-                if (area >= visual_polygon_min_area
+                factual_corridor = _factual_surface_corridor(row)
+                if factual_corridor:
+                    WL_polys.append(poly)
+                    factual_corridor_surface_keeps += 1
+                elif (area >= visual_polygon_min_area
                         and landmark
                         and _main_water_evidence(row, poly, area)):
                     WL_polys.append(poly)
@@ -1395,6 +1415,7 @@ def _extract_WL_WO(
         "ordinary_polygon_drops": ordinary_polygon_drops,
         "isolated_polygon_drops": isolated_polygon_drops,
         "landmark_polygon_demotions": landmark_polygon_demotions,
+        "factual_corridor_surface_keeps": factual_corridor_surface_keeps,
         "unprintable_surface_drops": unprintable_surface_drops,
         "visible_landmark_polygons": len(WL_polys),
         "visible_ordinary_polygons": len(WO_polys),

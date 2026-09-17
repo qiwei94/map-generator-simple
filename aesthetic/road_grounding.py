@@ -6,7 +6,7 @@ spans remain explicit blockers, never disappear or fall back to riverbed Z.
 from types import SimpleNamespace
 import hashlib
 import numpy as np
-from shapely.geometry import Point, LineString, box
+from shapely.geometry import Point, LineString, box, Polygon
 from shapely.affinity import scale as scale_geometry
 from shapely.ops import unary_union
 
@@ -17,6 +17,53 @@ from aesthetic.surface_grounding import (
 from aesthetic.bridge_sources import water_bridge_lines, bridge_corridor
 
 VERSION = 'road-grounding-and-bank-deck-v2'
+
+
+def _clean_road_polygon_for_grounding(poly):
+    """Keep road footprint identity while removing triangulation degeneracies."""
+
+    if isinstance(poly, Polygon) and poly.is_valid:
+        return poly
+    try:
+        cleaned = poly.buffer(0)
+    except Exception:
+        return poly
+    parts = []
+    if isinstance(cleaned, Polygon):
+        parts = [cleaned]
+    elif hasattr(cleaned, 'geoms'):
+        parts = [part for part in cleaned.geoms
+                 if isinstance(part, Polygon) and not part.is_empty]
+    if not parts:
+        return poly
+    return max(parts, key=lambda item: item.area)
+
+
+def _ordinary_road_grounding_patch(poly, height, scale, terrain, offset):
+    terrain_frame = box(
+        -terrain.width_m / 2, -terrain.height_m / 2,
+        terrain.width_m / 2, terrain.height_m / 2)
+    clipped = (poly if terrain_frame.covers(poly)
+               else poly.intersection(terrain_frame))
+    attempts = [_clean_road_polygon_for_grounding(clipped)]
+    for tolerance_m in (0.01, 0.05, 0.10, 0.25):
+        try:
+            attempts.append(_clean_road_polygon_for_grounding(
+                clipped.simplify(tolerance_m, preserve_topology=True)))
+        except Exception:
+            continue
+    last_error = None
+    for candidate in attempts:
+        if candidate is None or candidate.is_empty or candidate.area <= 1e-9:
+            continue
+        try:
+            resolved = resolve_grounding(
+                [candidate], [height], scale, terrain,
+                ['draped_thickness'], base_offset_mm=offset)
+            return candidate, resolved['patches'][0], None
+        except ValueError as exc:
+            last_error = exc
+    return poly, None, last_error
 
 
 def _bridge_patch(poly, lines, scale, terrain, height, offset, water, gap):
@@ -101,7 +148,13 @@ def _bridge_patch(poly, lines, scale, terrain, height, offset, water, gap):
 def resolve_road_grounding(layers, scale, terrain):
     from aesthetic.city_surface_plan import surface_fingerprint
     road = layers.surface_plan_evidence['road_surface_plan']
-    polys = list(layers.surface_road_polygons)
+    original_polys = list(layers.surface_road_polygons)
+    polys = [_clean_road_polygon_for_grounding(poly) for poly in original_polys]
+    cleaned_count = sum(
+        1 for before, after in zip(original_polys, polys)
+        if before.wkb != after.wkb)
+    if cleaned_count:
+        layers.surface_road_polygons = polys
     h, offset = road['height_mm'], road['base_offset_mm']
     if not np.isclose(offset, -h/2, rtol=0, atol=1e-12):
         raise ValueError('road grounding requires the declared half-thickness embedding policy')
@@ -111,9 +164,16 @@ def resolve_road_grounding(layers, scale, terrain):
     patches, supports = [], []
     for i, poly in enumerate(polys):
         if i not in bridges:
-            p = resolve_grounding([poly], [h], scale, terrain,
-                                   ['draped_thickness'], base_offset_mm=offset)
-            patches.extend(p['patches'])
+            candidate, patch, error = _ordinary_road_grounding_patch(
+                poly, h, scale, terrain, offset)
+            if patch is None:
+                raise ValueError(
+                    f'ordinary road grounding failed at polygon {i}: {error}')
+            if candidate.wkb != poly.wkb:
+                polys[i] = candidate
+                layers.surface_road_polygons = polys
+                cleaned_count += 1
+            patches.append(patch)
             continue
         try:
             # Bridge width was frozen by the road width contract in S6.
@@ -137,6 +197,7 @@ def resolve_road_grounding(layers, scale, terrain):
         fingerprint=plan['fingerprint'], terrain_fingerprint=plan['terrain_fingerprint'],
         polygon_count=len(polys), ordinary_road_count=len(polys)-len(bridges),
         bridge_polygon_count=len(bridges), bridge_support=supports,
+        cleaned_polygon_count=int(cleaned_count),
         base_offset_mm=offset, height_mm=h, patch_triangles=sum(len(p['faces']) for p in patches),
         final_boolean_contact='pending', slicing='pending',
         说明='道路沿冻结地形保持厚度并半厚嵌入；直桥保留两岸平面，弯曲/多线桥按陆地约束插值；无来源或无支撑保留阻断。')

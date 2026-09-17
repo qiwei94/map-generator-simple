@@ -1,6 +1,16 @@
 # Natural landscape pipeline plan
 
-Status: initial urban-fill suppression active; full landscape geometry validation pending
+Status: full-lake canonical validation achieved; satellite/DEM material accents remain experimental
+
+## 2026-09-17 阶段更新
+
+完整青海湖已经完成 canonical S1–S10：约 138.36 × 123.77 km 的取景映射为最长边 196 mm，严格验证零错误零警告。它证明流水线可以处理远大于 25 km、建筑极少的完整内陆湖；结果尚未经过 Bambu Studio 切片或实体打印。细节见 `doc/qinghai_full_lake_20260914.md`。
+
+泸沽湖、赛里木湖、太湖采用“每件最长边 196 mm、各自地理比例”的系列策略，不强迫不同尺度的湖泊使用统一比例。真实范围和换算规则见 `doc/natural_lake_series_scale_policy_20260916.md`。
+
+自然山地的当前候选手法使用卫星影像确定雪、冰川、裸岩和植被的平面证据，使用 DEM 提供起伏、坡度和山脊，再生成有厚度变化的白色顶层。白色层目标厚度约 0.16–1.2 mm，用于表现雪线与积雪厚薄；不得用影像亮度直接生成地形高度。长白山、梅里雪山、博格达峰、玉龙雪山和祁连山／卓尔山均已有研究样片，但尚未完成正式切片和实物验收。
+
+当前优先级暂时回到巴黎城市模型；自然产品线保留现有产物和结论，后续从切片验证继续。
 
 ## 2026-09-14 implementation update
 
@@ -11,10 +21,10 @@ water, and the existing DEM terrain plan remain available. Urban and audit-only
 policies retain their previous behavior. The structural terrain base is unchanged.
 
 This is a bounded first activation, not completion of the geometry contract below.
-Full-lake framing, planar lake/shore mating, sparse/empty real-data generation,
-and PNG/3MF acceptance still require the Qinghai Lake trial. DEM sampling already
-has a 1024 grid-resolution ceiling for large frames; no additional subdivision
-system has been introduced. No real Qinghai Lake output is accepted yet.
+Full-lake framing and sparse/empty urban-data behavior have now been exercised by
+the complete Qinghai Lake run. DEM sampling retains its 1024 grid-resolution
+ceiling for large frames. Geometry validation passed for that artifact, while
+slicer and physical-print acceptance remain open.
 
 Updated: 2026-08-27
 

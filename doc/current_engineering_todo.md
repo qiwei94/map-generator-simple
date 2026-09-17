@@ -1,6 +1,6 @@
 # Current engineering TODO
 
-Updated: 2026-08-30
+Updated: 2026-09-17
 
 This file records active work only. Historical session notes remain under `doc/`.
 
@@ -73,6 +73,17 @@ Still open:
   urban inputs with missing buildings. Scope, modes, data policy, 3MF parts,
   printability gates, and acceptance matrix are specified in
   `doc/natural_landscape_pipeline_plan.md`.
+- [ ] Integrate the accepted Paris park prototype into the formal 25 km build:
+  shallow white park relief, water subtraction, shape-based two/three-path
+  selection, source-road-guided trajectories, and guaranteed connections to
+  exterior roads. Reuse spatial indexes and local routing graphs; do not rebuild
+  a full routing grid independently for every green polygon. Current evidence is
+  local only: `output/paris_connected_parks_v6_adaptive_source/`.
+- [ ] Slice and print-check the integrated Paris park result. Confirm that the
+  0.52 mm path gaps survive the target profile, large parks no longer appear as
+  blank grey slabs, and six-way compact-park junctions do not become dirty blobs.
+- [ ] Validate the elongated-park branch on at least one real long rectangular
+  park before promoting the shape thresholds to a shared production policy.
 
 Full evidence and handoff: `doc/session_2026_08_18_rescue_summary.md`.
 
@@ -144,6 +155,16 @@ Backport behavior and tests selectively; do not merge the branch wholesale.
   known non-watertight textured mesh as if it succeeded.
 
 ## P1 — Natural landscape product line
+
+Progress checkpoint — 2026-09-17:
+
+- [x] Complete Qinghai Lake canonical generation and strict geometry validation.
+- [x] Define independent 196 mm longest-edge scale policy for Lugu, Sayram and
+  Taihu rather than forcing one geographical scale.
+- [x] Produce satellite/DEM topcoat studies for Changbai, Meili/Kawagarbo,
+  Bogda, Yulong and Qilian/Zhuoer.
+- [ ] Run slicer and physical-print acceptance for a full lake and a snow-layer
+  mountain study; current topcoat outputs remain research artifacts.
 
 - Treat `urban` and `landscape` as sibling product pipelines, not as style
   presets sharing all geometry assumptions.

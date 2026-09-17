@@ -94,8 +94,10 @@ class BuildingMassPolicy:
     # Deterministic spatial bisection first creates bounded local work units;
     # this is both the performance guard and the desired fine-grained visual
     # language for dense cities.
-    urban_cluster_max_source_members: int = 256
+    urban_cluster_max_source_members: int = 32
     urban_cluster_merge_distance_target_fraction: float = 1.00
+    urban_cluster_merge_neighbor_candidates: int = 12
+    source_clearance_exact_union_limit: int = 256
     urban_cluster_merge_max_area_growth_fraction: float = 0.75
     # Standard-relief urban mass should carry the mid-frequency composition.
     # A source-supported component that remains narrower after all safe merge
@@ -1014,39 +1016,23 @@ def _rotated_axes(polygon: Polygon) -> tuple[float, float]:
     try:
         hull = polygon.convex_hull
         hull_coordinates = np.asarray(hull.exterior.coords[:-1], dtype=float)
-        # Shapely 2.0's Python fallback for oriented_envelope evaluates one
-        # full coordinate transform per hull edge.  It is exact but quadratic
-        # and dominates dense-city runs once a merged candidate has hundreds
-        # of vertices.  A PCA-aligned envelope is linear, deterministic and
-        # sufficiently conservative for this size gate.  Simple silhouettes
-        # retain the exact minimum rectangle below.
-        if len(hull_coordinates) > 64:
-            centered = hull_coordinates - hull_coordinates.mean(axis=0)
-            covariance = centered.T @ centered
-            values, vectors = np.linalg.eigh(covariance)
-            axis = vectors[:, int(np.argmax(values))]
-            normal = np.asarray((-axis[1], axis[0]), dtype=float)
-            along = centered @ axis
-            across = centered @ normal
-            spans = sorted((
-                float(along.max() - along.min()),
-                float(across.max() - across.min()),
-            ))
-            return spans[0], spans[1]
-        rectangle = polygon.minimum_rotated_rectangle
-        coordinates = list(rectangle.exterior.coords)
-        if len(coordinates) < 4:
+        if len(hull_coordinates) < 2:
             return 0.0, 0.0
-        lengths = []
-        for first, second in zip(coordinates, coordinates[1:]):
-            lengths.append(math.hypot(
-                float(second[0]) - float(first[0]),
-                float(second[1]) - float(first[1]),
-            ))
-        positive = sorted(value for value in lengths if value > 1e-9)
-        if not positive:
-            return 0.0, 0.0
-        return positive[0], positive[-1]
+        # Shapely 2.0's Python fallback for oriented_envelope is quadratic in
+        # hull vertices and dominates dense-city runs.  A PCA-aligned envelope
+        # is linear, deterministic and conservative enough for this size gate.
+        centered = hull_coordinates - hull_coordinates.mean(axis=0)
+        covariance = centered.T @ centered
+        values, vectors = np.linalg.eigh(covariance)
+        axis = vectors[:, int(np.argmax(values))]
+        normal = np.asarray((-axis[1], axis[0]), dtype=float)
+        along = centered @ axis
+        across = centered @ normal
+        spans = sorted((
+            float(along.max() - along.min()),
+            float(across.max() - across.min()),
+        ))
+        return spans[0], spans[1]
     except (AttributeError, GEOSException, ValueError, np.linalg.LinAlgError):
         return 0.0, 0.0
 
@@ -1459,6 +1445,10 @@ def _merge_complete_clusters_bounded(
             break
         passes_run += 1
         axes = [_rotated_axes(item) for item in active]
+        centers = np.asarray([
+            (float(item.centroid.x), float(item.centroid.y))
+            for item in active
+        ], dtype=float)
         order = sorted(
             range(len(active)),
             key=lambda index: (axes[index][0], active[index].area, index),
@@ -1484,6 +1474,16 @@ def _merge_complete_clusters_bounded(
                     index for index in range(len(active))
                     if index != first_index and index not in consumed
                 ]
+            max_candidates = max(
+                1, int(policy.urban_cluster_merge_neighbor_candidates))
+            if len(neighbor_indexes) > max_candidates:
+                first_center = centers[first_index]
+                neighbor_indexes = sorted(
+                    neighbor_indexes,
+                    key=lambda index: (
+                        float(np.sum((centers[index] - first_center) ** 2)),
+                        index),
+                )[:max_candidates]
             neighbors = sorted(
                 neighbor_indexes,
                 key=lambda index: (first.distance(active[index]), index),
@@ -1956,17 +1956,26 @@ def _strategy_for_block(block: Polygon, cells: Sequence[Mapping]) -> str | None:
     return None
 
 
-def _clip_sources_for_mass(polygons, block, *, inset):
+def _clip_sources_for_mass(polygons, block, *, inset,
+                           exact_union_limit: int = 2048):
     """Shared clearance observation for S5 and the cheap source-only audit."""
     # Count source lineage separately from synthesized output area. A baseline
     # BO layer already contains abstraction and is not an input-area metric.
-    source_in_block = _safe_intersection(_safe_union(polygons), block)
+    exact_union = len(polygons) <= int(exact_union_limit)
+    if exact_union:
+        source_in_block_area = float(
+            _safe_intersection(_safe_union(polygons), block).area)
+    else:
+        source_in_block_area = float(sum(
+            _safe_intersection(polygon, block).area
+            for polygon in polygons))
     clearance_audit = {
         "input_footprints": len(polygons),
-        "source_inside_block_area_m2": float(source_in_block.area),
+        "source_inside_block_area_m2": source_in_block_area,
         "source_after_clearance_area_m2": 0.0,
         "footprints_surviving_clearance": 0,
         "output_supported_source_area_m2": 0.0,
+        "exact_union": bool(exact_union),
     }
     try:
         clip = block.buffer(-inset, join_style=1) if inset > 0 else block
@@ -1978,8 +1987,16 @@ def _clip_sources_for_mass(polygons, block, *, inset):
             retained = _parts(_safe_intersection(polygon, clip))
             clipped_sources.extend(retained)
             clearance_audit["footprints_surviving_clearance"] += int(bool(retained))
-    source_union = _safe_union(clipped_sources)
-    clearance_audit["source_after_clearance_area_m2"] = float(source_union.area)
+    if exact_union or len(clipped_sources) <= int(exact_union_limit):
+        source_union = _safe_union(clipped_sources)
+        clearance_audit["source_after_clearance_area_m2"] = float(
+            source_union.area)
+        clearance_audit["exact_union_after_clearance"] = True
+    else:
+        source_union = GeometryCollection(clipped_sources)
+        clearance_audit["source_after_clearance_area_m2"] = float(sum(
+            polygon.area for polygon in clipped_sources))
+        clearance_audit["exact_union_after_clearance"] = False
     return clip, clipped_sources, source_union, clearance_audit
 
 
@@ -2000,7 +2017,8 @@ def _candidate_shape(polygons: Sequence[Polygon], block: Polygon,
     growth = nozzle_real_m * policy.growth_slack_nozzles
     simplify = nozzle_real_m * policy.simplify_nozzles
     clip, clipped_sources, source_union, clearance_audit = _clip_sources_for_mass(
-        polygons, block, inset=nozzle_real_m * policy.block_inset_nozzles)
+        polygons, block, inset=nozzle_real_m * policy.block_inset_nozzles,
+        exact_union_limit=policy.source_clearance_exact_union_limit)
     if not clipped_sources:
         return [], {"source_area_m2": 0.0, "output_area_m2": 0.0,
                     "invented_area_m2": 0.0,
@@ -2107,9 +2125,16 @@ def _candidate_shape(polygons: Sequence[Polygon], block: Polygon,
             continue
     output_area = float(sum(polygon.area for polygon in result))
     output_union = _safe_union(result)
-    supported_area = (
-        float(_safe_intersection(output_union, source_union).area)
-        if result and not source_union.is_empty else 0.0)
+    if result and not source_union.is_empty:
+        if clearance_audit.get("exact_union_after_clearance", True):
+            supported_area = float(_safe_intersection(
+                output_union, source_union).area)
+        else:
+            supported_area = min(
+                output_area,
+                float(clearance_audit["source_after_clearance_area_m2"]))
+    else:
+        supported_area = 0.0
     clearance_audit["output_supported_source_area_m2"] = supported_area
     return result, {
         "source_clearance_audit": clearance_audit,

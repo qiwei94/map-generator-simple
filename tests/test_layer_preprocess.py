@@ -72,6 +72,32 @@ def test_city_scale_water_demotes_named_pond_but_keeps_main_surfaces():
     assert evidence["isolated_polygon_drops"] == 1
 
 
+def test_city_scale_water_keeps_split_unnamed_river_surfaces():
+    water = gpd.GeoDataFrame({
+        "name": [None, None, None],
+        "natural": ["water"] * 3,
+        "water": ["river", "river", "pond"],
+        "waterway": [None, None, None],
+        "geometry": [
+            box(1000, 1000, 1300, 1200),  # 60,000 m², printable river piece
+            box(1300, 1000, 1600, 1200),  # adjacent piece of the same river
+            box(3000, 3000, 3300, 3200),  # same area, ordinary pond
+        ],
+    }, geometry="geometry", crs="EPSG:3857")
+
+    wl, wo, lines, evidence = _extract_WL_WO(
+        water,
+        nozzle_real_m=50.0,
+        bbox_local=(0, 0, 25000, 25000),
+    )
+
+    assert len(wl) == 2
+    assert len(wo) == 0
+    assert lines == []
+    assert evidence["factual_corridor_surface_keeps"] == 2
+    assert evidence["ordinary_polygon_drops"] == 1
+
+
 def test_materialized_water_is_clipped_to_finished_frame():
     clipped, evidence = _clip_polygons_to_bbox(
         [box(-20, 10, 40, 90), box(80, 20, 130, 70)],

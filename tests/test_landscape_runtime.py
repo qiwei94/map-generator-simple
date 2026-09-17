@@ -62,3 +62,16 @@ def test_building_omission_requires_active_landscape_and_keeps_water_gate():
     with pytest.raises(ValueError):
         evaluate_feature_survival({'buildings': 431}, {},
             intentional_omissions=['buildings'], scene_policy={**policy, 'activation': 'audit_only'})
+
+
+def test_road_omission_requires_active_landscape_and_keeps_water_gate():
+    import pytest
+    from aesthetic.pipeline_gates import evaluate_feature_survival
+    policy = {'activation': 'active', 'landscape_strategy': {'enabled': True}}
+    result = evaluate_feature_survival({'roads': 2, 'water': 1}, {'WL': 1},
+        intentional_omissions=['roads'], scene_policy=policy)
+    assert result['passed']
+    assert result['roles']['roads']['status'] == 'intentionally_omitted'
+    with pytest.raises(ValueError):
+        evaluate_feature_survival({'roads': 2}, {}, intentional_omissions=['roads'],
+            scene_policy={**policy, 'activation': 'audit_only'})

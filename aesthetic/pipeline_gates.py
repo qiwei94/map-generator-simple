@@ -48,11 +48,11 @@ def evaluate_feature_survival(
     from aesthetic.landscape_runtime import is_active_landscape
     allowed = set(ALLOWED_INTENTIONAL_OMISSIONS)
     if is_active_landscape(scene_policy or {}):
-        allowed.add('buildings')
+        allowed.update({'buildings', 'roads'})
     unsupported = omitted - allowed
     if unsupported:
         raise ValueError(
-            "only vegetation may be intentionally omitted; unsupported: "
+            "unsupported intentional feature omission: "
             + ", ".join(sorted(unsupported))
         )
     source = normalize_feature_source_counts(source_feature_counts)
@@ -100,8 +100,11 @@ def evaluate_feature_survival(
         "source_counts_fingerprint": feature_source_counts_fingerprint(source),
         "passed": not errors,
         "intentional_omissions": sorted(omitted),
-        "omission_basis": ({'buildings': 'active_landscape_policy'}
-                           if 'buildings' in omitted else {}),
+        "omission_basis": {
+            family: ('active_landscape_policy' if family in {'buildings', 'roads'}
+                     else 'explicit_layer_disable')
+            for family in sorted(omitted)
+        },
         "roles": roles,
         "errors": errors,
     }

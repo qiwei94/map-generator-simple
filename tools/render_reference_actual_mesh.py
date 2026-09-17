@@ -35,7 +35,7 @@ def raster_library():
     return target
 
 
-def meshes_from_file(path, reference=False):
+def meshes_from_file(path, reference=False, include_names=None):
     with ZipFile(path) as archive:
         root = ET.fromstring(archive.read('3D/3dmodel.model'))
         objects = {e.attrib['id']: e for e in root.iter() if local(e.tag) == 'object'}
@@ -51,6 +51,9 @@ def meshes_from_file(path, reference=False):
                 source = next(v for k,v in e.attrib.items() if local(k) == 'path').lstrip('/')
                 wanted.setdefault(source, set()).add(oid)
         volumes = _volume_settings(archive)
+        if include_names is not None:
+            wanted = {source: {oid for oid in ids if volumes.get(oid, {}).get('name') in include_names}
+                      for source, ids in wanted.items()}
         raw = []
         for source, ids in wanted.items():
             with archive.open(source) as stream:

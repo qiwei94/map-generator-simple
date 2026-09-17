@@ -98,9 +98,25 @@ def test_only_explicitly_disabled_feature_family_may_be_omitted():
 
 @pytest.mark.parametrize("family", ["roads", "water", "buildings"])
 def test_structural_feature_families_cannot_be_declared_omitted(family):
-    with pytest.raises(ValueError, match="only vegetation"):
+    with pytest.raises(ValueError, match="unsupported intentional"):
         evaluate_feature_survival(
             {family: 12}, {}, intentional_omissions=(family,))
+
+
+def test_active_landscape_may_explicitly_omit_roads_and_buildings():
+    result = evaluate_feature_survival(
+        {"roads": 2, "buildings": 4, "water": 1},
+        {"roads": 0, "BL": 0, "BO": 0, "WL": 1, "WO": 0},
+        intentional_omissions=("roads", "buildings"),
+        scene_policy={
+            "activation": "active",
+            "landscape_strategy": {"enabled": True},
+        },
+    )
+
+    assert result["passed"] is True
+    assert result["roles"]["roads"]["status"] == "intentionally_omitted"
+    assert result["roles"]["buildings"]["status"] == "intentionally_omitted"
 
 
 def test_binary_survival_does_not_claim_retention_quality():

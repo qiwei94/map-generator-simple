@@ -1411,9 +1411,11 @@ def run_s8_mesh_materialization(
     final_counts = final_layer_counts(layers)
     omissions = ("vegetation",) if not vegetation_enabled else ()
     from aesthetic.landscape_runtime import is_active_landscape
-    if (is_active_landscape(context.scene_policy)
-            and not final_counts.get('BL') and not final_counts.get('BO')):
-        omissions += ('buildings',)
+    if is_active_landscape(context.scene_policy):
+        if not final_counts.get('BL') and not final_counts.get('BO'):
+            omissions += ('buildings',)
+        if not final_counts.get('roads'):
+            omissions += ('roads',)
     source_counts = dict(source_feature_counts)
     source_fingerprint = feature_source_counts_fingerprint(source_counts)
     if source_fingerprint != context.runtime.fingerprints.source_feature_counts:

@@ -62,6 +62,7 @@ def _uuid4() -> str:
 # （reference mesh 1 + mesh 2 都用 E1 米白色，我们合成一个）。
 _SUB_MESH_DEFS: list[Tuple[int, str, str, int]] = [
     (1, "terrain",     TERRAIN_COLOR,    EXTRUDER_MAP["terrain"]),       # E1 灰（含底盖）
+    (8, "snowcap",     "#FFFFFF",       1),                              # E1 白：自然景观可变厚度顶涂
     (2, "buildings",   BUILDING_COLOR,   EXTRUDER_MAP["buildings"]),     # E1 灰（block_fill 街区填充，融入 terrain）
     (3, "roads",       ROAD_COLOR,       EXTRUDER_MAP["roads"]),         # E2 黑
     (4, "water",       WATER_COLOR,      EXTRUDER_MAP["water"]),         # E3 黑

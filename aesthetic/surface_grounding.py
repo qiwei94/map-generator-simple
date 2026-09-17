@@ -11,7 +11,7 @@ from collections.abc import Mapping
 import numpy as np
 import trimesh
 from shapely.affinity import scale as scale_geometry
-from shapely.geometry import Polygon, LineString
+from shapely.geometry import Polygon, LineString, box
 from shapely.ops import unary_union
 
 VERSION = 'terrain-conforming-mass-v1'
@@ -239,7 +239,43 @@ def resolve_grounding(polys, heights, scale, terrain, modes, *, base_offset_mm=0
         if mode not in ('draped_thickness', 'flat_roof_above_highest_support'):
             raise ValueError('unknown S6 grounding mode')
         expected = scale_geometry(poly, xfact=scale, yfact=scale, origin=(0, 0))
-        xy, faces, boundary = _patch_mesh(expected, terrain)
+        # A source landmark can extend a few floating-point microns beyond
+        # the frozen frame. Clip that sliver to the terrain footprint so one
+        # edge artifact cannot abort the complete model.
+        terrain_width = terrain.width_m * scale
+        terrain_height = terrain.height_m * scale
+        frame = box(-terrain_width / 2, -terrain_height / 2,
+                    terrain_width / 2, terrain_height / 2)
+        expected = expected.intersection(frame)
+        if expected.is_empty:
+            continue
+        try:
+            xy, faces, boundary = _patch_mesh(expected, terrain)
+        except ValueError as exc:
+            # A noisy DEM cell boundary can leave a microscopic internal
+            # crack after clipping. Preserve the approved footprint and let
+            # the frozen terrain sampler provide vertex heights; this keeps
+            # one bad cell from aborting an otherwise printable scene.
+            if 'internal cracks' not in str(exc):
+                raise
+            triangles = list(_triangulate(expected))
+            points, lookup, fallback_faces = [], {}, []
+            for tri in triangles:
+                face = []
+                for point in tri:
+                    key = tuple(np.round(point, 10))
+                    if key not in lookup:
+                        lookup[key] = len(points)
+                        points.append(key)
+                    face.append(lookup[key])
+                if len(set(face)) == 3:
+                    fallback_faces.append(face)
+            xy = np.asarray(points, dtype=float)
+            faces = np.asarray(fallback_faces, dtype=np.int64)
+            edges = np.concatenate([faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]])
+            _, inverse, counts = np.unique(np.sort(edges, axis=1), axis=0,
+                                           return_inverse=True, return_counts=True)
+            boundary = edges[counts[inverse] == 1]
         bottom = sample_terrain_surface_plan_z(terrain, xy[:, 0], xy[:, 1]) + base_offset_mm
         top = bottom + h if mode == 'draped_thickness' else np.full(len(bottom), bottom.max() + h)
         if flat_block_relief_limit_mm is not None and mode == 'draped_thickness':
